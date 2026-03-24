@@ -1,0 +1,22 @@
+{
+  "name": "bebocard-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "sandbox": "npx ampx sandbox",
+    "pipeline-deploy": "npx ampx pipeline-deploy",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-amplify/backend": "^1.18.0",
+    "@aws-amplify/backend-cli": "^1.8.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "firebase-admin": "^12.0.0",
+    "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/aws-lambda": "^8.10.0"
+  }
+}

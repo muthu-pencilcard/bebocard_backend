@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Amplify generated outputs (contain deployed resource ARNs/endpoints)
+amplify_outputs.json
+amplify/generated/
+
+# CDK / Amplify build artifacts
+cdk.out/
+.amplify/
+dist/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

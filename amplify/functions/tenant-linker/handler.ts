@@ -1,0 +1,307 @@
+/**
+ * tenant-linker — REST Lambda (HTTP API)
+ *
+ * Handles the two phases of loyalty program OAuth:
+ *
+ * GET  /auth/link/{brandId}      — Initiate: redirect user to brand's OAuth page
+ * GET  /auth/callback/{brandId}  — Callback: exchange code → fetch card → store → redirect to success
+ *
+ * Supported brands (phase 1):
+ *  - woolworths  (Everyday Rewards)
+ *  - flybuys     (Coles Group)
+ *  - velocity    (Virgin Australia)
+ *  - qantas      (Qantas Frequent Flyer)
+ *
+ * Card number is stored in UserDataEvent via the same CARD# key pattern as card-manager.
+ * The SCAN index is updated so POS Lambdas can look up the card at checkout.
+ */
+
+import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
+
+const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+const USER_TABLE = process.env.USER_TABLE!;
+const ADMIN_TABLE = process.env.ADMIN_TABLE!;
+const APP_SUCCESS_URL = process.env.APP_SUCCESS_URL ?? 'https://bebocard.app/link-success';
+const APP_FAILURE_URL = process.env.APP_FAILURE_URL ?? 'https://bebocard.app/link-failed';
+const BASE_URL = process.env.API_BASE_URL!; // e.g. https://api.bebocard.app
+
+// ---------------------------------------------------------------------------
+// Brand OAuth config — add real client IDs / scopes from env per brand
+// ---------------------------------------------------------------------------
+
+interface BrandOAuthConfig {
+  displayName: string;
+  color: string;
+  authUrl: string;       // brand's OAuth authorization endpoint
+  tokenUrl: string;      // brand's OAuth token endpoint
+  cardApiUrl: string;    // brand's API endpoint to fetch card number post-auth
+  clientIdEnv: string;   // env var name holding this brand's client_id
+  scopes: string;
+}
+
+const BRAND_CONFIG: Record<string, BrandOAuthConfig> = {
+  woolworths: {
+    displayName: 'Woolworths Everyday Rewards',
+    color: '#00AA46',
+    authUrl: 'https://api.woolworthsrewards.com.au/wx/v1/oauth2/authorize',
+    tokenUrl: 'https://api.woolworthsrewards.com.au/wx/v1/oauth2/token',
+    cardApiUrl: 'https://api.woolworthsrewards.com.au/wx/v1/rewards/member/card',
+    clientIdEnv: 'WOOLWORTHS_CLIENT_ID',
+    scopes: 'openid profile card',
+  },
+  flybuys: {
+    displayName: 'Flybuys',
+    color: '#C8102E',
+    authUrl: 'https://secure.flybuys.com.au/oauth2/authorize',
+    tokenUrl: 'https://secure.flybuys.com.au/oauth2/token',
+    cardApiUrl: 'https://api.flybuys.com.au/v1/member/card',
+    clientIdEnv: 'FLYBUYS_CLIENT_ID',
+    scopes: 'openid member:read',
+  },
+  velocity: {
+    displayName: 'Velocity Frequent Flyer',
+    color: '#E2231A',
+    authUrl: 'https://identity.velocityfrequentflyer.com/oauth2/authorize',
+    tokenUrl: 'https://identity.velocityfrequentflyer.com/oauth2/token',
+    cardApiUrl: 'https://api.velocityfrequentflyer.com/v1/member/profile',
+    clientIdEnv: 'VELOCITY_CLIENT_ID',
+    scopes: 'openid profile:read',
+  },
+  qantas: {
+    displayName: 'Qantas Frequent Flyer',
+    color: '#E40000',
+    authUrl: 'https://api.qantasfreqflyer.com/oauth2/authorize',
+    tokenUrl: 'https://api.qantasfreqflyer.com/oauth2/token',
+    cardApiUrl: 'https://api.qantasfreqflyer.com/v1/member',
+    clientIdEnv: 'QANTAS_CLIENT_ID',
+    scopes: 'openid member:read',
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
+export const handler: APIGatewayProxyHandlerV2 = async (event) => {
+  const path = event.rawPath ?? '';
+  const params = event.queryStringParameters ?? {};
+
+  try {
+    // GET /auth/link/{brandId}?state=<permULID>
+    const linkMatch = path.match(/\/auth\/link\/([a-z]+)$/);
+    if (linkMatch) {
+      return initiateOAuth(linkMatch[1], params.state ?? '');
+    }
+
+    // GET /auth/callback/{brandId}?code=...&state=<permULID>
+    const callbackMatch = path.match(/\/auth\/callback\/([a-z]+)$/);
+    if (callbackMatch) {
+      return handleCallback(callbackMatch[1], params.code ?? '', params.state ?? '');
+    }
+
+    return { statusCode: 404, body: 'Not found' };
+  } catch (err) {
+    console.error('tenant-linker error', err);
+    return redirect(`${APP_FAILURE_URL}?reason=server_error`);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Phase 1 — Initiate OAuth
+// ---------------------------------------------------------------------------
+
+function initiateOAuth(brandId: string, permULID: string) {
+  const cfg = BRAND_CONFIG[brandId];
+  if (!cfg) return { statusCode: 400, body: `Unknown brand: ${brandId}` };
+  if (!permULID) return { statusCode: 400, body: 'Missing state (permULID)' };
+
+  const clientId = process.env[cfg.clientIdEnv];
+  if (!clientId) return { statusCode: 503, body: 'Brand integration not configured' };
+
+  const redirectUri = encodeURIComponent(`${BASE_URL}/auth/callback/${brandId}`);
+  const scope = encodeURIComponent(cfg.scopes);
+  // state = permULID so callback can write to the right user record
+  const authUrl = `${cfg.authUrl}?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${permULID}`;
+
+  return redirect(authUrl);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — OAuth Callback
+// ---------------------------------------------------------------------------
+
+async function handleCallback(brandId: string, code: string, permULID: string) {
+  const cfg = BRAND_CONFIG[brandId];
+  if (!cfg || !code || !permULID) {
+    return redirect(`${APP_FAILURE_URL}?reason=invalid_params`);
+  }
+
+  const clientId = process.env[cfg.clientIdEnv];
+  const clientSecret = process.env[`${cfg.clientIdEnv.replace('_CLIENT_ID', '')}_CLIENT_SECRET`];
+  if (!clientId || !clientSecret) {
+    return redirect(`${APP_FAILURE_URL}?reason=not_configured`);
+  }
+
+  // Exchange code for access token
+  const redirectUri = `${BASE_URL}/auth/callback/${brandId}`;
+  const tokenRes = await fetch(cfg.tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+    },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+    }).toString(),
+  });
+
+  if (!tokenRes.ok) {
+    console.error('Token exchange failed', await tokenRes.text());
+    return redirect(`${APP_FAILURE_URL}?reason=token_exchange_failed`);
+  }
+
+  const tokenData = await tokenRes.json() as { access_token: string };
+
+  // Fetch card number from brand's member API
+  const cardRes = await fetch(cfg.cardApiUrl, {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  });
+
+  if (!cardRes.ok) {
+    console.error('Card fetch failed', await cardRes.text());
+    return redirect(`${APP_FAILURE_URL}?reason=card_fetch_failed`);
+  }
+
+  const cardData = await cardRes.json() as Record<string, unknown>;
+  const cardNumber = extractCardNumber(brandId, cardData);
+
+  if (!cardNumber) {
+    return redirect(`${APP_FAILURE_URL}?reason=card_not_found`);
+  }
+
+  // Store in UserDataEvent
+  await storeLinkedCard(permULID, brandId, cardNumber, cfg.displayName, cfg.color);
+
+  // Redirect to success deep-link that Flutter WebView intercepts
+  return redirect(`${APP_SUCCESS_URL}?brand=${brandId}&linked=true`);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Extract card number from each brand's API response shape */
+function extractCardNumber(brandId: string, data: Record<string, unknown>): string | null {
+  switch (brandId) {
+    case 'woolworths':
+      return (data.cardNumber ?? data.card_number ?? data.rewardsCardNumber) as string ?? null;
+    case 'flybuys':
+      return (data.cardNumber ?? data.flybuysCardNumber ?? data.memberNumber) as string ?? null;
+    case 'velocity':
+      return (data.velocityNumber ?? data.memberNumber ?? data.frequentFlyerNumber) as string ?? null;
+    case 'qantas':
+      return (data.frequentFlyerNumber ?? data.memberNumber ?? data.qffNumber) as string ?? null;
+    default:
+      return null;
+  }
+}
+
+async function storeLinkedCard(
+  permULID: string,
+  brandId: string,
+  cardNumber: string,
+  brandName: string,
+  brandColor: string,
+) {
+  const now = new Date().toISOString();
+  const cardSK = `CARD#${brandId}#${cardNumber}`;
+
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: cardSK,
+      eventType: 'CARD',
+      status: 'ACTIVE',
+      primaryCat: 'loyalty_card',
+      subCategory: brandId,
+      desc: JSON.stringify({
+        brandId,
+        brandName,
+        brandColor,
+        cardNumber,
+        cardLabel: brandName,
+        isCustom: false,
+        isLinked: true,          // marks this card as OAuth-linked (not manually added)
+        linkedAt: now,
+        pointsBalance: 0,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+    ConditionExpression: 'attribute_not_exists(sK)',
+  }).catch(() => {
+    // Card already exists — update the linkedAt timestamp instead
+    return dynamo.send(new UpdateCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: cardSK },
+      UpdateExpression: 'SET #s = :active, updatedAt = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':active': 'ACTIVE', ':now': now },
+    }));
+  }));
+
+  // Update SCAN index
+  await appendToScanIndex(permULID, brandId, cardNumber);
+}
+
+async function appendToScanIndex(permULID: string, brandId: string, cardId: string) {
+  const identity = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+  }));
+  // secondaryULID is a top-level attribute on the IDENTITY record, not inside desc
+  const secondaryULID = identity.Item?.secondaryULID as string | undefined;
+  if (!secondaryULID) return;
+
+  // sK of the SCAN index record is permULID, not the constant 'INDEX'
+  const indexRecord = await dynamo.send(new GetCommand({
+    TableName: ADMIN_TABLE,
+    Key: { pK: `SCAN#${secondaryULID}`, sK: permULID },
+  }));
+  const indexDesc = JSON.parse(indexRecord.Item?.desc ?? '{}') as { cards?: unknown[] };
+  const existing = (indexDesc.cards ?? []) as Array<{ brand: string; cardId: string; isDefault: boolean }>;
+
+  // Keep other brands; replace any existing card for this brand with the new one
+  const otherCards = existing.filter(c => c.brand !== brandId);
+  const isFirst = existing.filter(c => c.brand === brandId).length === 0;
+  const updatedCards = [...otherCards, { brand: brandId, cardId, isDefault: isFirst }];
+
+  await dynamo.send(new UpdateCommand({
+    TableName: ADMIN_TABLE,
+    Key: { pK: `SCAN#${secondaryULID}`, sK: permULID },
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    ExpressionAttributeValues: {
+      ':desc': JSON.stringify({ ...indexDesc, cards: updatedCards }),
+      ':now': new Date().toISOString(),
+    },
+  }));
+}
+
+function redirect(url: string) {
+  return {
+    statusCode: 302,
+    headers: { Location: url },
+    body: '',
+  };
+}
