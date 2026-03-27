@@ -31,8 +31,8 @@ export const handler: DynamoDBStreamHandler = async (event) => {
 
     if (!pk.startsWith('USER#') || !sk.startsWith('RECEIPT#')) continue;
 
-    const permULID  = pk.replace('USER#', '');
-    const brandId   = newImage['subCategory']?.S;
+    const permULID = pk.replace('USER#', '');
+    const brandId = newImage['subCategory']?.S;
 
     if (!brandId) continue;   // receipt not associated with a brand — skip
 
@@ -54,16 +54,16 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
 
   do {
     const res = await dynamo.send(new QueryCommand({
-      TableName:                 USER_TABLE,
-      KeyConditionExpression:    'pK = :pk AND begins_with(sK, :prefix)',
+      TableName: USER_TABLE,
+      KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
       // Exclude ARCHIVED receipts (soft-deleted via card-manager/archiveRecord) so
       // removed receipts don't inflate totalSpend or visitCount.
-      FilterExpression:          'subCategory = :brand AND #status = :active',
-      ExpressionAttributeNames:  { '#status': 'status' },
+      FilterExpression: 'subCategory = :brand AND #status = :active',
+      ExpressionAttributeNames: { '#status': 'status' },
       ExpressionAttributeValues: {
-        ':pk':     `USER#${permULID}`,
+        ':pk': `USER#${permULID}`,
         ':prefix': 'RECEIPT#',
-        ':brand':  brandId,
+        ':brand': brandId,
         ':active': 'ACTIVE',
       },
       ExclusiveStartKey: lastKey,
@@ -72,7 +72,7 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
     for (const item of res.Items ?? []) {
       const desc = parseDesc(item.desc);
       if (typeof desc.amount === 'number') {
-        receipts.push({ amount: desc.amount, purchaseDate: desc.purchaseDate ?? '' });
+        receipts.push({ amount: desc.amount as number, purchaseDate: (desc.purchaseDate as string) ?? '' });
       }
     }
     lastKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
@@ -91,20 +91,20 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
   const totalSpend = receipts.reduce((sum, r) => sum + r.amount, 0);
   const visitCount = receipts.length;
   const sortedDates = receipts.map(r => r.purchaseDate).filter(Boolean).sort();
-  const lastVisit   = sortedDates[sortedDates.length - 1] ?? '';
+  const lastVisit = sortedDates[sortedDates.length - 1] ?? '';
 
   const lastVisitDaysAgo = lastVisit
     ? Math.floor((Date.now() - new Date(lastVisit).getTime()) / 86_400_000)
     : 9999;
 
   const desc = {
-    spendBucket:    toSpendBucket(totalSpend),
+    spendBucket: toSpendBucket(totalSpend),
     visitFrequency: toVisitFrequency(visitCount, lastVisitDaysAgo),
-    totalSpend:     Math.round(totalSpend * 100) / 100,
+    totalSpend: Math.round(totalSpend * 100) / 100,
     visitCount,
     lastVisit,
-    persona:        [] as string[],   // Phase 3: ML classification
-    computedAt:     new Date().toISOString(),
+    persona: [] as string[],   // Phase 3: ML classification
+    computedAt: new Date().toISOString(),
     subscribed,
   };
 
@@ -112,14 +112,14 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,
     Item: {
-      pK:          `USER#${permULID}`,
-      sK:          `SEGMENT#${brandId}`,
-      eventType:   'SEGMENT',
-      status:      'ACTIVE',
-      primaryCat:  'segment',
+      pK: `USER#${permULID}`,
+      sK: `SEGMENT#${brandId}`,
+      eventType: 'SEGMENT',
+      status: 'ACTIVE',
+      primaryCat: 'segment',
       subCategory: brandId,
-      desc:        JSON.stringify(desc),
-      updatedAt:   new Date().toISOString(),
+      desc: JSON.stringify(desc),
+      updatedAt: new Date().toISOString(),
     },
   }));
 }
@@ -144,7 +144,7 @@ function toVisitFrequency(
   lastVisitDaysAgo: number,
 ): 'new' | 'occasional' | 'frequent' | 'lapsed' {
   if (lastVisitDaysAgo > 180) return 'lapsed';
-  if (count < 3)              return 'new';
+  if (count < 3) return 'new';
   if (count >= 12 && lastVisitDaysAgo <= 90) return 'frequent';
   return 'occasional';
 }

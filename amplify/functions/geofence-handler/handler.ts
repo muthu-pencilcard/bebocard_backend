@@ -45,10 +45,10 @@ export const handler = withGraphQLHandler(async (event) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const a = args as any;
   switch (fieldName) {
-    case 'reportGeofenceEntry':   return reportGeofenceEntry(a);
-    case 'registerDeviceToken':   return registerDeviceToken(a);
+    case 'reportGeofenceEntry': return reportGeofenceEntry(a);
+    case 'registerDeviceToken': return registerDeviceToken(a);
     case 'unregisterDeviceToken': return unregisterDeviceToken(a);
-    case 'getNearbyStores':       return getNearbyStores(a);
+    case 'getNearbyStores': return getNearbyStores(a);
     default:
       throw new Error(`Unknown field: ${fieldName}`);
   }
@@ -87,18 +87,22 @@ async function reportGeofenceEntry(args: {
 
   // 1. Write the visit event (used for frequency calculation)
   const visitSK = `VISIT#${brandId}#${entryTime}`;
-  await ddb.send(new PutItemCommand({
-    TableName: USER_TABLE,
-    Item: marshall({
-      pK,
-      sK: visitSK,
-      primaryCat: 'store_visit',
-      status: 'ACTIVE',
-      desc: JSON.stringify({ brandId, storeId, geofenceId, entryTime }),
-      createdAt: entryTime,
-    }),
-    ConditionExpression: 'attribute_not_exists(sK)', // idempotent
-  }).catch(() => null)); // ignore ConditionCheckFailedException (duplicate entry)
+  try {
+    await ddb.send(new PutItemCommand({
+      TableName: USER_TABLE,
+      Item: marshall({
+        pK,
+        sK: visitSK,
+        primaryCat: 'store_visit',
+        status: 'ACTIVE',
+        desc: JSON.stringify({ brandId, storeId, geofenceId, entryTime }),
+        createdAt: entryTime,
+      }),
+      ConditionExpression: 'attribute_not_exists(sK)', // idempotent
+    }));
+  } catch {
+    // ignore ConditionCheckFailedException (duplicate entry)
+  }
 
   // 2. Count visits this month for this brand
   const monthPrefix = entryTime.substring(0, 7); // "YYYY-MM"
@@ -233,7 +237,7 @@ async function getNearbyStores(args: {
     }),
   }));
 
-  type StoreRow = { sK: string; desc: string; [k: string]: unknown };
+  type StoreRow = { sK: string; desc: string;[k: string]: unknown };
   const stores = (result.Items ?? []).map((i: Record<string, AttributeValue>) => unmarshall(i) as StoreRow);
 
   // Filter by haversine distance

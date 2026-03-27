@@ -11,52 +11,52 @@ import { withAuditLog } from '../../shared/audit-logger';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-const USER_TABLE    = process.env.USER_TABLE!;
+const USER_TABLE = process.env.USER_TABLE!;
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
-const MIN_COHORT    = parseInt(process.env.MIN_COHORT_THRESHOLD ?? '50', 10);
+const MIN_COHORT = parseInt(process.env.MIN_COHORT_THRESHOLD ?? '50', 10);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface TenantRecord {
-  tenantId:            string;
-  tenantName:          string;
-  brandIds:            string[];          // allowlisted brandIds for this tenant
-  allowedScopes:       TenantScope[];
-  minCohortThreshold:  number;
-  rateLimit:           number;
-  status:              'ACTIVE' | 'REVOKED';
+  tenantId: string;
+  tenantName: string;
+  brandIds: string[];          // allowlisted brandIds for this tenant
+  allowedScopes: TenantScope[];
+  minCohortThreshold: number;
+  rateLimit: number;
+  status: 'ACTIVE' | 'REVOKED';
 }
 
 type TenantScope = 'segments' | 'receipts_aggregate' | 'subscriber_count';
 
 interface ValidatedTenant {
-  tenantId:           string;
-  brandIds:           string[];
-  allowedScopes:      TenantScope[];
+  tenantId: string;
+  brandIds: string[];
+  allowedScopes: TenantScope[];
   minCohortThreshold: number;
 }
 
 // Stored in UserDataEvent sK: SEGMENT#<brandId>
 interface SegmentDesc {
-  spendBucket:    '<100' | '100-200' | '200-500' | '500+';
+  spendBucket: '<100' | '100-200' | '200-500' | '500+';
   visitFrequency: 'new' | 'occasional' | 'frequent' | 'lapsed';
-  totalSpend:     number;
-  visitCount:     number;
-  lastVisit:      string;
-  persona:        string[];
-  computedAt:     string;
+  totalSpend: number;
+  visitCount: number;
+  lastVisit: string;
+  persona: string[];
+  computedAt: string;
   // Written by segment-processor from SUBSCRIPTION#<brandId> at segment compute time
   // so analytics can enforce the consent gate without a per-user join.
-  subscribed:     boolean;
+  subscribed: boolean;
 }
 
 interface SegmentsResponse {
-  brandId:           string;
-  period:            string;
-  cohortSize:        number;
-  subscriberCount:   number;
+  brandId: string;
+  period: string;
+  cohortSize: number;
+  subscriberCount: number;
   spendDistribution: Record<string, number>;
-  visitFrequency:    Record<string, number>;
+  visitFrequency: Record<string, number>;
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -109,13 +109,13 @@ async function handleSegments(
   event: Parameters<APIGatewayProxyHandler>[0],
   headers: Record<string, string>,
   tenant: ValidatedTenant,
-): Promise<ReturnType<APIGatewayProxyHandler>> {
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
   if (!tenant.allowedScopes.includes('segments')) {
     return { statusCode: 403, headers, body: JSON.stringify({ error: 'Scope not permitted' }) };
   }
 
   const brandId = event.queryStringParameters?.['brandId'];
-  const period  = event.queryStringParameters?.['period'] ?? currentPeriod();
+  const period = event.queryStringParameters?.['period'] ?? currentPeriod();
 
   if (!brandId) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'brandId is required' }) };
@@ -135,12 +135,12 @@ async function handleSegments(
 
   do {
     const res = await dynamo.send(new QueryCommand({
-      TableName:                 USER_TABLE,
-      IndexName:                 'sK-pK-index',
-      KeyConditionExpression:    'sK = :sk',
+      TableName: USER_TABLE,
+      IndexName: 'sK-pK-index',
+      KeyConditionExpression: 'sK = :sk',
       ExpressionAttributeValues: { ':sk': segmentSK },
-      ExclusiveStartKey:         lastKey,
-      Limit:                     1000,
+      ExclusiveStartKey: lastKey,
+      Limit: 1000,
     }));
     for (const item of res.Items ?? []) {
       items.push(item as { desc: string });
@@ -149,10 +149,10 @@ async function handleSegments(
   } while (lastKey);
 
   // Aggregate — only subscribed users (consent gate)
-  const spendCounts:   Record<string, number> = { '<100': 0, '100-200': 0, '200-500': 0, '500+': 0 };
-  const visitCounts:   Record<string, number> = { new: 0, occasional: 0, frequent: 0, lapsed: 0 };
+  const spendCounts: Record<string, number> = { '<100': 0, '100-200': 0, '200-500': 0, '500+': 0 };
+  const visitCounts: Record<string, number> = { new: 0, occasional: 0, frequent: 0, lapsed: 0 };
   let subscriberCount = 0;
-  let totalInCohort   = 0;
+  let totalInCohort = 0;
 
   for (const item of items) {
     let seg: Partial<SegmentDesc>;
@@ -162,7 +162,7 @@ async function handleSegments(
     if (!seg.subscribed) continue;     // consent gate — skip non-subscribers
 
     subscriberCount++;
-    if (seg.spendBucket)    spendCounts[seg.spendBucket]    = (spendCounts[seg.spendBucket]    ?? 0) + 1;
+    if (seg.spendBucket) spendCounts[seg.spendBucket] = (spendCounts[seg.spendBucket] ?? 0) + 1;
     if (seg.visitFrequency) visitCounts[seg.visitFrequency] = (visitCounts[seg.visitFrequency] ?? 0) + 1;
   }
 
@@ -176,19 +176,19 @@ async function handleSegments(
         brandId,
         period,
         suppressed: true,
-        reason:     `Cohort below minimum threshold of ${threshold}`,
+        reason: `Cohort below minimum threshold of ${threshold}`,
       }),
     };
   }
 
   // Convert counts to proportions
   const spendDistribution = normalise(spendCounts, subscriberCount);
-  const visitFrequency    = normalise(visitCounts,  subscriberCount);
+  const visitFrequency = normalise(visitCounts, subscriberCount);
 
   const response: SegmentsResponse = {
     brandId,
     period,
-    cohortSize:       totalInCohort,
+    cohortSize: totalInCohort,
     subscriberCount,
     spendDistribution,
     visitFrequency,
@@ -213,19 +213,19 @@ async function validateTenantApiKey(rawKey: string): Promise<ValidatedTenant | n
   if (!rawKey?.startsWith('bebo_')) return null;
 
   const withoutPrefix = rawKey.slice(5);
-  const dotIndex      = withoutPrefix.indexOf('.');
+  const dotIndex = withoutPrefix.indexOf('.');
   if (dotIndex === -1) return null;
 
-  const keyId   = withoutPrefix.slice(0, dotIndex);
+  const keyId = withoutPrefix.slice(0, dotIndex);
   const keyHash = createHash('sha256').update(rawKey).digest('hex');
 
   // Resolve via byKeyId GSI — same index used by brand key validation
   const res = await dynamo.send(new QueryCommand({
-    TableName:                 REFDATA_TABLE,
-    IndexName:                 'byKeyId',
-    KeyConditionExpression:    'keyId = :kid',
+    TableName: REFDATA_TABLE,
+    IndexName: 'byKeyId',
+    KeyConditionExpression: 'keyId = :kid',
     ExpressionAttributeValues: { ':kid': keyId },
-    Limit:                     1,
+    Limit: 1,
   }));
 
   const item = res.Items?.[0] as
@@ -244,10 +244,10 @@ async function validateTenantApiKey(rawKey: string): Promise<ValidatedTenant | n
   if (!timingSafeEqual(desc.keyHash, keyHash)) return null;
 
   return {
-    tenantId:           item.pK.replace('TENANT#', ''),
-    brandIds:           desc.brandIds           ?? [],
-    allowedScopes:      desc.allowedScopes       ?? [],
-    minCohortThreshold: desc.minCohortThreshold  ?? MIN_COHORT,
+    tenantId: item.pK.replace('TENANT#', ''),
+    brandIds: desc.brandIds ?? [],
+    allowedScopes: desc.allowedScopes ?? [],
+    minCohortThreshold: desc.minCohortThreshold ?? MIN_COHORT,
   };
 }
 

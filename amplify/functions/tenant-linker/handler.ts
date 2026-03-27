@@ -241,40 +241,42 @@ async function storeLinkedCard(
   const now = new Date().toISOString();
   const cardSK = `CARD#${brandId}#${cardNumber}`;
 
-  await dynamo.send(new PutCommand({
-    TableName: USER_TABLE,
-    Item: {
-      pK: `USER#${permULID}`,
-      sK: cardSK,
-      eventType: 'CARD',
-      status: 'ACTIVE',
-      primaryCat: 'loyalty_card',
-      subCategory: brandId,
-      desc: JSON.stringify({
-        brandId,
-        brandName,
-        brandColor,
-        cardNumber,
-        cardLabel: brandName,
-        isCustom: false,
-        isLinked: true,          // marks this card as OAuth-linked (not manually added)
-        linkedAt: now,
-        pointsBalance: 0,
-      }),
-      createdAt: now,
-      updatedAt: now,
-    },
-    ConditionExpression: 'attribute_not_exists(sK)',
-  }).catch(() => {
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: USER_TABLE,
+      Item: {
+        pK: `USER#${permULID}`,
+        sK: cardSK,
+        eventType: 'CARD',
+        status: 'ACTIVE',
+        primaryCat: 'loyalty_card',
+        subCategory: brandId,
+        desc: JSON.stringify({
+          brandId,
+          brandName,
+          brandColor,
+          cardNumber,
+          cardLabel: brandName,
+          isCustom: false,
+          isLinked: true,          // marks this card as OAuth-linked (not manually added)
+          linkedAt: now,
+          pointsBalance: 0,
+        }),
+        createdAt: now,
+        updatedAt: now,
+      },
+      ConditionExpression: 'attribute_not_exists(sK)',
+    }));
+  } catch {
     // Card already exists — update the linkedAt timestamp instead
-    return dynamo.send(new UpdateCommand({
+    await dynamo.send(new UpdateCommand({
       TableName: USER_TABLE,
       Key: { pK: `USER#${permULID}`, sK: cardSK },
       UpdateExpression: 'SET #s = :active, updatedAt = :now',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: { ':active': 'ACTIVE', ':now': now },
     }));
-  }));
+  }
 
   // Update SCAN index
   await appendToScanIndex(permULID, brandId, cardNumber);
