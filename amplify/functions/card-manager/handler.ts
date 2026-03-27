@@ -44,11 +44,14 @@ type Args = {
   items?: unknown;
   loyaltyCardSK?: string;
   photoKey?: string;
+  receiptSK?: string;
   // Granular subscriptions
   offers?: boolean;
   newsletters?: boolean;
   reminders?: boolean;
   catalogues?: boolean;
+  // Newsletters
+  newsletterSK?: string;
 };
 
 const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
@@ -77,8 +80,12 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     // Invoices
     case 'addInvoice': return addInvoice(permULID, args);
     case 'updateInvoiceStatus': return updateInvoiceStatus(permULID, args.invoiceSK!, args.status!, args.paidDate);
+    case 'removeInvoice': return archiveRecord(permULID, args.invoiceSK!);
     // Receipts
     case 'addReceipt': return addReceipt(permULID, args);
+    case 'removeReceipt': return archiveRecord(permULID, args.receiptSK!);
+    // Newsletters
+    case 'markNewsletterRead': return markNewsletterRead(permULID, args.newsletterSK!);
     default: throw new Error(`Unknown operation: ${operation}`);
   }
 };
@@ -128,8 +135,10 @@ async function addCard(permULID: string, args: Args) {
     ConditionExpression: 'attribute_not_exists(pK)', // prevent duplicates
   }));
 
-  // Update SCAN index for POS lookup (only for non-custom cards with known API)
-  if (!isCustom && brandProfile.apiEndpoint) {
+  // Update SCAN index for POS lookup for all non-custom cards.
+  // apiEndpoint presence is not required — the brand may not yet be live on the
+  // BeboCard scan API, but the card must be indexed so it works the moment they are.
+  if (!isCustom) {
     await _appendToScanIndex(permULID, {
       brand: brandId!,
       cardId: cardNumber!,
@@ -590,6 +599,17 @@ async function updateUserPreferences(permULID: string, reminders: Record<string,
 }
 
 // ── Legacy subscription toggle ─────────────────────────────────────────────────
+
+async function markNewsletterRead(permULID: string, newsletterSK: string) {
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: newsletterSK },
+    UpdateExpression: 'SET #s = :read, updatedAt = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':read': 'READ', ':now': new Date().toISOString() },
+  }));
+  return { success: true };
+}
 
 async function setSubscription(permULID: string, brandId: string, active: boolean) {
   const now = new Date().toISOString();

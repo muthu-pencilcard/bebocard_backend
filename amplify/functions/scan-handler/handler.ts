@@ -68,6 +68,10 @@ async function handleLoyaltyCheck(
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Missing required fields' }) };
   }
 
+  if (storeBrandLoyaltyName !== validKey.brandId) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Brand mismatch for API key' }) };
+  }
+
   // Query by pK only — sK is permULID (not a constant like 'INDEX')
   const scanQuery = await dynamo.send(new QueryCommand({
     TableName: ADMIN_TABLE,
@@ -83,7 +87,7 @@ async function handleLoyaltyCheck(
 
   const indexDesc = JSON.parse(scanItem.desc ?? '{}');
   const cards: Array<{ brand: string; cardId: string; isDefault: boolean }> = indexDesc.cards ?? [];
-  const brandCards = cards.filter(c => c.brand === storeBrandLoyaltyName);
+  const brandCards = cards.filter(c => c.brand === validKey.brandId);
 
   if (brandCards.length === 0) {
     return {
@@ -95,11 +99,32 @@ async function handleLoyaltyCheck(
 
   // Return the default card; fall back to the first if none is flagged
   const card = brandCards.find(c => c.isDefault) ?? brandCards[0];
+  const permULID: string = scanItem.sK;
+
+  // Fetch subscription consent + segment labels in parallel.
+  // Labels are only included in the response if SUBSCRIPTION#<brandId> is ACTIVE.
+  const [subRes, segRes] = await Promise.all([
+    dynamo.send(new GetCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${validKey.brandId}` },
+    })),
+    dynamo.send(new GetCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${validKey.brandId}` },
+    })),
+  ]);
+
+  const subscribed = !!subRes.Item && subRes.Item.status === 'ACTIVE';
+  const segDesc = subscribed && segRes.Item?.desc ? JSON.parse(segRes.Item.desc as string) : null;
 
   return {
     statusCode: 200,
     headers,
-    body: JSON.stringify({ hasLoyaltyCard: true, loyaltyId: card.cardId }),
+    body: JSON.stringify({
+      hasLoyaltyCard: true,
+      loyaltyId: card.cardId,
+      ...(segDesc ? { tier: segDesc.visitFrequency, spendBucket: segDesc.spendBucket } : {}),
+    }),
   };
 }
 
@@ -138,6 +163,10 @@ async function handleReceipt(
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Missing required fields' }) };
   }
 
+  if (body.brandId && body.brandId !== validKey.brandId) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Brand mismatch for API key' }) };
+  }
+
   // Resolve secondaryULID → permULID (sK of the SCAN index record IS the permULID)
   const scanQuery = await dynamo.send(new QueryCommand({
     TableName: ADMIN_TABLE,
@@ -154,6 +183,7 @@ async function handleReceipt(
   const permULID: string = scanItem.sK;
 
   // Save receipt
+  const brandId = validKey.brandId;
   const receiptSK = `RECEIPT#${purchaseDate.substring(0, 10)}#${ulid()}`;
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,
@@ -163,19 +193,22 @@ async function handleReceipt(
       eventType: 'RECEIPT',
       status: 'ACTIVE',
       primaryCat: 'receipt',
-      subCategory: body.brandId ?? body.category ?? 'other',
+      subCategory: brandId,
       desc: JSON.stringify({
         merchant,
         amount,
         currency: body.currency ?? 'AUD',
         purchaseDate,
-        brandId: body.brandId ?? null,
-        loyaltyCardId: body.loyaltyCardId ?? null,
-        pointsEarned: body.pointsEarned ?? null,
-        items: body.items ?? [],
-        category: body.category ?? 'other',
-        notes: body.notes ?? null,
-        source: 'brand_push',
+        brandId,
+        loyaltyCardId:  body.loyaltyCardId  ?? null,
+        pointsEarned:   body.pointsEarned   ?? null,
+        items:          body.items          ?? [],
+        category:       body.category       ?? 'other',
+        notes:          body.notes          ?? null,
+        source:         'brand_push',
+        // Presence of secondaryULID marks this receipt as POS-path (brand submitted).
+        // The receipt-iceberg-writer stream consumer uses this field to gate S3 writes.
+        secondaryULID,
       }),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -196,7 +229,7 @@ async function handleReceipt(
         data: {
           type: 'receipt',
           receiptSK,
-          brandId: body.brandId ?? '',
+          brandId,
           merchant,
           amount: String(amount),
         },

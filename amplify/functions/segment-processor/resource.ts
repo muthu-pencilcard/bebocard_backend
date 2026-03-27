@@ -1,0 +1,13 @@
+import { defineFunction } from '@aws-amplify/backend';
+
+export const segmentProcessorFn = defineFunction({
+  name: 'bebo-segment-processor',
+  entry: './handler.ts',
+  resourceGroupName: 'data',
+  environment: {
+    USER_TABLE: process.env.USER_TABLE ?? '',
+  },
+  // DynamoDB Streams trigger is wired in backend.ts using CDK escape hatch:
+  //   userTable.addEventSource(new DynamoDBEventSource(userTable, { ... }))
+  // Streams must also be enabled on the UserDataEvent table via CDK.
+});

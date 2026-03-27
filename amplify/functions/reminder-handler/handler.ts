@@ -1,11 +1,11 @@
 /**
  * reminder-handler — Scheduled Lambda (EventBridge cron)
  *
- * Fires daily at 9am AEST (21:00 UTC).
+ * Fires daily at 21:00 UTC.
  * Scans UserDataEvent for upcoming due dates and sends FCM reminders.
  * Writes sent-logs to AdminDataEvent to prevent duplicate pushes.
  *
- * EventBridge rule (wire in backend.ts):
+ * EventBridge rule (wired in backend.ts):
  *   cron(0 21 * * ? *)
  */
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';

@@ -2,7 +2,7 @@ import type { APIGatewayProxyHandler, APIGatewayProxyEvent } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
-  PutCommand, GetCommand, UpdateCommand, QueryCommand, ScanCommand,
+  PutCommand, GetCommand, UpdateCommand, QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
@@ -39,6 +39,11 @@ async function authGuard(
   event: APIGatewayProxyEvent,
   scope: ApiKeyScope,
 ): Promise<{ brandId: string } | null> {
+  // Direct Lambda invocation from the business portal — IAM auth is enforced at
+  // the Lambda resource policy level; no API key is used for internal calls.
+  const internalBrandId = (event as unknown as Record<string, string>)._internalBrandId;
+  if (internalBrandId) return { brandId: internalBrandId };
+
   const rawKey = extractApiKey(event.headers as Record<string, string>);
   if (!rawKey) return null;
   const validated = await validateApiKey(dynamo, rawKey, scope);
@@ -77,6 +82,14 @@ const _handler: APIGatewayProxyHandler = async (event) => {
     if (method === 'GET')  return listNewsletters(event, auth.brandId);
   }
 
+  // ── Catalogues ──────────────────────────────────────────────────────────────
+  if (path.includes('/catalogues')) {
+    const auth = await authGuard(event, 'catalogues');
+    if (!auth) return err(401, 'Unauthorized');
+    if (method === 'POST') return createCatalogue(event, auth.brandId);
+    if (method === 'GET')  return listCatalogues(event, auth.brandId);
+  }
+
   // ── Analytics ───────────────────────────────────────────────────────────────
   if (path.includes('/analytics')) {
     const auth = await authGuard(event, 'analytics');
@@ -113,10 +126,11 @@ async function handleReceiptStatus(event: APIGatewayProxyEvent, brandId: string)
     event.path.replace(/.*\/receipt\//, '').replace(/\/status.*/, ''),
   );
 
-  // Fetch the receipt and verify it belongs to this brand
-  const res = await dynamo.send(new ScanCommand({
+  // Fetch the receipt via GSI (sK-pK-index) — avoids full table scan
+  const res = await dynamo.send(new QueryCommand({
     TableName: USER_TABLE,
-    FilterExpression: 'sK = :sk',
+    IndexName: 'sK-pK-index',
+    KeyConditionExpression: 'sK = :sk',
     ExpressionAttributeValues: { ':sk': rawSK },
     Limit: 1,
   }));
@@ -289,6 +303,122 @@ async function listNewsletters(event: APIGatewayProxyEvent, brandId: string) {
   return ok({ newsletters: res.Items?.map(i => ({ ...JSON.parse(i.desc), sK: i.sK, createdAt: i.createdAt })) ?? [] });
 }
 
+// ─── Catalogues ───────────────────────────────────────────────────────────────
+
+interface CatalogueItemInput {
+  name: string;
+  price?: number;
+  imageUrl?: string;
+  ctaUrl?: string;
+}
+
+interface CatalogueInput {
+  title: string;
+  description?: string;
+  headerImageUrl?: string;
+  validFrom: string;
+  validTo: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+  items: CatalogueItemInput[];
+  targetSegments?: {
+    spendBuckets?: string[];
+    visitFrequencies?: string[];
+  };
+}
+
+async function createCatalogue(event: APIGatewayProxyEvent, brandId: string) {
+  const body: CatalogueInput = JSON.parse(event.body ?? '{}');
+  const validItems = (body.items ?? []).filter(item => item?.name?.trim());
+  if (!body.title || !body.validFrom || !body.validTo || validItems.length === 0) {
+    return err(400, 'Missing required catalogue fields');
+  }
+
+  const catalogueId = ulid();
+  const now = new Date().toISOString();
+  const { brandName, brandColor } = await getBrandProfile(brandId);
+  const payload = {
+    ...body,
+    brandId,
+    brandName,
+    brandColor,
+    catalogueId,
+    items: validItems,
+    itemCount: validItems.length,
+    targetSegments: normalizeTargetSegments(body.targetSegments),
+  };
+
+  await dynamo.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: {
+      pK: `BRAND#${brandId}`,
+      sK: `CATALOGUE#${catalogueId}`,
+      eventType: 'CATALOGUE',
+      status: 'ACTIVE',
+      primaryCat: 'catalogue',
+      desc: JSON.stringify(payload),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+
+  const recipientCount = await fanOutToSubscribers(
+    brandId,
+    'catalogues',
+    {
+      title: body.title,
+      body: body.description?.trim() || 'New catalogue from your loyalty brand',
+      data: {
+        type: 'CATALOGUE',
+        catalogueId,
+        brandId,
+        deepLink: `bebocard://catalogue/${catalogueId}`,
+      },
+    },
+    async (permULID) => {
+      await dynamo.send(new PutCommand({
+        TableName: USER_TABLE,
+        Item: {
+          pK: `USER#${permULID}`,
+          sK: `CATALOGUE#${brandId}#${catalogueId}`,
+          eventType: 'CATALOGUE',
+          status: 'UNREAD',
+          primaryCat: 'catalogue',
+          desc: JSON.stringify(payload),
+          createdAt: now,
+          updatedAt: now,
+        },
+      }));
+    },
+    async (permULID) => matchesTargetSegments(permULID, brandId, payload.targetSegments),
+  );
+
+  return ok({ catalogueId, recipientCount, status: deriveCampaignStatus(body.validFrom, body.validTo, 'ACTIVE') });
+}
+
+async function listCatalogues(event: APIGatewayProxyEvent, brandId: string) {
+  const res = await dynamo.send(new QueryCommand({
+    TableName: REFDATA_TABLE,
+    KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
+    ExpressionAttributeValues: { ':pk': `BRAND#${brandId}`, ':prefix': 'CATALOGUE#' },
+    ScanIndexForward: false,
+  }));
+
+  const catalogues = (res.Items ?? []).map((item) => {
+    const desc = JSON.parse(item.desc ?? '{}');
+    return {
+      ...desc,
+      catalogueId: desc.catalogueId ?? String(item.sK).replace('CATALOGUE#', ''),
+      itemCount: Array.isArray(desc.items) ? desc.items.length : (desc.itemCount ?? 0),
+      status: deriveCampaignStatus(desc.validFrom, desc.validTo, item.status as string | undefined),
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    };
+  });
+
+  return ok({ catalogues });
+}
+
 // ─── Analytics ─────────────────────────────────────────────────────────────────
 
 async function getAnalytics(event: APIGatewayProxyEvent, brandId: string) {
@@ -314,10 +444,11 @@ async function getAnalytics(event: APIGatewayProxyEvent, brandId: string) {
   const receiptCount = logs.filter(l => l.action === 'POST /receipt').length;
   const offerCount   = logs.filter(l => l.action === 'createOffer').length;
 
-  // Subscription count
-  const subRes = await dynamo.send(new ScanCommand({
+  // Subscription count via GSI
+  const subRes = await dynamo.send(new QueryCommand({
     TableName: USER_TABLE,
-    FilterExpression: 'sK = :sk',
+    IndexName: 'sK-pK-index',
+    KeyConditionExpression: 'sK = :sk',
     ExpressionAttributeValues: { ':sk': `SUBSCRIPTION#${brandId}` },
     Select: 'COUNT',
   }));
@@ -416,14 +547,16 @@ async function fanOutToSubscribers(
   preferenceKey: 'offers' | 'newsletters' | 'reminders' | 'catalogues',
   notification: { title: string; body: string; data?: Record<string, string> },
   perSubscriberFn?: (permULID: string) => Promise<void>,
+  shouldSendToUser?: (permULID: string) => Promise<boolean>,
 ): Promise<number> {
   let recipientCount = 0;
   let lastKey: Record<string, unknown> | undefined;
 
   do {
-    const res = await dynamo.send(new ScanCommand({
+    const res = await dynamo.send(new QueryCommand({
       TableName: USER_TABLE,
-      FilterExpression: 'sK = :sk',
+      IndexName: 'sK-pK-index',
+      KeyConditionExpression: 'sK = :sk',
       ExpressionAttributeValues: { ':sk': `SUBSCRIPTION#${brandId}` },
       ExclusiveStartKey: lastKey,
       Limit: 100,
@@ -431,8 +564,13 @@ async function fanOutToSubscribers(
     lastKey = res.LastEvaluatedKey as typeof lastKey;
 
     for (const item of res.Items ?? []) {
-      const desc = JSON.parse(item.desc ?? '{}');
-      if (!desc[preferenceKey]) continue;
+      // Status gate — skip INACTIVE/REVOKED subscriptions
+      if (item.status !== 'ACTIVE') continue;
+      // Granular preference keys (offers, newsletters, etc.) are stored as top-level DynamoDB
+      // attributes by updateGranularSubscription. For legacy setSubscription records that only
+      // set status, treat ACTIVE as opted-in to everything.
+      const preferenceEnabled = item[preferenceKey] !== undefined ? !!item[preferenceKey] : true;
+      if (!preferenceEnabled) continue;
 
       // Extract permULID from pK: USER#<permULID>
       const permULID = (item.pK as string).replace('USER#', '');
@@ -444,6 +582,10 @@ async function fanOutToSubscribers(
       }));
       const token = tokenItem.Item?.desc ? JSON.parse(tokenItem.Item.desc).token : null;
       if (!token) continue;
+
+      if (shouldSendToUser && !(await shouldSendToUser(permULID))) {
+        continue;
+      }
 
       // Per-subscriber side effect (e.g. write newsletter inbox record)
       if (perSubscriberFn) {
@@ -465,4 +607,54 @@ async function fanOutToSubscribers(
   } while (lastKey);
 
   return recipientCount;
+}
+
+async function getBrandProfile(brandId: string): Promise<{ brandName: string; brandColor: string }> {
+  const res = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: 'profile' },
+  }));
+  const desc = JSON.parse(res.Item?.desc ?? '{}');
+  return {
+    brandName: desc.brandName ?? brandId,
+    brandColor: desc.brandColor ?? '#4F46E5',
+  };
+}
+
+function normalizeTargetSegments(targetSegments: CatalogueInput['targetSegments']) {
+  const spendBuckets = (targetSegments?.spendBuckets ?? []).filter(Boolean);
+  const visitFrequencies = (targetSegments?.visitFrequencies ?? []).filter(Boolean);
+  if (spendBuckets.length === 0 && visitFrequencies.length === 0) return undefined;
+  return { spendBuckets, visitFrequencies };
+}
+
+function deriveCampaignStatus(validFrom?: string, validTo?: string, storedStatus?: string) {
+  if (storedStatus === 'ARCHIVED') return 'ARCHIVED';
+  const now = Date.now();
+  const from = validFrom ? Date.parse(validFrom) : Number.NaN;
+  const to = validTo ? Date.parse(validTo) : Number.NaN;
+  if (!Number.isNaN(from) && now < from) return 'SCHEDULED';
+  if (!Number.isNaN(to) && now > to) return 'EXPIRED';
+  return 'ACTIVE';
+}
+
+async function matchesTargetSegments(
+  permULID: string,
+  brandId: string,
+  targetSegments?: { spendBuckets?: string[]; visitFrequencies?: string[] },
+): Promise<boolean> {
+  if (!targetSegments) return true;
+
+  const segmentRes = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
+  }));
+
+  if (!segmentRes.Item?.desc) return false;
+  const desc = JSON.parse(segmentRes.Item.desc);
+  const spendBucket = desc.spendBucket as string | undefined;
+  const visitFrequency = desc.visitFrequency as string | undefined;
+  const spendOk = !targetSegments.spendBuckets?.length || (spendBucket != null && targetSegments.spendBuckets.includes(spendBucket));
+  const visitOk = !targetSegments.visitFrequencies?.length || (visitFrequency != null && targetSegments.visitFrequencies.includes(visitFrequency));
+  return spendOk && visitOk;
 }

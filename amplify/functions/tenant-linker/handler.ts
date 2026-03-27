@@ -17,21 +17,27 @@
  */
 
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import { CognitoIdentityProviderClient, GetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   GetCommand,
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { monotonicFactory } from 'ulid';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const cognito = new CognitoIdentityProviderClient({});
+const ulid = monotonicFactory();
 
 const USER_TABLE = process.env.USER_TABLE!;
 const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 const APP_SUCCESS_URL = process.env.APP_SUCCESS_URL ?? 'https://bebocard.app/link-success';
 const APP_FAILURE_URL = process.env.APP_FAILURE_URL ?? 'https://bebocard.app/link-failed';
 const BASE_URL = process.env.API_BASE_URL!; // e.g. https://api.bebocard.app
+const OAUTH_STATE_TTL_SECONDS = Number(process.env.OAUTH_STATE_TTL_SECONDS ?? '600');
 
 // ---------------------------------------------------------------------------
 // Brand OAuth config — add real client IDs / scopes from env per brand
@@ -95,13 +101,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const params = event.queryStringParameters ?? {};
 
   try {
-    // GET /auth/link/{brandId}?state=<permULID>
+    // GET /auth/link/{brandId}?permULID=<permULID>&authToken=<accessToken>
     const linkMatch = path.match(/\/auth\/link\/([a-z]+)$/);
     if (linkMatch) {
-      return initiateOAuth(linkMatch[1], params.state ?? '');
+      return initiateOAuth(linkMatch[1], params.permULID ?? '', params.authToken ?? '');
     }
 
-    // GET /auth/callback/{brandId}?code=...&state=<permULID>
+    // GET /auth/callback/{brandId}?code=...&state=<nonce>
     const callbackMatch = path.match(/\/auth\/callback\/([a-z]+)$/);
     if (callbackMatch) {
       return handleCallback(callbackMatch[1], params.code ?? '', params.state ?? '');
@@ -118,18 +124,21 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 // Phase 1 — Initiate OAuth
 // ---------------------------------------------------------------------------
 
-function initiateOAuth(brandId: string, permULID: string) {
+async function initiateOAuth(brandId: string, permULID: string, authToken: string) {
   const cfg = BRAND_CONFIG[brandId];
   if (!cfg) return { statusCode: 400, body: `Unknown brand: ${brandId}` };
-  if (!permULID) return { statusCode: 400, body: 'Missing state (permULID)' };
+  if (!permULID || !authToken) return { statusCode: 400, body: 'Missing auth context' };
 
   const clientId = process.env[cfg.clientIdEnv];
   if (!clientId) return { statusCode: 503, body: 'Brand integration not configured' };
+  const verifiedPermULID = await verifyAuthToken(authToken, permULID);
+  if (!verifiedPermULID) return redirect(`${APP_FAILURE_URL}?reason=invalid_state`);
+
+  const stateToken = await createOauthState(brandId, verifiedPermULID);
 
   const redirectUri = encodeURIComponent(`${BASE_URL}/auth/callback/${brandId}`);
   const scope = encodeURIComponent(cfg.scopes);
-  // state = permULID so callback can write to the right user record
-  const authUrl = `${cfg.authUrl}?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${permULID}`;
+  const authUrl = `${cfg.authUrl}?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${stateToken}`;
 
   return redirect(authUrl);
 }
@@ -138,11 +147,17 @@ function initiateOAuth(brandId: string, permULID: string) {
 // Phase 2 — OAuth Callback
 // ---------------------------------------------------------------------------
 
-async function handleCallback(brandId: string, code: string, permULID: string) {
+async function handleCallback(brandId: string, code: string, stateToken: string) {
   const cfg = BRAND_CONFIG[brandId];
-  if (!cfg || !code || !permULID) {
+  if (!cfg || !code || !stateToken) {
     return redirect(`${APP_FAILURE_URL}?reason=invalid_params`);
   }
+
+  const state = await consumeOauthState(stateToken);
+  if (!state || state.brandId != brandId) {
+    return redirect(`${APP_FAILURE_URL}?reason=invalid_state`);
+  }
+  const permULID = state.permULID;
 
   const clientId = process.env[cfg.clientIdEnv];
   const clientSecret = process.env[`${cfg.clientIdEnv.replace('_CLIENT_ID', '')}_CLIENT_SECRET`];
@@ -304,4 +319,61 @@ function redirect(url: string) {
     headers: { Location: url },
     body: '',
   };
+}
+
+async function verifyAuthToken(authToken: string, expectedPermULID: string): Promise<string | null> {
+  try {
+    const res = await cognito.send(new GetUserCommand({ AccessToken: authToken }));
+    const permAttr = res.UserAttributes?.find((attribute) => attribute.Name === 'custom:permULID')?.Value ?? null;
+    return permAttr === expectedPermULID ? permAttr : null;
+  } catch (err) {
+    console.error('Failed to verify auth token for tenant-linker', err);
+    return null;
+  }
+}
+
+async function createOauthState(brandId: string, permULID: string): Promise<string> {
+  const token = ulid();
+  const now = Date.now();
+  const expiresAt = new Date(now + (OAUTH_STATE_TTL_SECONDS * 1000)).toISOString();
+
+  await dynamo.send(new PutCommand({
+    TableName: ADMIN_TABLE,
+    Item: {
+      pK: `OAUTHSTATE#${token}`,
+      sK: 'STATE',
+      eventType: 'OAUTH_STATE',
+      status: 'PENDING',
+      desc: JSON.stringify({ brandId, permULID, expiresAt }),
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    },
+  }));
+
+  return token;
+}
+
+async function consumeOauthState(token: string): Promise<{ brandId: string; permULID: string } | null> {
+  const result = await dynamo.send(new GetCommand({
+    TableName: ADMIN_TABLE,
+    Key: { pK: `OAUTHSTATE#${token}`, sK: 'STATE' },
+  }));
+
+  const item = result.Item;
+  if (!item) return null;
+
+  const desc = JSON.parse(String(item.desc ?? '{}')) as { brandId?: string; permULID?: string; expiresAt?: string };
+  if (!desc.brandId || !desc.permULID || !desc.expiresAt || desc.expiresAt < new Date().toISOString()) {
+    await dynamo.send(new DeleteCommand({
+      TableName: ADMIN_TABLE,
+      Key: { pK: `OAUTHSTATE#${token}`, sK: 'STATE' },
+    }));
+    return null;
+  }
+
+  await dynamo.send(new DeleteCommand({
+    TableName: ADMIN_TABLE,
+    Key: { pK: `OAUTHSTATE#${token}`, sK: 'STATE' },
+  }));
+  return { brandId: desc.brandId, permULID: desc.permULID };
 }

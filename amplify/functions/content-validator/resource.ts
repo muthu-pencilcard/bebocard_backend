@@ -3,6 +3,7 @@ import { defineFunction } from '@aws-amplify/backend';
 export const contentValidatorFn = defineFunction({
   name: 'bebo-content-validator',
   entry: './handler.ts',
+  resourceGroupName: 'data',
   runtime: 20,
   timeoutSeconds: 30,
   memoryMB: 512,

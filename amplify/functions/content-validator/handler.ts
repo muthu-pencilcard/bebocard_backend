@@ -9,12 +9,15 @@
  *   2. Size check       — max 5 MB
  *   3. Rekognition      — content moderation (confidence > 75)
  *   4. PASS → copy to app-reference bucket, update RefDataEvent CDN URL, write audit log
- *   5. FAIL → move to rejected/ prefix, write audit log
+ *   5. FAIL → copy to rejected/ prefix in staging, write audit log
  *
- * Content types and their dimension caps:
+ * Intended content variants:
  *   logo    512 × 512 px
  *   banner  1200 × 400 px
  *   offer   800 × 600 px
+ *
+ * Note: this handler currently validates MIME, size, and moderation only.
+ * Pixel dimensions are documented here for uploader guidance, not enforced yet.
  */
 import type { S3Event } from 'aws-lambda';
 import {

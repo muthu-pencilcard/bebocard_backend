@@ -1,10 +1,10 @@
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual as nodeTimingSafeEqual } from 'crypto';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { monotonicFactory } from 'ulid';
 
 const ulid = monotonicFactory();
 
-export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'analytics' | 'stores';
+export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'catalogues' | 'analytics' | 'stores';
 
 export interface ApiKeyRecord {
   brandId: string;
@@ -25,6 +25,12 @@ export interface ValidatedKey {
   rateLimit: number;
   scopes: ApiKeyScope[];
 }
+
+type ApiKeyItem = Partial<ApiKeyRecord> & {
+  pK?: string;
+  sK?: string;
+  desc?: string;
+};
 
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 
@@ -68,24 +74,26 @@ export async function validateApiKey(
 
   const item = res.Items?.[0] as (ApiKeyRecord & { pK: string; sK: string }) | undefined;
   if (!item) return null;
+  const normalized = normalizeApiKeyItem(item);
+  if (!normalized) return null;
 
   const now = new Date().toISOString();
 
   // Reject if revoked and grace period has expired
-  if (item.status === 'REVOKED') return null;
-  if (item.status === 'GRACE' && item.graceUntil && item.graceUntil < now) return null;
+  if (normalized.status === 'REVOKED') return null;
+  if (normalized.status === 'GRACE' && normalized.graceUntil && normalized.graceUntil < now) return null;
 
   // Constant-time hash comparison
   const expectedHash = createHash('sha256').update(rawKey).digest('hex');
-  if (!timingSafeEqual(item.keyHash, expectedHash)) return null;
+  if (!timingSafeEqual(normalized.keyHash, expectedHash)) return null;
 
-  if (!item.scopes.includes(requiredScope)) return null;
+  if (!normalized.scopes.includes(requiredScope)) return null;
 
   return {
-    brandId: item.brandId,
-    keyId: item.keyId,
-    rateLimit: item.rateLimit,
-    scopes: item.scopes,
+    brandId: normalized.brandId,
+    keyId: normalized.keyId,
+    rateLimit: normalized.rateLimit,
+    scopes: normalized.scopes,
   };
 }
 
@@ -111,12 +119,16 @@ export async function createApiKey(
       primaryCat: 'api_key',
       keyId,
       brandId,
+      keyHash,
+      scopes,
+      rateLimit,
+      createdBy,
       desc: JSON.stringify({
         keyHash,
         scopes,
         rateLimit,
         createdBy,
-      } satisfies Omit<ApiKeyRecord, 'brandId' | 'keyId' | 'keyHash' | 'status' | 'createdAt'>),
+      }),
       createdAt: now,
       updatedAt: now,
     },
@@ -191,14 +203,91 @@ export async function revokeApiKey(
   }));
 }
 
+// ── Tenant key CRUD ───────────────────────────────────────────────────────────
+//
+// Tenant keys live under TENANT#<tenantId> / APIKEY#<keyId> in RefDataEvent.
+// Same key format as brand keys (bebo_<keyId>.<secret>) and same byKeyId GSI
+// lookup — the TENANT# pK prefix is what distinguishes them from brand keys.
+//
+// At tenant onboarding:
+// 1. Call createTenantApiKey() → get rawKey back (shown once, never stored)
+// 2. Create an AWS API Gateway API key with value = rawKey, associate with
+//    the appropriate usage plan (starter / growth / enterprise).
+//    This enforces per-tenant throttling at the gateway before Lambda is hit.
+
+export async function createTenantApiKey(
+  ddb: DynamoDBDocumentClient,
+  tenantId: string,
+  brandIds: string[],
+  allowedScopes: string[],           // TenantScope values: 'segments' | 'receipts_aggregate' | 'subscriber_count'
+  createdBy: string,
+  opts: { rateLimit?: number; minCohortThreshold?: number } = {},
+): Promise<{ rawKey: string; keyId: string }> {
+  const { rawKey, keyId, keyHash } = generateApiKey();
+  const now = new Date().toISOString();
+
+  await ddb.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: {
+      pK:          `TENANT#${tenantId}`,
+      sK:          `APIKEY#${keyId}`,
+      eventType:   'TENANT_API_KEY',
+      status:      'ACTIVE',
+      primaryCat:  'tenant_api_key',
+      keyId,
+      keyHash,
+      brandIds,
+      allowedScopes,
+      rateLimit: opts.rateLimit ?? 1000,
+      minCohortThreshold: opts.minCohortThreshold ?? 50,
+      createdBy,
+      desc: JSON.stringify({
+        keyHash,
+        brandIds,
+        allowedScopes,
+        minCohortThreshold: opts.minCohortThreshold ?? 50,
+        rateLimit:          opts.rateLimit          ?? 1000,
+        createdBy,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+    ConditionExpression: 'attribute_not_exists(pK)',
+  }));
+
+  // rawKey returned ONCE — caller must display and save it
+  return { rawKey, keyId };
+}
+
+/**
+ * Immediately revokes a tenant API key. No grace period.
+ * Rotate by calling createTenantApiKey() first, then revoke the old key.
+ */
+export async function revokeTenantApiKey(
+  ddb: DynamoDBDocumentClient,
+  tenantId: string,
+  keyId: string,
+): Promise<void> {
+  await ddb.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: `APIKEY#${keyId}` },
+    UpdateExpression: 'SET #s = :revoked, revokedAt = :now, updatedAt = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: {
+      ':revoked': 'REVOKED',
+      ':now':     new Date().toISOString(),
+    },
+  }));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Timing-safe string comparison to prevent timing attacks on key hashes. */
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
-  return bufA.every((byte, i) => byte === bufB[i]);
+  if (bufA.length !== bufB.length) return false;
+  return nodeTimingSafeEqual(bufA, bufB);
 }
 
 /** Extract raw key from Authorization or x-api-key header. */
@@ -208,4 +297,62 @@ export function extractApiKey(headers: Record<string, string | undefined>): stri
   const auth = headers['authorization'] ?? headers['Authorization'];
   if (auth?.startsWith('Bearer bebo_')) return auth.slice(7);
   return null;
+}
+
+function normalizeApiKeyItem(item: ApiKeyItem): ApiKeyRecord | null {
+  const parsedDesc = safeJsonParse(item.desc);
+  const keyHash = asString(item.keyHash) ?? asString(parsedDesc.keyHash);
+  const scopes = asScopeArray(item.scopes) ?? asScopeArray(parsedDesc.scopes);
+  const rateLimit = asNumber(item.rateLimit) ?? asNumber(parsedDesc.rateLimit) ?? 1000;
+  const createdBy = asString(item.createdBy) ?? asString(parsedDesc.createdBy) ?? 'unknown';
+  const brandId = asString(item.brandId) ?? deriveBrandId(item.pK);
+  const keyId = asString(item.keyId) ?? deriveKeyId(item.sK);
+
+  if (!brandId || !keyId || !keyHash || !scopes) {
+    return null;
+  }
+
+  return {
+    brandId,
+    keyId,
+    keyHash,
+    scopes,
+    rateLimit,
+    status: (asString(item.status) as ApiKeyRecord['status'] | null) ?? 'ACTIVE',
+    createdAt: asString(item.createdAt) ?? new Date(0).toISOString(),
+    createdBy,
+    revokedAt: asString(item.revokedAt) ?? undefined,
+    graceUntil: asString(item.graceUntil) ?? undefined,
+  };
+}
+
+function safeJsonParse(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string' || !value) return {};
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asScopeArray(value: unknown): ApiKeyScope[] | null {
+  if (!Array.isArray(value)) return null;
+  const scopes = value.filter((item): item is ApiKeyScope => typeof item === 'string');
+  return scopes.length > 0 ? scopes : null;
+}
+
+function deriveBrandId(pK: unknown): string | null {
+  return typeof pK === 'string' && pK.startsWith('BRAND#') ? pK.slice('BRAND#'.length) : null;
+}
+
+function deriveKeyId(sK: unknown): string | null {
+  return typeof sK === 'string' && sK.startsWith('APIKEY#') ? sK.slice('APIKEY#'.length) : null;
 }

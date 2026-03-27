@@ -3,14 +3,14 @@ import { cardManagerFn } from '../functions/card-manager/resource';
 import { geofenceHandlerFn } from '../functions/geofence-handler/resource';
 
 const schema = a.schema({
-  // ── User data: loyalty cards, receipts, points (owner-auth) ──────────────
+  // ── User data: loyalty cards, receipts, invoices, gift cards, segments ───
   UserDataEvent: a.model({
     pK: a.string().required(),   // USER#<permULID>
-    sK: a.string().required(),   // IDENTITY | CARD#<brand>#<id> | RECEIPT#<date>#<id> | POINTS#<brand>
-    eventType: a.string(),       // IDENTITY | CARD | RECEIPT | POINTS
+    sK: a.string().required(),   // IDENTITY | CARD#... | RECEIPT#... | INVOICE#... | GIFTCARD#... | SEGMENT#... | SUBSCRIPTION#...
+    eventType: a.string(),       // IDENTITY | CARD | RECEIPT | INVOICE | GIFTCARD | SEGMENT | SUBSCRIPTION | ...
     status: a.string(),          // ACTIVE | REVOKED | ARCHIVED
-    primaryCat: a.string(),      // loyalty_card | receipt | points
-    subCategory: a.string(),     // brand id e.g. woolworths
+    primaryCat: a.string(),      // loyalty_card | receipt | invoice | gift_card | segment | subscription | ...
+    subCategory: a.string(),     // usually brand id, or another feature-specific subtype
     desc: a.json(),              // all entity-specific fields
     secondaryULID: a.string(),   // IDENTITY only — QR-facing rotating ID (top-level for fast reads)
     rotatesAt: a.string(),       // IDENTITY only — ISO 8601, when secondaryULID should next be rotated
@@ -25,18 +25,22 @@ const schema = a.schema({
       allow.owner(),
     ]),
 
-  // ── Brand catalog (read-only to users, admin-managed) ────────────────────
+  // ── Reference data: tenants, brands, portal memberships, categories, API keys ─
   RefDataEvent: a.model({
-    pK: a.string().required(),   // BRAND#<id> | CATEGORY#<id>
-    sK: a.string().required(),   // profile | OFFER#<ulid> | APIKEY#<keyId> | STORE#<storeId>
+    pK: a.string().required(),   // BRAND#<id> | TENANT#<id> | CATEGORY#<id>
+    sK: a.string().required(),   // PROFILE | BRAND#<brandId> | MEMBERSHIP#EMAIL#<email> | OFFER#<ulid> | APIKEY#<keyId> | STORE#<storeId>
     eventType: a.string(),
     status: a.string(),          // ACTIVE | INACTIVE | REVOKED | GRACE
-    primaryCat: a.string(),      // brand | category
-    subCategory: a.string(),     // grocery | travel | fuel | retail | dining
+    primaryCat: a.string(),      // brand | tenant | tenant_brand | portal_membership | category
+    subCategory: a.string(),     // business-specific subtype such as grocery | travel | fuel
     desc: a.json(),              // entity-specific fields
     createdAt: a.datetime(),
     updatedAt: a.datetime(),
     version: a.integer(),
+    tenantId: a.string(),        // tenant profile / tenant brand / portal membership
+    brandId: a.string(),         // brand profile / tenant brand / portal membership / API key
+    roleKey: a.string(),         // portal membership only — tenant_admin | brand_admin | editor | reader
+    subjectEmail: a.string(),    // portal membership lookup by invited user's email
     // API key records only — top-level for GSI lookup by keyId
     keyId: a.string(),           // APIKEY records: ULID key identifier
     logoUrl: a.string(),         // brand profile: CDN URL after content validation
@@ -47,6 +51,8 @@ const schema = a.schema({
     .secondaryIndexes(index => [
       index('primaryCat').sortKeys(['subCategory']).queryField('refDataByCategory'),
       index('status').sortKeys(['primaryCat']).queryField('refDataByStatus'),
+      index('tenantId').sortKeys(['sK']).queryField('refDataByTenant'),
+      index('subjectEmail').sortKeys(['tenantId']).queryField('refDataBySubjectEmail'),
       index('keyId').queryField('refDataByKeyId'),   // used by api-key-auth.ts to look up API keys
     ])
     .authorization(allow => [
@@ -54,19 +60,22 @@ const schema = a.schema({
       allow.group('admin'),
     ]),
 
-  // ── Scan lookup index (Lambda-managed, not user-facing) ──────────────────
+  // ── Lambda-managed operational records: scan index, audit logs, reminders ─
   AdminDataEvent: a.model({
-    pK: a.string().required(),   // SCAN#<secondaryULID> | AUDIT#<actor> | NEWSLETTER#<brandId>#<id>
-    sK: a.string().required(),   // <permULID> (SCAN records) | LOG#<iso>#<ulid> (audit) | SENT#<permULID> (newsletter delivery)
+    pK: a.string().required(),   // SCAN#<secondaryULID> | AUDIT#<actor> | NEWSLETTER#... | REMINDER#<permULID>
+    sK: a.string().required(),   // <permULID> | LOG#<iso>#<ulid> | SENT#... 
     eventType: a.string(),
     status: a.string(),
-    desc: a.json(),              // SCAN: { cards: [{brand, cardId, isDefault}] }; AUDIT: structured log
+    desc: a.json(),              // SCAN: card index payload; AUDIT: structured log; reminder sent logs omit desc
     createdAt: a.datetime(),
     updatedAt: a.datetime(),
   })
     .identifier(['pK', 'sK'])
     .authorization(allow => [
-      allow.resource(cardManagerFn),
+      // AdminDataEvent is never accessed through AppSync by client apps.
+      // All Lambda access is via direct DynamoDB IAM grants in backend.ts.
+      // Restricting AppSync access to the admin group only (no regular users).
+      allow.group('admin'),
     ]),
 
   // ── GraphQL mutations (Lambda-backed) ─────────────────────────────────────
@@ -173,6 +182,12 @@ const schema = a.schema({
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
+  removeInvoice: a.mutation()
+    .arguments({ invoiceSK: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
   // Receipts
   addReceipt: a.mutation()
     .arguments({
@@ -190,8 +205,20 @@ const schema = a.schema({
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
+  removeReceipt: a.mutation()
+    .arguments({ receiptSK: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  markNewsletterRead: a.mutation()
+    .arguments({ newsletterSK: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
   // ── Granular subscription management ─────────────────────────────────────
-  // Replaces subscribeToOffers / unsubscribeFromOffers with per-type controls.
+  // Extends the coarse subscribe/unsubscribe mutations with per-channel controls.
   updateSubscription: a.mutation()
     .arguments({
       brandId:     a.string().required(),

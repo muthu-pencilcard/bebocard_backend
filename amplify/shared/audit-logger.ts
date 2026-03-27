@@ -121,8 +121,12 @@ function extractContext(event: any): AuditContext {
   }
   // API Gateway proxy event (brand API)
   const headers = event?.headers as Record<string, string> | undefined;
-  const brandId = headers?.['x-brand-id'];
   const ip = event?.requestContext?.identity?.sourceIp;
+  // Prefer explicit x-brand-id header. Fall back to request body fields so that
+  // scan-handler audit entries (which authenticate via API key, not header) are
+  // attributed to the correct brand rather than written as actor='anonymous'.
+  const body = (() => { try { return JSON.parse(event?.body ?? '{}'); } catch { return {} as Record<string, string>; } })();
+  const brandId = headers?.['x-brand-id'] ?? body.storeBrandLoyaltyName ?? body.brandId;
   return { brandId, ip };
 }
 

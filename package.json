@@ -5,18 +5,28 @@
   "scripts": {
     "sandbox": "npx ampx sandbox",
     "pipeline-deploy": "npx ampx pipeline-deploy",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@aws-amplify/backend": "^1.18.0",
     "@aws-amplify/backend-cli": "^1.8.0",
+    "@aws-sdk/client-athena": "^3.1017.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-rekognition": "^3.1015.0",
+    "@aws-sdk/client-s3": "^3.1015.0",
+    "@aws-sdk/client-sns": "^3.1015.0",
+    "@aws-sdk/client-ssm": "^3.1016.0",
     "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.996.2",
+    "aws-cdk-lib": "^2.234.1",
     "firebase-admin": "^12.0.0",
     "ulid": "^2.3.0"
   },
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.161",
     "typescript": "^5.0.0",
-    "@types/aws-lambda": "^8.10.0"
+    "vitest": "^4.1.2"
   }
 }
