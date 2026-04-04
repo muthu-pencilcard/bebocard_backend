@@ -1,12 +1,12 @@
 /**
  * reminder-handler — Scheduled Lambda (EventBridge cron)
  *
- * Fires daily at 21:00 UTC.
+ * Fires daily at 23:00 UTC (= 9:00 AEST / 10:00 AEDT).
  * Scans UserDataEvent for upcoming due dates and sends FCM reminders.
  * Writes sent-logs to AdminDataEvent to prevent duplicate pushes.
  *
  * EventBridge rule (wired in backend.ts):
- *   cron(0 21 * * ? *)
+ *   cron(0 23 * * ? *)
  */
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -20,9 +20,9 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { monotonicFactory } from 'ulid';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const ulid   = monotonicFactory();
+const ulid = monotonicFactory();
 
-const USER_TABLE  = process.env.USER_TABLE!;
+const USER_TABLE = process.env.USER_TABLE!;
 const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 
 function getFirebase() {
@@ -43,36 +43,65 @@ interface ReminderRule {
   descField: string;        // field inside desc JSON that holds the date
   daysAhead: number[];      // fire reminders N days before the date
   title: (days: number, record: Record<string, unknown>) => string;
-  body:  (days: number, record: Record<string, unknown>) => string;
+  body: (days: number, record: Record<string, unknown>) => string;
+  statusCheck?: (item: Record<string, unknown>) => boolean;
 }
 
 const REMINDER_RULES: ReminderRule[] = [
   {
-    type:      'invoiceDue',
-    prefKey:   'invoiceDue',
-    skPrefix:  'INVOICE#',
+    type: 'invoiceDue',
+    prefKey: 'invoiceDue',
+    skPrefix: 'INVOICE#',
     descField: 'dueDate',
     daysAhead: [3, 1],
     title: (d, r) => `Invoice due ${d === 1 ? 'tomorrow' : `in ${d} days`}`,
-    body:  (_, r) => `${r.supplier ?? 'Supplier'} — ${r.currency ?? 'AUD'} ${r.amount}`,
+    body: (_, r) => `${r.supplier ?? 'Supplier'} — ${r.currency ?? 'AUD'} ${r.amount}`,
   },
   {
-    type:      'warrantyExpiry',
-    prefKey:   'warrantyExpiry',
-    skPrefix:  'RECEIPT#',
+    type: 'warrantyExpiry',
+    prefKey: 'warrantyExpiry',
+    skPrefix: 'RECEIPT#',
     descField: 'warrantyExpiry',
     daysAhead: [30, 7],
     title: (d, r) => `Warranty expires ${d === 7 ? 'in 1 week' : 'in 30 days'}`,
-    body:  (_, r) => `${r.merchant ?? 'Your item'} — consider extending cover`,
+    body: (_, r) => `${r.merchant ?? 'Your item'} — consider extending cover`,
   },
   {
-    type:      'giftCardExpiry',
-    prefKey:   'giftCardExpiry',
-    skPrefix:  'GIFTCARD#',
+    type: 'giftCardExpiry',
+    prefKey: 'giftCardExpiry',
+    skPrefix: 'GIFTCARD#',
     descField: 'expiryDate',
     daysAhead: [14, 3],
     title: (d, r) => `Gift card expires ${d === 3 ? 'in 3 days' : 'in 2 weeks'}`,
-    body:  (_, r) => `${r.brandName ?? 'Gift card'} — ${r.currency ?? 'AUD'} ${r.balance} remaining`,
+    body: (_, r) => `${r.brandName ?? 'Gift card'} — ${r.currency ?? 'AUD'} ${r.balance} remaining`,
+  },
+  {
+    type: 'offerExpiry',
+    prefKey: 'offerExpiry',
+    skPrefix: 'OFFER#',
+    descField: 'validTo',
+    daysAhead: [2],
+    title: (_d, r) => `Offer expiring soon`,
+    body: (_d, r) => `${r.brandName ?? 'Brand'} — ${r.title ?? 'offer'} ends in 2 days`,
+  },
+  {
+    type: 'pointsExpiry',
+    prefKey: 'pointsExpiry',
+    skPrefix: 'CARD#',
+    descField: 'pointsExpiryDate',
+    daysAhead: [60],
+    title: (_d, _r) => `Points expiring in 60 days`,
+    body: (_d, r) => `${r.brandName ?? 'Your loyalty points'} — redeem before they expire`,
+  },
+  {
+    type: 'subscriptionRenewal',
+    prefKey: 'subscriptionRenewal',
+    skPrefix: 'RECURRING#',
+    descField: 'nextBillingDate',
+    daysAhead: [3, 1],
+    title: (d, r) => `${r.brandName ?? 'Subscription'} renews ${d === 1 ? 'tomorrow' : `in ${d} days`}`,
+    body: (_, r) => `${r.brandName ?? 'Your subscription'} will charge ${r.currency ?? 'AUD'} ${r.amount}`,
+    statusCheck: (item) => item.status === 'ACTIVE',
   },
 ];
 
@@ -114,6 +143,8 @@ async function processRule(rule: ReminderRule, daysAhead: number): Promise<numbe
     lastKey = res.LastEvaluatedKey as typeof lastKey;
 
     for (const item of res.Items ?? []) {
+      if (rule.statusCheck && !rule.statusCheck(item)) continue;
+
       const desc = JSON.parse(item.desc ?? '{}') as Record<string, unknown>;
       const dateValue = desc[rule.descField] as string | undefined;
       if (!dateValue) continue;
@@ -136,13 +167,24 @@ async function processRule(rule: ReminderRule, daysAhead: number): Promise<numbe
       const token = await getDeviceToken(permULID);
       if (!token) continue;
 
-      // Send FCM
+      // Write sent-log BEFORE sending FCM.
+      // If FCM succeeds but markSent fails on retry, the user may receive a
+      // duplicate — acceptable. If markSent succeeds but FCM fails, the user
+      // misses the reminder — also acceptable. The critical property is that
+      // we never send duplicates to users: write the log first to guarantee that.
+      try {
+        await markSent(permULID, item.sK as string, dedupKey);
+      } catch (e) {
+        console.error(`[reminder-handler] markSent failed for ${permULID}, skipping FCM:`, e);
+        continue;
+      }
+
       try {
         await getFirebase().send({
           token,
           notification: {
             title: rule.title(daysAhead, desc),
-            body:  rule.body(daysAhead, desc),
+            body: rule.body(daysAhead, desc),
           },
           data: {
             type: `REMINDER_${rule.type.toUpperCase()}`,
@@ -150,12 +192,10 @@ async function processRule(rule: ReminderRule, daysAhead: number): Promise<numbe
             daysAhead: String(daysAhead),
           },
         });
-
-        // Write sent-log
-        await markSent(permULID, item.sK as string, dedupKey);
         count++;
       } catch (e) {
         console.error(`[reminder-handler] FCM failed for ${permULID}:`, e);
+        // sent-log already written — reminder won't retry next run, which is fine
       }
     }
   } while (lastKey);

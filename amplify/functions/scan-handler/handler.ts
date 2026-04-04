@@ -1,4 +1,5 @@
 import type { APIGatewayProxyHandler } from 'aws-lambda';
+import { createHash } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
@@ -12,6 +13,7 @@ const ulid = monotonicFactory();
 
 const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 const USER_TABLE = process.env.USER_TABLE!;
+const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 
 function getFirebaseAdmin() {
   if (getApps().length === 0) {
@@ -20,6 +22,16 @@ function getFirebaseAdmin() {
     initializeApp({ credential: cert(JSON.parse(serviceAccountJson)) });
   }
   return getMessaging();
+}
+
+function parseRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
+  if (typeof value !== 'string' || value.length === 0) return {};
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 const _handler: APIGatewayProxyHandler = async (event) => {
@@ -69,7 +81,8 @@ async function handleLoyaltyCheck(
   }
 
   if (storeBrandLoyaltyName !== validKey.brandId) {
-    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Brand mismatch for API key' }) };
+    console.warn('[scan-handler] brand mismatch for API key', { requested: storeBrandLoyaltyName, keyBrand: validKey.brandId });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   // Query by pK only — sK is permULID (not a constant like 'INDEX')
@@ -82,7 +95,7 @@ async function handleLoyaltyCheck(
 
   const scanItem = scanQuery.Items?.[0];
   if (!scanItem || scanItem.status === 'REVOKED') {
-    return { statusCode: 404, headers, body: JSON.stringify({ error: 'Unknown or revoked QR' }) };
+    return { statusCode: 404, headers, body: JSON.stringify({ error: 'Not found' }) };
   }
 
   const indexDesc = JSON.parse(scanItem.desc ?? '{}');
@@ -90,6 +103,10 @@ async function handleLoyaltyCheck(
   const brandCards = cards.filter(c => c.brand === validKey.brandId);
 
   if (brandCards.length === 0) {
+    const permULID: string = scanItem.sK;
+    void maybeSendCardSuggestion(permULID, validKey.brandId).catch((err) => {
+      console.error('[scan-handler] CARD_SUGGESTION failed', err);
+    });
     return {
       statusCode: 200,
       headers,
@@ -164,7 +181,8 @@ async function handleReceipt(
   }
 
   if (body.brandId && body.brandId !== validKey.brandId) {
-    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Brand mismatch for API key' }) };
+    console.warn('[scan-handler] receipt brand mismatch for API key', { requested: body.brandId, keyBrand: validKey.brandId });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   // Resolve secondaryULID → permULID (sK of the SCAN index record IS the permULID)
@@ -177,14 +195,47 @@ async function handleReceipt(
 
   const scanItem = scanQuery.Items?.[0];
   if (!scanItem || scanItem.status === 'REVOKED') {
-    return { statusCode: 404, headers, body: JSON.stringify({ error: 'Unknown or revoked QR' }) };
+    return { statusCode: 404, headers, body: JSON.stringify({ error: 'Not found' }) };
   }
 
   const permULID: string = scanItem.sK;
 
-  // Save receipt
+  // Idempotency — detect duplicate receipt submissions from brand POS retries.
+  // Key is a hash of the immutable receipt attributes. If already present, return
+  // the original receiptSK so the brand gets a consistent response.
   const brandId = validKey.brandId;
+  const idempotencyKey = createHash('sha256')
+    .update(`${permULID}|${brandId}|${purchaseDate.substring(0, 10)}|${merchant}|${amount}`)
+    .digest('hex');
+
+  const existingReceipt = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: `RECEIPT_IDEM#${idempotencyKey}` },
+  }));
+  if (existingReceipt.Item) {
+    const existingSK = existingReceipt.Item.receiptSK as string;
+    return { statusCode: 200, headers, body: JSON.stringify({ success: true, receiptSK: existingSK }) };
+  }
+
+  // Save receipt
   const receiptSK = `RECEIPT#${purchaseDate.substring(0, 10)}#${ulid()}`;
+
+  // Write idempotency sentinel first. If the Lambda is retried after this write
+  // but before the receipt write, the next invocation will find the sentinel and
+  // return early. The receipt write is a best-effort follow-up.
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: `RECEIPT_IDEM#${idempotencyKey}`,
+      eventType: 'RECEIPT_IDEM',
+      status: 'ACTIVE',
+      receiptSK,
+      createdAt: new Date().toISOString(),
+    },
+    ConditionExpression: 'attribute_not_exists(pK)',
+  })).catch(() => { /* race condition: another invocation wrote it first — safe to ignore */ });
+
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,
     Item: {
@@ -255,4 +306,77 @@ async function getDeviceToken(pK: string): Promise<string | null> {
   if (!result.Item) return null;
   const desc = JSON.parse(result.Item.desc ?? '{}');
   return desc.token ?? null;
+}
+
+async function maybeSendCardSuggestion(permULID: string, brandId: string): Promise<void> {
+  const dedupKey = `CARD_SUGGESTION#${brandId}`;
+  const existing = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: dedupKey },
+  }));
+  if (existing.Item?.createdAt) {
+    const createdAt = Date.parse(existing.Item.createdAt as string);
+    if (!Number.isNaN(createdAt) && Date.now() - createdAt < 30 * 24 * 60 * 60 * 1000) {
+      return;
+    }
+  }
+
+  const [deviceToken, brandRes] = await Promise.all([
+    getDeviceToken(`USER#${permULID}`),
+    dynamo.send(new GetCommand({
+      TableName: REFDATA_TABLE,
+      Key: { pK: `BRAND#${brandId}`, sK: 'profile' },
+    })),
+  ]);
+  if (!deviceToken) return;
+
+  const brandDesc = parseRecord(brandRes.Item?.desc);
+  const brandName = String(brandDesc.brandName ?? brandDesc.name ?? brandId);
+  const brandColor = String(brandDesc.brandColor ?? brandDesc.color ?? '#6366F1');
+  const supportsDirectEnrollment = !!brandDesc.supportsDirectEnrollment;
+  const loyaltySignupUrl = typeof brandDesc.loyaltySignupUrl === 'string'
+    ? brandDesc.loyaltySignupUrl
+    : undefined;
+
+  await getFirebaseAdmin().send({
+    token: deviceToken,
+    notification: {
+      title: `Shop at ${brandName}?`,
+      body: supportsDirectEnrollment
+        ? 'Link your card or join in one tap.'
+        : 'Link your card or sign up and add it to BeboCard.',
+    },
+    data: {
+      type: 'CARD_SUGGESTION',
+      brandId,
+      brandName,
+      brandColor,
+      supportsDirectEnrollment: supportsDirectEnrollment ? 'true' : 'false',
+      ...(loyaltySignupUrl ? { loyaltySignupUrl } : {}),
+    },
+    apns: { payload: { aps: { sound: 'default' } } },
+    android: { priority: 'high', notification: { channelId: 'bebo_offers' } },
+  });
+
+  const now = new Date().toISOString();
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: dedupKey,
+      eventType: 'CARD_SUGGESTION',
+      status: 'ACTIVE',
+      primaryCat: 'card_suggestion',
+      subCategory: brandId,
+      desc: JSON.stringify({
+        brandId,
+        brandName,
+        supportsDirectEnrollment,
+        loyaltySignupUrl: loyaltySignupUrl ?? null,
+        suggestionSentAt: now,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
 }

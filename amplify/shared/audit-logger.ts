@@ -1,4 +1,5 @@
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { createHash } from 'crypto';
 import { monotonicFactory } from 'ulid';
 
 const ulid = monotonicFactory();
@@ -11,8 +12,37 @@ export interface AuditEntry {
   outcome: 'success' | 'failure';
   errorCode?: string;
   ip?: string;
+  correlationId?: string;
   durationMs?: number;
   metadata?: Record<string, unknown>;
+}
+
+// ─── PII Redaction ─────────────────────────────────────────────────────────────
+
+/** Fields that must never appear in audit log metadata */
+const PII_KEYS = new Set([
+  'email', 'recipientEmail', 'senderEmail', 'recipientEmailRaw',
+  'cardNumber', 'pin', 'encryptedCard', 'encryptedPin',
+  'password', 'secret', 'apiKey', 'rawKey', 'keyHash',
+  'accessToken', 'refreshToken', 'idToken',
+]);
+
+/** Recursively redact PII fields from an object before audit storage */
+function redactPii(value: unknown, depth = 0): unknown {
+  if (depth > 5 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(v => redactPii(v, depth + 1));
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (PII_KEYS.has(k)) {
+      // Replace with SHA-256 pseudonym so patterns are detectable without storing raw PII
+      result[k] = typeof v === 'string' && v.length > 0
+        ? `[redacted:${createHash('sha256').update(v).digest('hex').slice(0, 8)}]`
+        : '[redacted]';
+    } else {
+      result[k] = redactPii(v, depth + 1);
+    }
+  }
+  return result;
 }
 
 /**
@@ -28,14 +58,22 @@ export async function writeAuditLog(
 ): Promise<void> {
   const now = new Date().toISOString();
   const logId = ulid();
+  const correlationId = entry.correlationId ?? logId;
+
+  // Redact PII before any storage or logging
+  const safeMetadata = entry.metadata ? redactPii(entry.metadata) as Record<string, unknown> : undefined;
+  const safeEntry: AuditEntry = { ...entry, correlationId, metadata: safeMetadata };
 
   // Structured CloudWatch log — queryable via Logs Insights:
-  // fields @timestamp, audit.action, audit.actor, audit.outcome
+  // fields @timestamp, audit.action, audit.actor, audit.outcome, audit.correlationId
   // | filter audit.outcome = "failure"
-  console.log(JSON.stringify({ audit: true, logId, timestamp: now, ...entry }));
+  console.log(JSON.stringify({ audit: true, logId, timestamp: now, ...safeEntry }));
 
   const adminTable = process.env.ADMIN_TABLE;
   if (!adminTable) return; // Graceful no-op in unit tests without env
+
+  // Audit log TTL: 7 years for compliance (2557 days)
+  const ttlSeconds = Math.floor(Date.now() / 1000) + 7 * 365 * 24 * 3600;
 
   await ddb.send(new PutCommand({
     TableName: adminTable,
@@ -45,7 +83,9 @@ export async function writeAuditLog(
       eventType: 'AUDIT_LOG',
       status: entry.outcome,
       primaryCat: 'audit',
-      desc: JSON.stringify(entry),
+      correlationId,
+      desc: JSON.stringify(safeEntry),
+      ttl: ttlSeconds,
       createdAt: now,
       updatedAt: now,
     },
@@ -81,6 +121,7 @@ export function withAuditLog<T extends AnyHandler>(
     const ctx = extractContext(event);
     const action = extractAction(event);
     const resource = extractResource(event, action);
+    const correlationId = extractCorrelationId(event);
 
     try {
       const result = await fn(event, ...rest);
@@ -92,6 +133,7 @@ export function withAuditLog<T extends AnyHandler>(
         resource,
         outcome: 'success',
         ip: ctx.ip,
+        correlationId,
         durationMs: Date.now() - start,
       }).catch((e) => console.error('[audit-logger] write failed', e));
       return result;
@@ -104,6 +146,7 @@ export function withAuditLog<T extends AnyHandler>(
         outcome: 'failure',
         errorCode: err?.message ?? String(err),
         ip: ctx.ip,
+        correlationId,
         durationMs: Date.now() - start,
       }).catch((e) => console.error('[audit-logger] write failed', e));
       throw err;
@@ -136,6 +179,17 @@ function extractAction(event: any): string {
   // API Gateway: use METHOD /path
   if (event?.httpMethod && event?.path) return `${event.httpMethod} ${event.path}`;
   return 'unknown';
+}
+
+function extractCorrelationId(event: any): string {
+  // API Gateway: prefer x-correlation-id header set by caller, else use requestId
+  const headers = event?.headers as Record<string, string> | undefined;
+  return (
+    headers?.['x-correlation-id'] ??
+    headers?.['X-Correlation-Id'] ??
+    event?.requestContext?.requestId ??
+    ulid()
+  );
 }
 
 function extractResource(event: any, action: string): string {

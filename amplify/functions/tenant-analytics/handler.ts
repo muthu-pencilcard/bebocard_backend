@@ -53,7 +53,6 @@ interface SegmentDesc {
 interface SegmentsResponse {
   brandId: string;
   period: string;
-  cohortSize: number;
   subscriberCount: number;
   spendDistribution: Record<string, number>;
   visitFrequency: Record<string, number>;
@@ -84,6 +83,10 @@ const _handler: APIGatewayProxyHandler = async (event) => {
       return handleSegments(event, headers, tenant);
     }
 
+    if (path.endsWith('/analytics/subscriber-count')) {
+      return handleSubscriberCount(event, headers, tenant);
+    }
+
     return { statusCode: 404, headers, body: JSON.stringify({ error: 'Unknown route' }) };
   } catch (err) {
     console.error('[tenant-analytics]', err);
@@ -111,7 +114,8 @@ async function handleSegments(
   tenant: ValidatedTenant,
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
   if (!tenant.allowedScopes.includes('segments')) {
-    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Scope not permitted' }) };
+    console.warn('[tenant-analytics] scope not permitted', { tenantId: tenant.tenantId, requestedScope: 'segments' });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   const brandId = event.queryStringParameters?.['brandId'];
@@ -122,7 +126,8 @@ async function handleSegments(
   }
 
   if (!tenant.brandIds.includes(brandId)) {
-    return { statusCode: 403, headers, body: JSON.stringify({ error: 'brandId not permitted for this tenant' }) };
+    console.warn('[tenant-analytics] brandId not in tenant allowlist', { tenantId: tenant.tenantId, brandId });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   // Query the UserDataEvent GSI with sK as the partition key.
@@ -152,13 +157,11 @@ async function handleSegments(
   const spendCounts: Record<string, number> = { '<100': 0, '100-200': 0, '200-500': 0, '500+': 0 };
   const visitCounts: Record<string, number> = { new: 0, occasional: 0, frequent: 0, lapsed: 0 };
   let subscriberCount = 0;
-  let totalInCohort = 0;
 
   for (const item of items) {
     let seg: Partial<SegmentDesc>;
     try { seg = JSON.parse(item.desc ?? '{}'); } catch { continue; }
 
-    totalInCohort++;
     if (!seg.subscribed) continue;     // consent gate — skip non-subscribers
 
     subscriberCount++;
@@ -166,19 +169,19 @@ async function handleSegments(
     if (seg.visitFrequency) visitCounts[seg.visitFrequency] = (visitCounts[seg.visitFrequency] ?? 0) + 1;
   }
 
-  // Suppress if below minimum cohort threshold — prevents statistical re-identification
+  // Suppress if below minimum cohort threshold — prevents statistical re-identification.
+  // Return zeroed distributions with no suppression flag so tenants cannot infer user base size.
   const threshold = tenant.minCohortThreshold ?? MIN_COHORT;
   if (subscriberCount < threshold) {
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({
-        brandId,
-        period,
-        suppressed: true,
-        reason: `Cohort below minimum threshold of ${threshold}`,
-      }),
+    console.info('[tenant-analytics] cohort suppressed', { brandId, subscriberCount, threshold });
+    const response: SegmentsResponse = {
+      brandId,
+      period,
+      subscriberCount: 0,
+      spendDistribution: { '<100': 0, '100-200': 0, '200-500': 0, '500+': 0 },
+      visitFrequency: { new: 0, occasional: 0, frequent: 0, lapsed: 0 },
     };
+    return { statusCode: 200, headers, body: JSON.stringify(response) };
   }
 
   // Convert counts to proportions
@@ -188,13 +191,72 @@ async function handleSegments(
   const response: SegmentsResponse = {
     brandId,
     period,
-    cohortSize: totalInCohort,
     subscriberCount,
     spendDistribution,
     visitFrequency,
   };
 
   return { statusCode: 200, headers, body: JSON.stringify(response) };
+}
+
+// ── GET /analytics/subscriber-count ──────────────────────────────────────────
+//
+// Returns the raw count of active subscribers for one of the tenant's brandIds.
+// Unlike /analytics/segments, no cohort suppression is applied — the tenant
+// is entitled to know how many users have subscribed to their brand.
+//
+// Query params:
+//   brandId  — required, must be in tenant.brandIds
+//   period   — optional, echoed back only
+
+async function handleSubscriberCount(
+  event: Parameters<APIGatewayProxyHandler>[0],
+  headers: Record<string, string>,
+  tenant: ValidatedTenant,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  if (!tenant.allowedScopes.includes('subscriber_count')) {
+    console.warn('[tenant-analytics] scope not permitted', { tenantId: tenant.tenantId, requestedScope: 'subscriber_count' });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  const brandId = event.queryStringParameters?.['brandId'];
+  const period = event.queryStringParameters?.['period'] ?? currentPeriod();
+
+  if (!brandId) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: 'brandId is required' }) };
+  }
+
+  if (!tenant.brandIds.includes(brandId)) {
+    console.warn('[tenant-analytics] brandId not in tenant allowlist', { tenantId: tenant.tenantId, brandId });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  // Query the sK-pK-index for SUBSCRIPTION#<brandId> with status = ACTIVE.
+  // Uses Select: 'COUNT' so DynamoDB returns only a count — no item data crosses the wire.
+  const subscriptionSK = `SUBSCRIPTION#${brandId}`;
+  let subscriberCount = 0;
+  let lastKey: Record<string, unknown> | undefined;
+
+  do {
+    const res = await dynamo.send(new QueryCommand({
+      TableName: USER_TABLE,
+      IndexName: 'sK-pK-index',
+      KeyConditionExpression: 'sK = :sk',
+      FilterExpression: '#status = :active',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':sk': subscriptionSK, ':active': 'ACTIVE' },
+      Select: 'COUNT',
+      ExclusiveStartKey: lastKey,
+    }));
+    subscriberCount += res.Count ?? 0;
+    lastKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastKey);
+
+  return {
+    statusCode: 200,
+    headers,
+    body: JSON.stringify({ brandId, period, subscriberCount }),
+  };
 }
 
 // ── Tenant API key authentication ─────────────────────────────────────────────

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BeboCard — Claim your gift card</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --primary: #6366f1;
+      --primary-light: #eef2ff;
+      --green: #22c55e;
+      --green-light: #f0fdf4;
+      --red: #ef4444;
+      --red-light: #fef2f2;
+      --grey: #6b7280;
+      --border: #e5e7eb;
+      --radius: 16px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f9fafb;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      color: #111827;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: var(--radius);
+      padding: 40px 32px;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.07);
+      text-align: center;
+    }
+
+    .logo { width: 48px; height: 48px; margin-bottom: 20px; }
+
+    .spinner {
+      width: 48px; height: 48px;
+      border: 3px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .icon-circle {
+      width: 72px; height: 72px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 24px;
+      font-size: 36px;
+    }
+    .icon-circle.success { background: var(--green-light); }
+    .icon-circle.error   { background: var(--red-light); }
+
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+    p  { color: var(--grey); font-size: 15px; line-height: 1.5; }
+
+    .card-value {
+      background: var(--primary-light);
+      border-radius: 12px;
+      padding: 16px;
+      margin: 20px 0;
+    }
+    .card-value .amount { font-size: 32px; font-weight: 900; color: var(--primary); letter-spacing: -1px; }
+    .card-value .brand  { font-size: 14px; color: var(--grey); margin-top: 4px; }
+
+    .message-box {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 16px 0;
+      font-style: italic;
+      color: #374151;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .pin-box {
+      background: #fff;
+      border: 2px solid var(--primary);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 12px 0;
+    }
+    .pin-box .pin-label { font-size: 11px; font-weight: 600; color: var(--grey); text-transform: uppercase; letter-spacing: 0.05em; }
+    .pin-box .pin-value { font-size: 20px; font-weight: 700; letter-spacing: 0.15em; color: #111; margin-top: 4px; font-family: monospace; }
+
+    .divider { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+    .app-prompt { font-size: 13px; color: var(--grey); margin-bottom: 16px; }
+
+    .store-buttons { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .store-btn {
+      display: flex; align-items: center; gap: 8px;
+      background: #111; color: #fff;
+      border: none; border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 13px; font-weight: 600;
+      cursor: pointer; text-decoration: none;
+      transition: background 0.15s;
+    }
+    .store-btn:hover { background: #333; }
+    .store-btn svg { width: 18px; height: 18px; fill: #fff; flex-shrink: 0; }
+
+    .security-note {
+      display: flex; align-items: flex-start; gap: 8px;
+      background: var(--green-light);
+      border: 1px solid #bbf7d0;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-top: 20px;
+      text-align: left;
+      font-size: 12px;
+      color: #166534;
+      line-height: 1.4;
+    }
+    .security-note .icon { flex-shrink: 0; margin-top: 1px; }
+  </style>
+</head>
+<body>
+  <div class="card" id="root">
+    <!-- Loading state -->
+    <div id="state-loading">
+      <div class="spinner"></div>
+      <h1>Claiming your gift card…</h1>
+      <p>This will only take a moment.</p>
+    </div>
+
+    <!-- Success state (hidden) -->
+    <div id="state-success" style="display:none;">
+      <div class="icon-circle success">🎁</div>
+      <h1 id="success-title">Gift card claimed!</h1>
+      <p id="success-from"></p>
+      <div class="card-value">
+        <div class="amount" id="success-amount"></div>
+        <div class="brand" id="success-brand"></div>
+      </div>
+      <div class="message-box" id="success-message" style="display:none;"></div>
+      <div class="pin-box" id="pin-box" style="display:none;">
+        <div class="pin-label">Card PIN</div>
+        <div class="pin-value" id="pin-value"></div>
+      </div>
+      <div class="pin-box" id="card-number-box" style="display:none;">
+        <div class="pin-label">Card Number</div>
+        <div class="pin-value" id="card-number-value"></div>
+      </div>
+      <div class="security-note">
+        <span class="icon">🔒</span>
+        <span>Save this PIN somewhere safe. For the best security, install BeboCard — your PIN will be stored in your device Keychain and never on our servers.</span>
+      </div>
+      <hr class="divider" />
+      <p class="app-prompt">Install BeboCard to manage this gift card, check your balance, and add more loyalty cards — all without sharing your email.</p>
+      <div class="store-buttons">
+        <a class="store-btn" href="https://apps.apple.com/app/bebocard/id0000000000" target="_blank" rel="noopener">
+          <!-- Apple logo -->
+          <svg viewBox="0 0 814 1000"><path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-42.3-150.3-109.2C78 469.5 83.1 244.7 121.4 163.9 157.8 83.4 239.8 32 330.4 32c91.8 0 138.8 49.5 200.5 49.5 59.6 0 114.9-50.9 200.5-50.9 43.5 0 155.3 4.4 224 69.8zm-316.5-159.1c15.1-35.7 30.3-95.8 0-151.4-30.6 2.3-86.6 34.3-121.7 72.7-31.8 34.6-61.8 96.5-49.8 152.4 36.9 2.6 75.2-19.3 171.5-73.7z"/></svg>
+          App Store
+        </a>
+        <a class="store-btn" href="https://play.google.com/store/apps/details?id=com.bebocard.app" target="_blank" rel="noopener">
+          <!-- Google Play logo -->
+          <svg viewBox="0 0 512 512"><path d="M325.3 234.3L104.6 13l280.8 161.2-60.1 60.1zM47 0C34 6.8 25.3 19.2 25.3 35.3v441.3c0 16.1 8.7 28.5 21.7 35.3l256-255.8L47 0zm425.9 225.6l-58.1-33.5-65.5 65.5 65.5 65.5 58.1-33.5c16.4-9.2 16.4-34.1-.1-64zm-309 95.8L47 512l280.8-161.2-64.9-65.4z"/></svg>
+          Google Play
+        </a>
+      </div>
+    </div>
+
+    <!-- Error state (hidden) -->
+    <div id="state-error" style="display:none;">
+      <div class="icon-circle error">⚠️</div>
+      <h1>Could not claim gift</h1>
+      <p id="error-message" style="margin-top:8px;"></p>
+    </div>
+  </div>
+
+  <script>
+    // Extract token from URL path: /gift/<token>
+    const pathParts = window.location.pathname.split('/').filter(Boolean);
+    const token = pathParts[pathParts.length - 1];
+
+    // API base URL injected at build/deploy time; falls back to prod
+    const API_BASE = window.BEBO_GIFT_API_BASE || 'https://api.bebocard.com';
+
+    function show(stateId) {
+      ['state-loading', 'state-success', 'state-error'].forEach(id => {
+        document.getElementById(id).style.display = id === stateId ? '' : 'none';
+      });
+    }
+
+    function setError(msg) {
+      document.getElementById('error-message').textContent = msg;
+      show('state-error');
+    }
+
+    async function claimGift() {
+      if (!token) {
+        setError('Invalid claim link — no token found in the URL.');
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/gift/${token}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          if (res.status === 409) { setError('This gift has already been claimed.'); return; }
+          if (res.status === 410) { setError('This gift link has expired (90-day limit).'); return; }
+          if (res.status === 401) { setError('Invalid or tampered claim link.'); return; }
+          setError(data.error || `Unexpected error (${res.status}).`);
+          return;
+        }
+
+        // Populate success view
+        const currency = data.currency || 'AUD';
+        const amount = Number(data.denomination || 0).toFixed(0);
+        document.getElementById('success-amount').textContent = `${currency} ${amount}`;
+        document.getElementById('success-brand').textContent = data.brandName || '';
+
+        if (data.senderDisplayName) {
+          document.getElementById('success-from').textContent = `From ${data.senderDisplayName}`;
+        }
+        if (data.message) {
+          const msgEl = document.getElementById('success-message');
+          msgEl.textContent = `"${data.message}"`;
+          msgEl.style.display = '';
+        }
+        if (data.cardNumber) {
+          const el = document.getElementById('card-number-box');
+          document.getElementById('card-number-value').textContent = data.cardNumber;
+          el.style.display = '';
+        }
+        if (data.pin) {
+          const el = document.getElementById('pin-box');
+          document.getElementById('pin-value').textContent = data.pin;
+          el.style.display = '';
+        }
+
+        show('state-success');
+      } catch (err) {
+        setError('Network error — check your connection and try again.');
+      }
+    }
+
+    claimGift();
+  </script>
+</body>
+</html>

@@ -18,11 +18,14 @@
 
 import { DynamoDBClient, PutItemCommand, QueryCommand, GetItemCommand, AttributeValue } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { withGraphQLHandler } from '../../shared/secure-handler-wrapper';
+import { getTenantStateForBrand, incrementTenantUsageCounter } from '../../shared/tenant-billing';
 
 const ddb = new DynamoDBClient({});
+const docDynamo = DynamoDBDocumentClient.from(ddb);
 const USER_TABLE = process.env.USER_TABLE!;
 const REF_TABLE = process.env.REF_TABLE!;
 
@@ -63,6 +66,19 @@ async function reportGeofenceEntry(args: {
 }) {
   const { secondaryULID, geofenceId, entryTime } = args;
 
+  // Validate entryTime: must be a parseable ISO timestamp within ±5 minutes of server time.
+  // Rejects replayed or future-dated events that could manipulate visit frequency counters.
+  const entryMs = Date.parse(entryTime);
+  if (isNaN(entryMs)) {
+    console.warn('[geofence-handler] invalid entryTime format', { entryTime });
+    return 'INVALID_ENTRY_TIME';
+  }
+  const driftMs = Math.abs(Date.now() - entryMs);
+  if (driftMs > 5 * 60 * 1000) {
+    console.warn('[geofence-handler] entryTime outside ±5 min window', { entryTime, driftMs });
+    return 'ENTRY_TIME_DRIFT';
+  }
+
   // Resolve secondaryULID → permULID via AdminDataEvent.
   // Device never sends permULID or explicit brand/store — server resolves from its own records.
   const adminResult = await ddb.send(new QueryCommand({
@@ -82,11 +98,17 @@ async function reportGeofenceEntry(args: {
   const parts = geofenceId.split('#');
   const brandId = parts[1] ?? '';
   const storeId = parts[2] ?? '';
+  if (!brandId || !storeId) return 'INVALID_GEOFENCE';
+
+  const tenantState = await getTenantStateForBrand(docDynamo, REF_TABLE, brandId);
+  if (!tenantState.active) return 'TENANT_BILLING_SUSPENDED';
+  if (tenantState.tier !== 'intelligence') return 'TENANT_NOT_ELIGIBLE';
 
   const pK = `USER#${permULID}`;
 
   // 1. Write the visit event (used for frequency calculation)
   const visitSK = `VISIT#${brandId}#${entryTime}`;
+  let visitRecorded = true;
   try {
     await ddb.send(new PutItemCommand({
       TableName: USER_TABLE,
@@ -102,11 +124,16 @@ async function reportGeofenceEntry(args: {
     }));
   } catch {
     // ignore ConditionCheckFailedException (duplicate entry)
+    visitRecorded = false;
   }
 
   // 2. Count visits this month for this brand
   const monthPrefix = entryTime.substring(0, 7); // "YYYY-MM"
   const visitCount = await countVisitsThisMonth(pK, brandId, monthPrefix);
+
+  if (visitRecorded) {
+    await incrementTenantUsageCounter(docDynamo, REF_TABLE, tenantState.tenantId, brandId, 'geolocation');
+  }
 
   // 3. Fetch active broadcast offer from the brand (if any)
   const broadcastOffer = await getActiveBroadcastOffer(brandId);
@@ -226,6 +253,11 @@ async function getNearbyStores(args: {
   limit: number;
 }) {
   const { brandId, lat, lng, radiusKm, limit } = args;
+
+  // Validate coordinate ranges and cap radiusKm to prevent full-table scans.
+  if (typeof lat !== 'number' || lat < -90 || lat > 90) throw new Error('Invalid latitude');
+  if (typeof lng !== 'number' || lng < -180 || lng > 180) throw new Error('Invalid longitude');
+  if (typeof radiusKm !== 'number' || radiusKm <= 0 || radiusKm > 5) throw new Error('radiusKm must be 0–5');
 
   // Query store locations from RefDataEvent: pK=STORES, sK begins_with STORE#<brandId>#
   const result = await ddb.send(new QueryCommand({

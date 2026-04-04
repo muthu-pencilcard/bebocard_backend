@@ -5,16 +5,18 @@
  *   s3://bebocard-tenant-uploads/brands/<brandId>/<type>/<filename>
  *
  * Pipeline:
- *   1. MIME type check  — JPEG / PNG / WebP only
- *   2. Size check       — max 5 MB
+ *   1. MIME type check  — type-specific
+ *   2. Size check       — type-specific
  *   3. Rekognition      — content moderation (confidence > 75)
  *   4. PASS → copy to app-reference bucket, update RefDataEvent CDN URL, write audit log
  *   5. FAIL → copy to rejected/ prefix in staging, write audit log
  *
  * Intended content variants:
- *   logo    512 × 512 px
- *   banner  1200 × 400 px
- *   offer   800 × 600 px
+ *   logo             512 × 512 px
+ *   banner           1200 × 400 px
+ *   offer            800 × 600 px
+ *   widget_branding  branded image asset for Phase 17 embed flows
+ *   catalogue        PDF upload for catalogue distribution
  *
  * Note: this handler currently validates MIME, size, and moderation only.
  * Pixel dimensions are documented here for uploader guidance, not enforced yet.
@@ -48,15 +50,15 @@ const REF_BUCKET      = process.env.APP_REFERENCE_BUCKET!;
 const REFDATA_TABLE   = process.env.REFDATA_TABLE!;
 const ADMIN_TABLE     = process.env.ADMIN_TABLE!;
 
-const MAX_BYTES       = 5 * 1024 * 1024;  // 5 MB
-const ALLOWED_MIME    = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const IMAGE_MIME      = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MOD_CONFIDENCE  = 75;
 
-// Maps content-type path segment → allowed MIME types
-const TYPE_MIME: Record<string, Set<string>> = {
-  logo:   ALLOWED_MIME,
-  banner: ALLOWED_MIME,
-  offer:  ALLOWED_MIME,
+const TYPE_RULES: Record<string, { mime: Set<string>; maxBytes: number; moderation: boolean; cdnField: string }> = {
+  logo: { mime: IMAGE_MIME, maxBytes: 5 * 1024 * 1024, moderation: true, cdnField: 'logoUrl' },
+  banner: { mime: IMAGE_MIME, maxBytes: 5 * 1024 * 1024, moderation: true, cdnField: 'bannerUrl' },
+  offer: { mime: IMAGE_MIME, maxBytes: 5 * 1024 * 1024, moderation: true, cdnField: 'offerImageUrl' },
+  widget_branding: { mime: IMAGE_MIME, maxBytes: 5 * 1024 * 1024, moderation: true, cdnField: 'widgetBrandingUrl' },
+  catalogue: { mime: new Set(['application/pdf']), maxBytes: 20 * 1024 * 1024, moderation: false, cdnField: 'cataloguePdfUrl' },
 };
 
 // ── Handler ──────────────────────────────────────────────────────────────────
@@ -82,7 +84,8 @@ async function processObject(key: string): Promise<void> {
   const contentType = parts[2];   // logo | banner | offer
   const filename    = parts.slice(3).join('/');
 
-  if (!TYPE_MIME[contentType]) {
+  const rules = TYPE_RULES[contentType];
+  if (!rules) {
     await reject(brandId, key, filename, contentType, `Unknown content type: ${contentType}`);
     return;
   }
@@ -100,32 +103,34 @@ async function processObject(key: string): Promise<void> {
   }
 
   // 2. MIME check
-  if (!TYPE_MIME[contentType].has(mime)) {
+  if (!rules.mime.has(mime)) {
     await reject(brandId, key, filename, contentType, `Invalid MIME type: ${mime}`);
     return;
   }
 
   // 3. Size check
-  if (size > MAX_BYTES) {
-    await reject(brandId, key, filename, contentType, `File too large: ${(size / 1024 / 1024).toFixed(1)} MB (max 5 MB)`);
+  if (size > rules.maxBytes) {
+    await reject(brandId, key, filename, contentType, `File too large: ${(size / 1024 / 1024).toFixed(1)} MB (max ${(rules.maxBytes / 1024 / 1024).toFixed(0)} MB)`);
     return;
   }
 
   // 4. Rekognition moderation
-  try {
-    const mod = await rek.send(new DetectModerationLabelsCommand({
-      Image: { S3Object: { Bucket: STAGING_BUCKET, Name: key } },
-      MinConfidence: MOD_CONFIDENCE,
-    }));
+  if (rules.moderation) {
+    try {
+      const mod = await rek.send(new DetectModerationLabelsCommand({
+        Image: { S3Object: { Bucket: STAGING_BUCKET, Name: key } },
+        MinConfidence: MOD_CONFIDENCE,
+      }));
 
-    if ((mod.ModerationLabels?.length ?? 0) > 0) {
-      const topLabel = mod.ModerationLabels![0].Name ?? 'Unknown';
-      await reject(brandId, key, filename, contentType, `Content moderation: ${topLabel}`);
-      return;
+      if ((mod.ModerationLabels?.length ?? 0) > 0) {
+        const topLabel = mod.ModerationLabels![0].Name ?? 'Unknown';
+        await reject(brandId, key, filename, contentType, `Content moderation: ${topLabel}`);
+        return;
+      }
+    } catch (e) {
+      // If Rekognition is unavailable (e.g. unsupported format), log and allow through
+      console.warn(`[content-validator] Rekognition skipped for ${key}:`, e);
     }
-  } catch (e) {
-    // If Rekognition is unavailable (e.g. unsupported format), log and allow through
-    console.warn(`[content-validator] Rekognition skipped for ${key}:`, e);
   }
 
   // 5. PASS — copy to reference bucket
@@ -146,7 +151,7 @@ async function processObject(key: string): Promise<void> {
 
   // 6. Update RefDataEvent with new CDN URL
   const cdnUrl = `https://${REF_BUCKET}.s3.ap-southeast-2.amazonaws.com/${destKey}`;
-  const cdnField = contentType === 'logo' ? 'logoUrl' : contentType === 'banner' ? 'bannerUrl' : 'offerImageUrl';
+  const cdnField = rules.cdnField;
 
   try {
     await ddb.send(new UpdateCommand({

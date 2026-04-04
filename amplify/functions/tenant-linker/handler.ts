@@ -27,6 +27,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { monotonicFactory } from 'ulid';
+import { randomBytes, createHash } from 'crypto';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const cognito = new CognitoIdentityProviderClient({});
@@ -37,7 +38,7 @@ const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 const APP_SUCCESS_URL = process.env.APP_SUCCESS_URL ?? 'https://bebocard.app/link-success';
 const APP_FAILURE_URL = process.env.APP_FAILURE_URL ?? 'https://bebocard.app/link-failed';
 const BASE_URL = process.env.API_BASE_URL!; // e.g. https://api.bebocard.app
-const OAUTH_STATE_TTL_SECONDS = Number(process.env.OAUTH_STATE_TTL_SECONDS ?? '600');
+const OAUTH_STATE_TTL_SECONDS = Number(process.env.OAUTH_STATE_TTL_SECONDS ?? '300');
 
 // ---------------------------------------------------------------------------
 // Brand OAuth config — add real client IDs / scopes from env per brand
@@ -101,16 +102,19 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const params = event.queryStringParameters ?? {};
 
   try {
+    const headers = event.headers ?? {};
+    const userAgent = headers['user-agent'] ?? headers['User-Agent'] ?? '';
+
     // GET /auth/link/{brandId}?permULID=<permULID>&authToken=<accessToken>
     const linkMatch = path.match(/\/auth\/link\/([a-z]+)$/);
     if (linkMatch) {
-      return initiateOAuth(linkMatch[1], params.permULID ?? '', params.authToken ?? '');
+      return initiateOAuth(linkMatch[1], params.permULID ?? '', params.authToken ?? '', userAgent);
     }
 
     // GET /auth/callback/{brandId}?code=...&state=<nonce>
     const callbackMatch = path.match(/\/auth\/callback\/([a-z]+)$/);
     if (callbackMatch) {
-      return handleCallback(callbackMatch[1], params.code ?? '', params.state ?? '');
+      return handleCallback(callbackMatch[1], params.code ?? '', params.state ?? '', userAgent);
     }
 
     return { statusCode: 404, body: 'Not found' };
@@ -124,7 +128,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 // Phase 1 — Initiate OAuth
 // ---------------------------------------------------------------------------
 
-async function initiateOAuth(brandId: string, permULID: string, authToken: string) {
+async function initiateOAuth(brandId: string, permULID: string, authToken: string, userAgent: string) {
   const cfg = BRAND_CONFIG[brandId];
   if (!cfg) return { statusCode: 400, body: `Unknown brand: ${brandId}` };
   if (!permULID || !authToken) return { statusCode: 400, body: 'Missing auth context' };
@@ -134,11 +138,12 @@ async function initiateOAuth(brandId: string, permULID: string, authToken: strin
   const verifiedPermULID = await verifyAuthToken(authToken, permULID);
   if (!verifiedPermULID) return redirect(`${APP_FAILURE_URL}?reason=invalid_state`);
 
-  const stateToken = await createOauthState(brandId, verifiedPermULID);
+  const { codeVerifier, codeChallenge } = generatePKCE();
+  const stateToken = await createOauthState(brandId, verifiedPermULID, codeVerifier, userAgent);
 
   const redirectUri = encodeURIComponent(`${BASE_URL}/auth/callback/${brandId}`);
   const scope = encodeURIComponent(cfg.scopes);
-  const authUrl = `${cfg.authUrl}?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${stateToken}`;
+  const authUrl = `${cfg.authUrl}?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${stateToken}&code_challenge=${codeChallenge}&code_challenge_method=S256`;
 
   return redirect(authUrl);
 }
@@ -147,17 +152,17 @@ async function initiateOAuth(brandId: string, permULID: string, authToken: strin
 // Phase 2 — OAuth Callback
 // ---------------------------------------------------------------------------
 
-async function handleCallback(brandId: string, code: string, stateToken: string) {
+async function handleCallback(brandId: string, code: string, stateToken: string, userAgent: string) {
   const cfg = BRAND_CONFIG[brandId];
   if (!cfg || !code || !stateToken) {
     return redirect(`${APP_FAILURE_URL}?reason=invalid_params`);
   }
 
-  const state = await consumeOauthState(stateToken);
+  const state = await consumeOauthState(stateToken, userAgent);
   if (!state || state.brandId != brandId) {
     return redirect(`${APP_FAILURE_URL}?reason=invalid_state`);
   }
-  const permULID = state.permULID;
+  const { permULID, codeVerifier } = state;
 
   const clientId = process.env[cfg.clientIdEnv];
   const clientSecret = process.env[`${cfg.clientIdEnv.replace('_CLIENT_ID', '')}_CLIENT_SECRET`];
@@ -165,7 +170,7 @@ async function handleCallback(brandId: string, code: string, stateToken: string)
     return redirect(`${APP_FAILURE_URL}?reason=not_configured`);
   }
 
-  // Exchange code for access token
+  // Exchange code for access token (include PKCE verifier so brand server can verify the challenge)
   const redirectUri = `${BASE_URL}/auth/callback/${brandId}`;
   const tokenRes = await fetch(cfg.tokenUrl, {
     method: 'POST',
@@ -177,6 +182,7 @@ async function handleCallback(brandId: string, code: string, stateToken: string)
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri,
+      code_verifier: codeVerifier,
     }).toString(),
   });
 
@@ -323,6 +329,23 @@ function redirect(url: string) {
   };
 }
 
+/** Generates a PKCE code_verifier (random 64-byte hex) and its SHA-256 code_challenge (base64url). */
+function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
+  const codeVerifier = randomBytes(64).toString('hex'); // 128 chars, well above 43-char PKCE minimum
+  const codeChallenge = createHash('sha256')
+    .update(codeVerifier)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+  return { codeVerifier, codeChallenge };
+}
+
+/** Returns a SHA-256 hex digest of the user-agent string for device binding. */
+function hashUserAgent(ua: string): string {
+  return createHash('sha256').update(ua).digest('hex');
+}
+
 async function verifyAuthToken(authToken: string, expectedPermULID: string): Promise<string | null> {
   try {
     const res = await cognito.send(new GetUserCommand({ AccessToken: authToken }));
@@ -334,7 +357,12 @@ async function verifyAuthToken(authToken: string, expectedPermULID: string): Pro
   }
 }
 
-async function createOauthState(brandId: string, permULID: string): Promise<string> {
+async function createOauthState(
+  brandId: string,
+  permULID: string,
+  codeVerifier: string,
+  userAgent: string,
+): Promise<string> {
   const token = ulid();
   const now = Date.now();
   const expiresAt = new Date(now + (OAUTH_STATE_TTL_SECONDS * 1000)).toISOString();
@@ -346,7 +374,7 @@ async function createOauthState(brandId: string, permULID: string): Promise<stri
       sK: 'STATE',
       eventType: 'OAUTH_STATE',
       status: 'PENDING',
-      desc: JSON.stringify({ brandId, permULID, expiresAt }),
+      desc: JSON.stringify({ brandId, permULID, expiresAt, codeVerifier, uaHash: hashUserAgent(userAgent) }),
       createdAt: new Date(now).toISOString(),
       updatedAt: new Date(now).toISOString(),
     },
@@ -355,7 +383,10 @@ async function createOauthState(brandId: string, permULID: string): Promise<stri
   return token;
 }
 
-async function consumeOauthState(token: string): Promise<{ brandId: string; permULID: string } | null> {
+async function consumeOauthState(
+  token: string,
+  userAgent: string,
+): Promise<{ brandId: string; permULID: string; codeVerifier: string } | null> {
   const result = await dynamo.send(new GetCommand({
     TableName: ADMIN_TABLE,
     Key: { pK: `OAUTHSTATE#${token}`, sK: 'STATE' },
@@ -364,18 +395,27 @@ async function consumeOauthState(token: string): Promise<{ brandId: string; perm
   const item = result.Item;
   if (!item) return null;
 
-  const desc = JSON.parse(String(item.desc ?? '{}')) as { brandId?: string; permULID?: string; expiresAt?: string };
-  if (!desc.brandId || !desc.permULID || !desc.expiresAt || desc.expiresAt < new Date().toISOString()) {
-    await dynamo.send(new DeleteCommand({
-      TableName: ADMIN_TABLE,
-      Key: { pK: `OAUTHSTATE#${token}`, sK: 'STATE' },
-    }));
-    return null;
-  }
+  const desc = JSON.parse(String(item.desc ?? '{}')) as {
+    brandId?: string;
+    permULID?: string;
+    expiresAt?: string;
+    codeVerifier?: string;
+    uaHash?: string;
+  };
 
+  // Always delete the record to prevent replay regardless of validation outcome
   await dynamo.send(new DeleteCommand({
     TableName: ADMIN_TABLE,
     Key: { pK: `OAUTHSTATE#${token}`, sK: 'STATE' },
   }));
-  return { brandId: desc.brandId, permULID: desc.permULID };
+
+  if (!desc.brandId || !desc.permULID || !desc.expiresAt || !desc.codeVerifier) return null;
+  if (desc.expiresAt < new Date().toISOString()) return null;
+  // Verify the callback comes from the same client that initiated the flow
+  if (desc.uaHash && desc.uaHash !== hashUserAgent(userAgent)) {
+    console.warn('tenant-linker: user-agent mismatch on callback', { brandId: desc.brandId });
+    return null;
+  }
+
+  return { brandId: desc.brandId, permULID: desc.permULID, codeVerifier: desc.codeVerifier };
 }

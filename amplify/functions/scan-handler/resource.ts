@@ -7,6 +7,7 @@ export const scanHandlerFn = defineFunction({
   environment: {
     ADMIN_TABLE: process.env.ADMIN_TABLE ?? '',
     USER_TABLE: process.env.USER_TABLE ?? '',
+    REFDATA_TABLE: process.env.REFDATA_TABLE ?? '',
     // FIREBASE_SERVICE_ACCOUNT_JSON — set via: amplify secret set FIREBASE_SERVICE_ACCOUNT_JSON
   },
   // This is a public Lambda — no auth required from POS side

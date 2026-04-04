@@ -71,22 +71,26 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     // Pseudonymous user identifier — permULID never stored in analytics table
     const userHash = createHmac('sha256', USER_HASH_SALT).update(permULID).digest('hex');
 
-    const rawDate    = String(desc['purchaseDate'] ?? '').substring(0, 10) || new Date().toISOString().substring(0, 10);
-    const amount     = typeof desc['amount'] === 'number' ? desc['amount'] : parseFloat(String(desc['amount'] ?? 0)) || 0;
-    const currency   = String(desc['currency']  ?? 'AUD').replace(/'/g, "''");
-    const category   = String(desc['category']  ?? 'other').replace(/'/g, "''");
-    const merchant   = String(desc['merchant']  ?? '').replace(/'/g, "''");
+    const rawDate    = sanitizeDate(String(desc['purchaseDate'] ?? '')) ?? new Date().toISOString().substring(0, 10);
+    const amount     = sanitizeAmount(desc['amount']);
+    const currency   = sanitizeCurrency(String(desc['currency'] ?? 'AUD'));
+    const category   = sanitizeIdentifier(String(desc['category'] ?? 'other'));
+    const merchant   = sanitizeText(String(desc['merchant'] ?? ''));
     const ingestedAt = new Date().toISOString().replace('T', ' ').replace('Z', '');
+
+    if (amount === null) continue;   // reject non-numeric amounts
 
     rows.push({ userHash, brandId, purchaseDate: rawDate, amount, currency, category, merchant, ingestedAt });
   }
 
   if (rows.length === 0) return;
 
-  // Build single INSERT for the entire batch — one Athena round-trip per Lambda invocation
+  // Build single INSERT for the entire batch — one Athena round-trip per Lambda invocation.
+  // All string values are escaped via dedicated sanitizers; numeric/date values are
+  // type-enforced so no string injection path exists for those columns.
   const valuesList = rows.map(r =>
-    `('${r.userHash}', '${r.brandId.replace(/'/g, "''")}', DATE '${r.purchaseDate}', ` +
-    `${r.amount}, '${r.currency}', '${r.category}', '${r.merchant}', TIMESTAMP '${r.ingestedAt}')`,
+    `('${r.userHash}', '${escapeSql(r.brandId)}', DATE '${r.purchaseDate}', ` +
+    `${r.amount}, '${escapeSql(r.currency)}', '${escapeSql(r.category)}', '${escapeSql(r.merchant)}', TIMESTAMP '${r.ingestedAt}')`,
   ).join(',\n    ');
 
   const sql = `INSERT INTO \`${GLUE_DATABASE}\`.\`receipts\`
@@ -144,4 +148,52 @@ async function waitForQuery(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ── SQL sanitizers ────────────────────────────────────────────────────────────
+// Athena INSERT does not support parameterized execution, so each value type
+// gets a dedicated sanitizer that enforces format before interpolation.
+
+/** Escapes single quotes in strings intended for SQL single-quoted literals. */
+function escapeSql(value: string): string {
+  return value.replace(/'/g, "''").replace(/\\/g, '\\\\');
+}
+
+/** Validates YYYY-MM-DD format; returns null if invalid. */
+function sanitizeDate(value: string): string | null {
+  const trimmed = value.substring(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+/** Coerces to a finite number; returns null if not numeric. */
+function sanitizeAmount(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+}
+
+/** Validates ISO 4217 currency code (3 uppercase letters). Defaults to AUD. */
+function sanitizeCurrency(value: string): string {
+  return /^[A-Z]{3}$/.test(value) ? value : 'AUD';
+}
+
+/**
+ * Validates an identifier-style string (category, brandId, etc.).
+ * Allows alphanumerics, underscores, hyphens, spaces. Max 64 chars.
+ * Falls back to 'other' if invalid.
+ */
+function sanitizeIdentifier(value: string): string {
+  const trimmed = value.trim().substring(0, 64);
+  return /^[\w\s-]+$/.test(trimmed) ? trimmed : 'other';
+}
+
+/**
+ * Sanitizes free-text fields (merchant name).
+ * Strips control characters, limits to 200 chars.
+ * SQL escaping is applied separately via escapeSql().
+ */
+function sanitizeText(value: string): string {
+  return value
+    .replace(/[\x00-\x1F\x7F]/g, '')   // strip control chars
+    .trim()
+    .substring(0, 200);
 }

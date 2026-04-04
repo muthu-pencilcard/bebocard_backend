@@ -1,6 +1,7 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
 import { cardManagerFn } from '../functions/card-manager/resource';
 import { geofenceHandlerFn } from '../functions/geofence-handler/resource';
+import { subscriptionProxyFn } from '../functions/subscription-proxy/resource';
 
 const schema = a.schema({
   // ── User data: loyalty cards, receipts, invoices, gift cards, segments ───
@@ -54,7 +55,9 @@ const schema = a.schema({
       index('tenantId').sortKeys(['sK']).queryField('refDataByTenant'),
       index('subjectEmail').sortKeys(['tenantId']).queryField('refDataBySubjectEmail'),
       index('keyId').queryField('refDataByKeyId'),   // used by api-key-auth.ts to look up API keys
+      index('brandId').queryField('refDataByBrand'), // used by business portal for profile lookups
     ])
+
     .authorization(allow => [
       allow.authenticated().to(['read']),
       allow.group('admin'),
@@ -221,11 +224,20 @@ const schema = a.schema({
   // Extends the coarse subscribe/unsubscribe mutations with per-channel controls.
   updateSubscription: a.mutation()
     .arguments({
-      brandId:     a.string().required(),
-      offers:      a.boolean(),
+      brandId: a.string().required(),
+      offers: a.boolean(),
       newsletters: a.boolean(),
-      reminders:   a.boolean(),
-      catalogues:  a.boolean(),
+      reminders: a.boolean(),
+      catalogues: a.boolean(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  snoozeOffers: a.mutation()
+    .arguments({
+      brandId: a.string(),
+      until: a.string(),
     })
     .returns(a.json())
     .handler(a.handler.function(cardManagerFn))
@@ -235,6 +247,134 @@ const schema = a.schema({
   updatePreferences: a.mutation()
     .arguments({ reminders: a.json().required() })
     .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // ── Payment routing (Patent Claims 19–22) ─────────────────────────────────
+  // Called from the app when the user approves or declines a brand payment request.
+  // BeboCard relays the result (+ payment token on approval) to the brand's webhook.
+  // The actual payment transaction executes exclusively between the user's device
+  // (Apple Pay / Google Pay) and the brand's payment processor — BeboCard never
+  // touches payment credentials or settlement.
+  respondToCheckout: a.mutation()
+    .arguments({
+      orderId: a.string().required(),
+      approved: a.boolean().required(),
+      paymentToken: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // ── Consent-Gated Identity Release (Patent Claims 25–26) ─────────────────
+  // Called from the app after biometric approval. The user specifies exactly
+  // which requested fields they approve — partial approval is allowed.
+  // BeboCard reads identity values from UserDataEvent and relays only the
+  // approved fields to the brand's consent webhook.
+  // ── Subscription Revocation Proxy (Patent Claims 27–29) ──────────────────
+  // Called from the app when the user cancels a recurring charge.
+  // BeboCard relays the cancellation to the brand's webhook.
+  cancelRecurring: a.mutation()
+    .arguments({
+      subId: a.string().required(),
+      brandId: a.string().required(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  addManualSubscription: a.mutation()
+    .arguments({
+      brandName: a.string().required(),
+      productName: a.string().required(),
+      amount: a.float().required(),
+      currency: a.string().required(),
+      frequency: a.string().required(),
+      nextBillingDate: a.string().required(),
+      category: a.string().required(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  respondToConsent: a.mutation()
+    .arguments({
+      requestId: a.string().required(),
+      approvedFields: a.string().array().required(),   // [] = full denial
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // ── Tracking Correlation Severance (Patent Claims 75–86) ─────────────────
+  // User controls how frequently their secondaryULID (barcode-facing ID) rotates.
+  // Rotation severs the link between past and future brand scans — brands cannot
+  // correlate visits across a rotation boundary.
+  // Frequencies: 'every_scan' | 'every_24h' | 'every_7d' | 'manual'
+  setRotationFrequency: a.mutation()
+    .arguments({ frequency: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // ── Enrollment Marketplace (Patent Claims 65–72) ──────────────────────────
+  // User responds to a brand's enrollment offer. On acceptance, BeboCard
+  // generates a pseudonymous email alias and delivers it to the brand's webhook.
+  respondToEnrollment: a.mutation()
+    .arguments({
+      enrollmentId: a.string().required(),
+      accepted: a.boolean().required(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // User-initiated enrollment — taps "Join program" from app's brand profile page.
+  // Brand receives enrollment offer FCM push and alias on acceptance.
+  initiateEnrollment: a.mutation()
+    .arguments({ brandId: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // ── Gift Card Marketplace (Patent Claims 72–74) ───────────────────────────────
+  // User purchases a gift card from a brand's catalog.
+  // Creates a pending order record; brand delivers via POST /gift-card/deliver.
+  purchaseGiftCard: a.mutation()
+    .arguments({
+      brandId: a.string().required(),
+      catalogItemId: a.string().required(),
+      denomination: a.float().required(),
+      currency: a.string().required(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // User requests a balance refresh for an existing gift card.
+  // card-manager calls the brand's balance webhook and updates UserDataEvent.
+  syncGiftCardBalance: a.mutation()
+    .arguments({
+      cardSK: a.string().required(),   // sK of the GIFTCARD# record in UserDataEvent
+      brandId: a.string().required(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // ── SMB Loyalty-as-a-Service stamp cards (Phase 11) ──────────────────────
+  // User-facing read access to their stamp card state. Mutations are performed
+  // by brand backends via the SMB REST API (smb-handler Lambda).
+
+  getStampCard: a.query()
+    .arguments({ brandId: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  listStampCards: a.query()
+    .arguments({})
+    .returns(a.json().array())
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 

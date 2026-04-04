@@ -2,9 +2,11 @@ import { createHash, randomBytes, timingSafeEqual as nodeTimingSafeEqual } from 
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { monotonicFactory } from 'ulid';
 
+const ADMIN_TABLE = process.env.ADMIN_TABLE;
+
 const ulid = monotonicFactory();
 
-export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'catalogues' | 'analytics' | 'stores';
+export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'catalogues' | 'analytics' | 'stores' | 'payment' | 'consent' | 'recurring' | 'gift_card' | 'enrollment' | 'smb';
 
 export interface ApiKeyRecord {
   brandId: string;
@@ -33,6 +35,46 @@ type ApiKeyItem = Partial<ApiKeyRecord> & {
 };
 
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
+
+// ── Rate limiting ─────────────────────────────────────────────────────────
+
+/**
+ * Atomically increments the per-key hourly request counter in AdminDataEvent.
+ * Returns { allowed: true } when under the limit, { allowed: false, usage, limit } when exceeded.
+ *
+ * Counter items use TTL = 2 hours so they auto-expire without manual cleanup.
+ * Key pattern: RATE#<keyId> / <YYYY-MM-DDTHH> (UTC hour bucket)
+ */
+export async function checkRateLimit(
+  ddb: DynamoDBDocumentClient,
+  keyId: string,
+  rateLimit: number,
+): Promise<{ allowed: boolean; usage: number; limit: number }> {
+  const adminTable = ADMIN_TABLE;
+  if (!adminTable || rateLimit <= 0) return { allowed: true, usage: 0, limit: rateLimit };
+
+  const now = new Date();
+  const hourBucket = now.toISOString().slice(0, 13); // e.g. "2026-04-04T15"
+  const ttl = Math.floor(now.getTime() / 1000) + 7200; // 2-hour TTL
+
+  try {
+    const res = await ddb.send(new UpdateCommand({
+      TableName: adminTable,
+      Key: { pK: `RATE#${keyId}`, sK: hourBucket },
+      UpdateExpression: 'ADD usageCount :one SET #ttl = if_not_exists(#ttl, :ttl)',
+      ExpressionAttributeNames: { '#ttl': 'ttl' },
+      ExpressionAttributeValues: { ':one': 1, ':ttl': ttl },
+      ReturnValues: 'UPDATED_NEW',
+    }));
+
+    const usage = Number(res.Attributes?.usageCount ?? 1);
+    return { allowed: usage <= rateLimit, usage, limit: rateLimit };
+  } catch (err) {
+    // Rate limit counter failure should not block the request — log and allow.
+    console.error('[api-key-auth] rate limit counter error:', err);
+    return { allowed: true, usage: 0, limit: rateLimit };
+  }
+}
 
 // ── Key format ────────────────────────────────────────────────────────────────
 // Raw key format: bebo_<keyId>.<secret32bytes>
@@ -73,9 +115,16 @@ export async function validateApiKey(
   }));
 
   const item = res.Items?.[0] as (ApiKeyRecord & { pK: string; sK: string }) | undefined;
-  if (!item) return null;
-  const normalized = normalizeApiKeyItem(item);
-  if (!normalized) return null;
+  const normalized = item ? normalizeApiKeyItem(item) : null;
+
+  // Always perform the hash comparison regardless of whether the item exists.
+  // This ensures all code paths take equal time, preventing keyspace enumeration
+  // via response-time measurement.
+  const DUMMY_HASH = 'a'.repeat(64);
+  const storedHash = normalized?.keyHash ?? DUMMY_HASH;
+  const hashMatch = timingSafeEqual(keyHash, storedHash);
+
+  if (!item || !normalized) return null;
 
   const now = new Date().toISOString();
 
@@ -83,11 +132,16 @@ export async function validateApiKey(
   if (normalized.status === 'REVOKED') return null;
   if (normalized.status === 'GRACE' && normalized.graceUntil && normalized.graceUntil < now) return null;
 
-  // Constant-time hash comparison
-  const expectedHash = createHash('sha256').update(rawKey).digest('hex');
-  if (!timingSafeEqual(normalized.keyHash, expectedHash)) return null;
+  if (!hashMatch) return null;
 
   if (!normalized.scopes.includes(requiredScope)) return null;
+
+  // Enforce per-key hourly rate limit via atomic DynamoDB counter
+  const rl = await checkRateLimit(ddb, normalized.keyId, normalized.rateLimit);
+  if (!rl.allowed) {
+    console.warn('[api-key-auth] rate limit exceeded', { keyId: normalized.keyId, usage: rl.usage, limit: rl.limit });
+    return null; // caller should return 429
+  }
 
   return {
     brandId: normalized.brandId,

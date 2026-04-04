@@ -5,6 +5,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -13,34 +14,62 @@ const USER_TABLE = process.env.USER_TABLE!;
 // ── Handler ───────────────────────────────────────────────────────────────────
 //
 // Triggered by DynamoDB Streams on UserDataEvent.
-// On every RECEIPT# write, recomputes SEGMENT#<brandId> for the affected user.
 //
-// The computed record sets `subscribed: boolean` by checking whether
-// SUBSCRIPTION#<brandId> exists for the user at write time — so
-// tenant-analytics queries can filter on this field without a per-user join.
+// Two trigger paths:
+//
+//  1. RECEIPT# write   — full recompute of SEGMENT#<brandId> (spend totals, frequency, subscribed)
+//
+//  2. SUBSCRIPTION# change — patches just the `subscribed` field on the existing SEGMENT#<brandId>
+//     record immediately, so the tenant-analytics consent gate stays accurate without waiting
+//     for the next receipt. Uses a non-destructive UpdateExpression so all other segment fields
+//     remain unchanged. If no segment record exists yet (user subscribed before any receipts),
+//     the update is a no-op — a full recompute will set subscribed correctly on the first receipt.
 
 export const handler: DynamoDBStreamHandler = async (event) => {
   for (const record of event.Records) {
-    if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') continue;
+    const eventName = record.eventName;
+    if (eventName !== 'INSERT' && eventName !== 'MODIFY' && eventName !== 'REMOVE') continue;
 
-    const newImage = record.dynamodb?.NewImage;
-    if (!newImage) continue;
+    const image = record.dynamodb?.NewImage ?? record.dynamodb?.OldImage;
+    if (!image) continue;
 
-    const pk = newImage['pK']?.S ?? '';
-    const sk = newImage['sK']?.S ?? '';
+    const pk = image['pK']?.S ?? '';
+    const sk = image['sK']?.S ?? '';
 
-    if (!pk.startsWith('USER#') || !sk.startsWith('RECEIPT#')) continue;
+    if (!pk.startsWith('USER#')) continue;
 
     const permULID = pk.replace('USER#', '');
-    const brandId = newImage['subCategory']?.S;
 
-    if (!brandId) continue;   // receipt not associated with a brand — skip
+    // ── Path 1: RECEIPT# write — full segment recompute ───────────────────────
+    if (sk.startsWith('RECEIPT#') && eventName !== 'REMOVE') {
+      const brandId = image['subCategory']?.S;
+      if (!brandId) continue;
 
-    try {
-      await recomputeSegment(permULID, brandId);
-    } catch (err) {
-      console.error('[segment-processor] recompute failed', { permULID, brandId, err });
-      // Do not rethrow — one failed record should not block the rest of the batch
+      try {
+        await recomputeSegment(permULID, brandId);
+      } catch (err) {
+        console.error('[segment-processor] recompute failed', { permULID, brandId, err });
+        // Do not rethrow — one failed record must not block the rest of the batch
+      }
+      continue;
+    }
+
+    // ── Path 2: SUBSCRIPTION# change — patch subscribed flag ──────────────────
+    if (sk.startsWith('SUBSCRIPTION#')) {
+      // sK pattern: SUBSCRIPTION#<brandId>
+      const brandId = sk.replace('SUBSCRIPTION#', '');
+      if (!brandId) continue;
+
+      // On REMOVE the subscription is gone — subscribed=false.
+      // On INSERT/MODIFY check whether the record is ACTIVE.
+      const newSubscribed = eventName !== 'REMOVE' &&
+        (record.dynamodb?.NewImage?.['status']?.S === 'ACTIVE');
+
+      try {
+        await patchSegmentSubscribed(permULID, brandId, newSubscribed);
+      } catch (err) {
+        console.error('[segment-processor] subscription patch failed', { permULID, brandId, err });
+      }
     }
   }
 };
@@ -122,6 +151,41 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
       updatedAt: new Date().toISOString(),
     },
   }));
+}
+
+// ── Subscription consent patch ────────────────────────────────────────────────
+//
+// Updates only the `subscribed` field inside the existing segment record's desc JSON.
+// Uses a conditional UpdateExpression so the write is a no-op if SEGMENT# doesn't exist yet.
+
+async function patchSegmentSubscribed(permULID: string, brandId: string, subscribed: boolean): Promise<void> {
+  // Fetch the current segment record to merge the subscribed change into desc
+  const existing = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
+  }));
+
+  if (!existing.Item) {
+    // No segment yet — no-op. recomputeSegment will set subscribed correctly on first receipt.
+    console.info('[segment-processor] no segment to patch for subscription change', { permULID, brandId });
+    return;
+  }
+
+  const currentDesc = parseDesc(existing.Item.desc);
+  const updatedDesc = { ...currentDesc, subscribed, subscribedUpdatedAt: new Date().toISOString() };
+
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
+    ConditionExpression: 'attribute_exists(sK)',
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    ExpressionAttributeValues: {
+      ':desc': JSON.stringify(updatedDesc),
+      ':now': new Date().toISOString(),
+    },
+  }));
+
+  console.info('[segment-processor] subscription patched on segment', { permULID, brandId, subscribed });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

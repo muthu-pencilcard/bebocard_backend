@@ -1,0 +1,87 @@
+  
+  Amplify Sandbox
+  
+  Identifier: 	farahgalaria
+  Stack: 	amplify-bebocardbackend-farahgalaria-sandbox-fd9a41bc79
+  Region: 	us-east-1
+  
+  To specify a different sandbox identifier, use --identifier
+
+5:48:42 PM Synthesizing backend...
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM Be careful when using @auth directives on a field in a root type. @auth directives on field definitions use the source object to perform authorization logic and the source will be an empty object for fields on root types. Static group authorization should perform as expected.
+5:48:44 PM 
+5:48:44 PM WARNING: owners may reassign ownership for the following model(s) and role(s): UserDataEvent: [owner]. If this is not intentional, you may want to apply field-level authorization rules to these fields. To read more: https://docs.amplify.aws/cli/graphql/authorization-rules/#per-user--owner-based-data-access.
+5:48:44 PM 
+5:48:46 PM [WARNING] aws-cdk-lib.aws_iam.GrantOnPrincipalOptions#scope is deprecated.
+5:48:46 PM   The scope argument is currently unused.
+5:48:46 PM   This API will be removed in the next major release.
+5:48:46 PM 
+5:48:46 PM [WARNING] aws-cdk-lib.aws_iam.GrantOnPrincipalOptions#scope is deprecated.
+5:48:46 PM   The scope argument is currently unused.
+5:48:46 PM   This API will be removed in the next major release.
+5:48:46 PM 
+5:48:46 PM ✔ Backend synthesized in 4.23 seconds
+5:48:46 PM Running type checks...
+5:48:47 PM ✔ Type checks completed in 0.3 seconds
+5:48:47 PM Building and publishing assets...
+5:49:15 PM ✔ Built and published assets
+5:49:42 PM [ERROR] [CloudformationStackCircularDependencyError] The CloudFormation deployment failed due to circular dependency found between nested stacks [auth179371D7, data7552DF31]
+Resolution: If you are using functions then you can assign them to existing nested stacks that are dependent on functions or functions depend on them, for example:
+1. If your function is defined as auth triggers, you should assign this function to auth stack.
+2. If your function is used as data resolver or calls data API, you should assign this function to data stack.
+To assign a function to a different stack, use the property 'resourceGroupName' in the defineFunction call and choose auth, data or any custom stack.
+
+If your circular dependency issue is not resolved with this workaround, please create an issue here https://github.com/aws-amplify/amplify-backend/issues/new/choose
+
+
+Notices:
+
+3127	Amplify Function is dropping support of Node 16 Lambda Functions
+
+	If you have Node 16 Lambda functions defined with Amplify Function, we highly
+	recommend updating your function's runtime to newer Node LTS versions (Node 20+).
+
+	More information at: https://github.com/aws-amplify/amplify-backend/issues/3127
+
+
+If you don't want to see a notice anymore, use npx ampx notices acknowledge <notice-id>
