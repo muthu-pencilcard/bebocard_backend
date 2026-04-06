@@ -126,8 +126,9 @@ if (cfnUserTable) {
 // ── Post-confirmation: SSM-based table lookup (breaks circular dep) ──────────
 const dataStack = Stack.of(userTable);
 const branchName = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'sandbox';
-const userTableParamName = `/bebocard/${branchName}/USER_TABLE`;
-const adminTableParamName = `/bebocard/${branchName}/ADMIN_TABLE`;
+// Use full stack name (unique per deployment) to avoid collisions with sandbox stack SSM params.
+const userTableParamName = `/bebocard/${dataStack.stackName}/USER_TABLE`;
+const adminTableParamName = `/bebocard/${dataStack.stackName}/ADMIN_TABLE`;
 
 new ssm.StringParameter(dataStack, 'UserTableNameParam', {
   parameterName: userTableParamName,
@@ -145,7 +146,7 @@ postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [
-    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/${branchName}/*`,
+    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/${dataStack.stackName}/*`,
   ],
 }));
 
@@ -217,7 +218,6 @@ const stack = Stack.of(backend.contentValidatorFn.resources.lambda);
 const stage = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'dev';
 
 const tenantUploadsBucket = new s3.Bucket(stack, 'TenantUploads', {
-  bucketName: `bebocard-tenant-uploads-${stage}`,
   removalPolicy: RemovalPolicy.RETAIN,
   cors: [{
     allowedMethods: [s3.HttpMethods.PUT],
@@ -227,7 +227,6 @@ const tenantUploadsBucket = new s3.Bucket(stack, 'TenantUploads', {
 });
 
 const appReferenceBucket = new s3.Bucket(stack, 'AppReference', {
-  bucketName: `bebocard-app-reference-${stage}`,
   removalPolicy: RemovalPolicy.RETAIN,
   publicReadAccess: true,
   blockPublicAccess: new s3.BlockPublicAccess({
@@ -288,7 +287,6 @@ if (cfnUserTable) {
 }
 
 const segmentDLQ = new sqs.Queue(stack, 'SegmentProcessorDLQ', {
-  queueName: `bebo-segment-processor-dlq-${stage}`,
   retentionPeriod: Duration.days(14),
 });
 Tags.of(segmentDLQ).add('CostCenter', 'tenant-side');
@@ -345,7 +343,6 @@ receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', `bebocard-receipt-analyt
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', 'bebo_analytics');
 
 const icebergDLQ = new sqs.Queue(stack, 'ReceiptIcebergDLQ', {
-  queueName: `bebo-receipt-iceberg-dlq-${stage}`,
   retentionPeriod: Duration.days(14),
 });
 Tags.of(icebergDLQ).add('CostCenter', 'tenant-side');
@@ -367,7 +364,6 @@ userTable.grantReadData(paymentRouterLambda);
 refTable.grantReadData(paymentRouterLambda);
 
 const checkoutTimeoutQueue = new sqs.Queue(stack, 'CheckoutTimeoutQueue', {
-  queueName: `bebo-checkout-timeout-${stage}`,
   visibilityTimeout: Duration.seconds(60),
 });
 checkoutTimeoutQueue.grantSendMessages(paymentRouterLambda);
@@ -526,11 +522,9 @@ userTable.grantReadData(consentLambda);
 refTable.grantReadData(consentLambda);
 
 const consentTimeoutQueue = new sqs.Queue(stack, 'ConsentTimeoutQueue', {
-  queueName: `bebo-consent-timeout-${stage}`,
   visibilityTimeout: Duration.seconds(60),
   deadLetterQueue: {
     queue: new sqs.Queue(stack, 'ConsentTimeoutDLQ', {
-      queueName: `bebo-consent-timeout-dlq-${stage}`,
       retentionPeriod: Duration.days(7),
     }),
     maxReceiveCount: 3,
@@ -855,7 +849,6 @@ Tags.of(catalogSubscriptionSyncLambda).add('CostCenter', 'marketplace');
 // iOS Universal Links / Android App Links intercepts the same URL for app users.
 
 const giftClaimBucket = new s3.Bucket(stack, 'GiftClaimWebBucket', {
-  bucketName: `bebocard-gift-claim-web-${stage}`,
   removalPolicy: RemovalPolicy.RETAIN,
   // No public access — served exclusively via CloudFront OAC
   blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
