@@ -126,9 +126,13 @@ if (cfnUserTable) {
 // ── Post-confirmation: SSM-based table lookup (breaks circular dep) ──────────
 const dataStack = Stack.of(userTable);
 const branchName = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'sandbox';
-// Use full stack name (unique per deployment) to avoid collisions with sandbox stack SSM params.
-const userTableParamName = `/bebocard/${dataStack.stackName}/USER_TABLE`;
-const adminTableParamName = `/bebocard/${dataStack.stackName}/ADMIN_TABLE`;
+// Use AWS_APP_ID + AWS_BRANCH (concrete strings at CodeBuild synthesis) to build a unique SSM
+// path per Amplify deployment. dataStack.stackName is a CDK token for nested stacks and cannot
+// be used in SSM parameter names (CDK cannot determine the ARN separator for unresolved tokens).
+const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
+const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
+const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABLE`;
+const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
 
 new ssm.StringParameter(dataStack, 'UserTableNameParam', {
   parameterName: userTableParamName,
@@ -146,7 +150,7 @@ postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [
-    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/${dataStack.stackName}/*`,
+    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/${amplifyAppId}/${amplifyBranch}/*`,
   ],
 }));
 
