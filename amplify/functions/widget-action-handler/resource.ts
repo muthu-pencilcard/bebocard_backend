@@ -3,7 +3,7 @@ import { defineFunction } from '@aws-amplify/backend';
 export const widgetActionHandlerFn = defineFunction({
   name: 'bebo-widget-action-handler',
   entry: './handler.ts',
-  resourceGroupName: 'data',
+  resourceGroupName: 'widget',
   timeoutSeconds: 30,
   environment: {
     USER_TABLE: process.env.USER_TABLE ?? '',
