@@ -8,6 +8,11 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import {
+  checkTenantQuota,
+  getTenantStateForBrand,
+  incrementTenantUsageCounter,
+} from '../../shared/tenant-billing';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -123,6 +128,12 @@ async function handleWidgetInvoice(event: APIGatewayProxyEvent) {
   const auth = await authorizeWidgetRequest(event, 'invoice');
   if ('response' in auth) return auth.response;
 
+  const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, auth.claims.brandId);
+  if (!tenantState.active) return withCors(event, 403, { error: 'Tenant billing is suspended' });
+
+  const quotaCheck = await checkTenantQuota(dynamo, REFDATA_TABLE, tenantState, 'invoices');
+  if (!quotaCheck.allowed) return withCors(event, 403, { error: quotaCheck.message ?? 'Tenant quota exceeded' });
+
   const body = parseBody(event.body);
   const supplier = stringOrEmpty(body.supplier);
   const dueDate = stringOrEmpty(body.dueDate);
@@ -163,6 +174,7 @@ async function handleWidgetInvoice(event: APIGatewayProxyEvent) {
     ConditionExpression: 'attribute_not_exists(pK) AND attribute_not_exists(sK)',
   }));
 
+  await incrementTenantUsageCounter(dynamo, REFDATA_TABLE, tenantState.tenantId, auth.claims.brandId, 'invoices');
   await markWidgetTokenUsed(auth.claims);
   return withCors(event, 200, { success: true, invoiceSK, status: 'ACTIVE' });
 }

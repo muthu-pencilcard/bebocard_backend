@@ -3,12 +3,12 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
-  PutCommand, GetCommand, UpdateCommand, QueryCommand,
+  PutCommand, GetCommand, UpdateCommand, QueryCommand, ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { monotonicFactory } from 'ulid';
-import { withAuditLog } from '../../shared/audit-logger';
+import { withAuditLog, writeAuditLog } from '../../shared/audit-logger';
 import {
   validateApiKey, rotateApiKey, extractApiKey,
   type ApiKeyScope,
@@ -20,9 +20,11 @@ import {
   NewsletterInputSchema,
   CatalogueInputSchema,
   StoreInputSchema,
+  SubscriptionCatalogInputSchema,
 } from '../../shared/validation-schemas';
 import {
   ALL_USAGE_TYPES,
+  checkTenantQuota as checkSharedTenantQuota,
   getTenantStateForBrand as getSharedTenantStateForBrand,
   getTenantUsageCounter as getSharedTenantUsageCounter,
   getUsageMonthKey,
@@ -67,6 +69,18 @@ function err(event: APIGatewayProxyEvent, status: number, message: string) {
     headers: { ...CORS_HEADERS, 'Access-Control-Allow-Origin': resolveOrigin(event) },
     body: JSON.stringify({ error: message }),
   };
+}
+
+// Admin API key — only for BeboCard ops endpoints (e.g. /admin/subscription-catalog).
+// Read from process.env at call time so Lambda env updates and test overrides take effect.
+function verifyAdminKey(event: APIGatewayProxyEvent): boolean {
+  const adminKey = process.env.ADMIN_API_KEY ?? '';
+  if (!adminKey) return false;
+  const key = event.headers['x-admin-api-key'] ?? event.headers['X-Admin-Api-Key'] ?? '';
+  const keyBuf = Buffer.from(key);
+  const expBuf = Buffer.from(adminKey);
+  if (keyBuf.length === 0 || keyBuf.length !== expBuf.length) return false;
+  return timingSafeEqual(keyBuf, expBuf);
 }
 
 // ─── Internal call signing ────────────────────────────────────────────────────
@@ -188,6 +202,22 @@ const _handler: APIGatewayProxyHandler = async (event) => {
     return handleRotateKey(event, auth.brandId);
   }
 
+  // ── Admin: subscription catalog listing + management ─────────────────────
+  if (path.includes('/admin/subscription-catalog')) {
+    if (!verifyAdminKey(event)) return err(event, 401, 'Unauthorized');
+    if (method === 'GET') return adminListSubscriptionCatalog(event);
+    if (method === 'PUT') return adminUpdateCatalogListing(event);
+  }
+
+  // ── Subscription catalog: tenant self-onboarding ─────────────────────────
+  if (path.includes('/subscription-catalog')) {
+    const auth = await authGuard(event, 'recurring');
+    if (!auth) return err(event, 401, 'Unauthorized');
+    if (method === 'POST') return createSubscriptionCatalogEntry(event, auth.brandId);
+    if (method === 'PUT') return updateSubscriptionCatalogEntry(event, auth.brandId);
+    if (method === 'GET') return getSubscriptionCatalogEntry(event, auth.brandId);
+  }
+
   return err(event, 404, 'Unknown route');
 };
 
@@ -234,6 +264,7 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
 
   const offerId = ulid();
   const now = new Date().toISOString();
+  const { brandName: offerBrandName, brandColor: offerBrandColor, brandRegion: offerBrandRegion } = await getBrandProfile(brandId);
   // Offer TTL: expire 30 days after validTo (or 2 years if no validTo)
   const validToDate = body.validTo ? new Date(body.validTo as string) : new Date(Date.now() + 2 * 365 * 86400_000);
   const offerTtl = Math.floor(validToDate.getTime() / 1000) + 30 * 86400;
@@ -246,7 +277,7 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
       eventType: 'OFFER',
       status: 'ACTIVE',
       primaryCat: 'offer',
-      desc: JSON.stringify({ ...body, brandId, offerId }),
+      desc: JSON.stringify({ ...body, brandId, offerId, brandName: offerBrandName, brandColor: offerBrandColor, brandRegion: offerBrandRegion }),
       ttl: offerTtl,
       createdAt: now,
       updatedAt: now,
@@ -260,6 +291,15 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
     title: `New offer from your loyalty brand`,
     body: body.title as string,
     data: { type: 'NEW_OFFER', offerId, brandId },
+  }).then(count => {
+    writeAuditLog(dynamo, {
+      actor: brandId,
+      actorType: 'brand',
+      action: 'offer.delivered',
+      resource: `OFFER#${offerId}`,
+      outcome: 'success',
+      metadata: { delivered: count },
+    }).catch(() => {});
   }).catch(e => console.error('[createOffer] fanOut error:', e));
 
   return ok(event, {
@@ -350,6 +390,7 @@ async function sendNewsletter(event: APIGatewayProxyEvent, brandId: string) {
 
   const newsletterId = ulid();
   const now = new Date().toISOString();
+  const { brandName: nlBrandName, brandColor: nlBrandColor, brandRegion: nlBrandRegion } = await getBrandProfile(brandId);
   // Newsletter TTL: 7 years for compliance
   const newsletterTtl = Math.floor(Date.now() / 1000) + 7 * 365 * 24 * 3600;
 
@@ -360,9 +401,9 @@ async function sendNewsletter(event: APIGatewayProxyEvent, brandId: string) {
       pK: `BRAND#${brandId}`,
       sK: `NEWSLETTER#${newsletterId}`,
       eventType: 'NEWSLETTER',
-      status: 'SENT',
+      status: 'ACTIVE',
       primaryCat: 'newsletter',
-      desc: JSON.stringify({ ...sanitisedBody, brandId, newsletterId }),
+      desc: JSON.stringify({ ...sanitisedBody, brandId, newsletterId, brandName: nlBrandName, brandColor: nlBrandColor, brandRegion: nlBrandRegion }),
       ttl: newsletterTtl,
       createdAt: now,
       updatedAt: now,
@@ -396,6 +437,15 @@ async function sendNewsletter(event: APIGatewayProxyEvent, brandId: string) {
         updatedAt: now,
       },
     }));
+  }).then(count => {
+    writeAuditLog(dynamo, {
+      actor: brandId,
+      actorType: 'brand',
+      action: 'newsletter.delivered',
+      resource: `NEWSLETTER#${newsletterId}`,
+      outcome: 'success',
+      metadata: { delivered: count },
+    }).catch(() => {});
   }).catch(e => console.error('[sendNewsletter] fanOut error:', e));
 
   return ok(event, {
@@ -445,7 +495,7 @@ async function createCatalogue(event: APIGatewayProxyEvent, brandId: string) {
 
   const catalogueId = ulid();
   const now = new Date().toISOString();
-  const { brandName, brandColor } = await getBrandProfile(brandId);
+  const { brandName, brandColor, brandRegion } = await getBrandProfile(brandId);
   const payload = {
     ...body,
     imageUrl: body.headerImageUrl ?? body.imageUrl ?? null,
@@ -453,6 +503,7 @@ async function createCatalogue(event: APIGatewayProxyEvent, brandId: string) {
     brandId,
     brandName,
     brandColor,
+    brandRegion,
     catalogueId,
     cataloguePdfKey: body.cataloguePdfKey ?? null,
     items: validItems,
@@ -505,7 +556,16 @@ async function createCatalogue(event: APIGatewayProxyEvent, brandId: string) {
       }));
     },
     async (permULID) => matchesTargetSegments(permULID, brandId, payload.targetSegments),
-  ).catch(e => console.error('[createCatalogue] fanOut error:', e));
+  ).then(count => {
+    writeAuditLog(dynamo, {
+      actor: brandId,
+      actorType: 'brand',
+      action: 'catalogue.delivered',
+      resource: `CATALOGUE#${catalogueId}`,
+      outcome: 'success',
+      metadata: { delivered: count },
+    }).catch(() => {});
+  }).catch(e => console.error('[createCatalogue] fanOut error:', e));
 
   return ok(event, {
     catalogueId,
@@ -662,6 +722,190 @@ async function archiveStore(event: APIGatewayProxyEvent, brandId: string) {
   return ok(event, { storeId, status: 'ARCHIVED' });
 }
 
+// ─── Subscription catalog — tenant self-onboarding ────────────────────────────
+
+async function createSubscriptionCatalogEntry(event: APIGatewayProxyEvent, brandId: string) {
+  const parsed = SubscriptionCatalogInputSchema.safeParse(JSON.parse(event.body ?? '{}'));
+  if (!parsed.success) return err(event, 400, parsed.error.issues[0]?.message ?? 'Invalid input');
+  const body = parsed.data;
+
+  // providerId = brandId — brands register their own entry only
+  const providerId = brandId;
+  const now = new Date().toISOString();
+
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `SUBSCRIPTION_CATALOG#${providerId}`, sK: 'profile' },
+  }));
+  if (existing.Item) return err(event, 409, 'Catalog entry already exists — use PUT to update');
+
+  const desc = {
+    providerId,
+    tenantBrandId: brandId,
+    providerName:  body.providerName,
+    name:          body.providerName,
+    category:      body.category,
+    invoiceType:   body.invoiceType,
+    plans:         body.plans.map(p => ({ ...p, planId: `${providerId}-${p.planName.toLowerCase().replace(/\s+/g, '-')}` })),
+    websiteUrl:    body.websiteUrl ?? null,
+    logoUrl:       body.logoUrl ?? null,
+    cancelUrl:     body.cancelUrl ?? null,
+    portalUrl:     body.portalUrl ?? null,
+    affiliateUrl:  null,
+    description:   body.description ?? null,
+    region:        body.region,
+    hasLinking:    body.hasLinking,
+    isAffiliate:   false,       // admin grants affiliate status
+    isTenantLinked: true,       // tenant self-registered
+    listingStatus: 'UNLISTED',  // admin approves before surfacing in marketplace
+    source:        'tenant',
+    createdAt:     now,
+    updatedAt:     now,
+  };
+
+  await dynamo.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: {
+      pK:         `SUBSCRIPTION_CATALOG#${providerId}`,
+      sK:         'profile',
+      eventType:  'SUBSCRIPTION_CATALOG',
+      primaryCat: 'subscription_catalog',
+      status:     'ACTIVE',
+      source:     'tenant',  // top-level — allows catalog-subscription-sync to skip this entry
+      desc:       JSON.stringify(desc),
+      createdAt:  now,
+      updatedAt:  now,
+    },
+  }));
+
+  return {
+    statusCode: 201,
+    headers: { ...CORS_HEADERS, 'Access-Control-Allow-Origin': resolveOrigin(event) },
+    body: JSON.stringify({ providerId, listingStatus: 'UNLISTED', status: 'ACTIVE' }),
+  };
+}
+
+async function updateSubscriptionCatalogEntry(event: APIGatewayProxyEvent, brandId: string) {
+  const providerId = brandId; // brands can only update their own entry
+
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `SUBSCRIPTION_CATALOG#${providerId}`, sK: 'profile' },
+  }));
+  if (!existing.Item) return err(event, 404, 'Catalog entry not found — use POST to create');
+
+  const existingDesc = JSON.parse(existing.Item.desc as string ?? '{}');
+  // Reject if not tenant-owned
+  if (existingDesc.tenantBrandId && existingDesc.tenantBrandId !== brandId) return err(event, 403, 'Forbidden');
+
+  const parsed = SubscriptionCatalogInputSchema.partial().safeParse(JSON.parse(event.body ?? '{}'));
+  if (!parsed.success) return err(event, 400, parsed.error.issues[0]?.message ?? 'Invalid input');
+
+  const now = new Date().toISOString();
+  const merged = {
+    ...existingDesc,
+    ...parsed.data,
+    // Preserve admin-controlled fields
+    isAffiliate:   existingDesc.isAffiliate,
+    affiliateUrl:  existingDesc.affiliateUrl,
+    listingStatus: existingDesc.listingStatus,
+    isTenantLinked: true,
+    updatedAt: now,
+  };
+
+  await dynamo.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `SUBSCRIPTION_CATALOG#${providerId}`, sK: 'profile' },
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    ExpressionAttributeValues: { ':desc': JSON.stringify(merged), ':now': now },
+  }));
+
+  return ok(event, { providerId, updated: true });
+}
+
+async function getSubscriptionCatalogEntry(event: APIGatewayProxyEvent, brandId: string) {
+  const res = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `SUBSCRIPTION_CATALOG#${brandId}`, sK: 'profile' },
+  }));
+  if (!res.Item) return err(event, 404, 'No catalog entry found — use POST to register');
+  return ok(event, JSON.parse(res.Item.desc as string ?? '{}'));
+}
+
+// ─── Admin: subscription catalog management ────────────────────────────────────
+
+async function adminListSubscriptionCatalog(event: APIGatewayProxyEvent) {
+  const params = event.queryStringParameters ?? {};
+  const filterStatus    = params.listingStatus;  // ACTIVE | INACTIVE | UNLISTED
+  const filterAffiliate = params.isAffiliate;    // 'true' | 'false'
+  const filterSource    = params.source;         // 'sync' | 'tenant'
+
+  const items: Record<string, unknown>[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+
+  do {
+    const res = await dynamo.send(new ScanCommand({
+      TableName:        REFDATA_TABLE,
+      FilterExpression: 'primaryCat = :cat',
+      ExpressionAttributeValues: { ':cat': 'subscription_catalog' },
+      ExclusiveStartKey: lastKey,
+    }));
+    items.push(...(res.Items ?? []));
+    lastKey = res.LastEvaluatedKey as typeof lastKey;
+  } while (lastKey);
+
+  let catalog = items.map(i => {
+    const d = JSON.parse(i.desc as string ?? '{}');
+    return { ...d, _pK: i.pK, _status: i.status, _source: i.source };
+  });
+
+  if (filterStatus)    catalog = catalog.filter(c => c.listingStatus === filterStatus);
+  if (filterAffiliate !== undefined) catalog = catalog.filter(c => String(c.isAffiliate) === filterAffiliate);
+  if (filterSource)    catalog = catalog.filter(c => (c._source ?? c.source) === filterSource);
+
+  // Strip internal DynamoDB key fields from response
+  const cleaned = catalog.map(({ _pK: _pk, _status, _source, ...rest }) => ({ ...rest, pK: _pk, status: _status, source: _source ?? rest.source }));
+
+  return ok(event, { catalog: cleaned, total: cleaned.length });
+}
+
+async function adminUpdateCatalogListing(event: APIGatewayProxyEvent) {
+  const body = JSON.parse(event.body ?? '{}') as Record<string, unknown>;
+  const providerId = (event.pathParameters?.providerId ?? body.providerId) as string | undefined;
+  if (!providerId) return err(event, 400, 'Missing providerId');
+
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `SUBSCRIPTION_CATALOG#${providerId}`, sK: 'profile' },
+  }));
+  if (!existing.Item) return err(event, 404, 'Catalog entry not found');
+
+  const desc = JSON.parse(existing.Item.desc as string ?? '{}');
+  const now = new Date().toISOString();
+
+  // Admin-controllable fields only
+  if (body.listingStatus !== undefined) desc.listingStatus = body.listingStatus;
+  if (body.isAffiliate   !== undefined) desc.isAffiliate   = !!body.isAffiliate;
+  if (body.affiliateUrl  !== undefined) desc.affiliateUrl  = body.affiliateUrl;
+  if (body.hasLinking    !== undefined) desc.hasLinking    = !!body.hasLinking;
+  if (body.isTenantLinked !== undefined) desc.isTenantLinked = !!body.isTenantLinked;
+  desc.updatedAt = now;
+
+  const itemStatus = desc.listingStatus === 'ACTIVE' ? 'ACTIVE'
+    : desc.listingStatus === 'INACTIVE' ? 'INACTIVE'
+    : 'UNLISTED';
+
+  await dynamo.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `SUBSCRIPTION_CATALOG#${providerId}`, sK: 'profile' },
+    UpdateExpression: 'SET desc = :desc, #s = :status, updatedAt = :now',
+    ExpressionAttributeNames:  { '#s': 'status' },
+    ExpressionAttributeValues: { ':desc': JSON.stringify(desc), ':status': itemStatus, ':now': now },
+  }));
+
+  return ok(event, { providerId, updated: true, listingStatus: desc.listingStatus, isAffiliate: desc.isAffiliate });
+}
+
 // ─── API key self-rotation ─────────────────────────────────────────────────────
 
 async function handleRotateKey(event: APIGatewayProxyEvent, brandId: string) {
@@ -718,24 +962,7 @@ async function checkTenantQuota(
   tenantState: { tenantId: string | null; tier: TenantTier; includedEventsPerMonth: number | null },
   type: UsageType,
 ): Promise<{ allowed: boolean; message?: string }> {
-  if (!tenantState.tenantId) return { allowed: true };
-  if (tenantState.tier === 'intelligence') return { allowed: true };
-
-  const included = tenantState.includedEventsPerMonth;
-  if (included == null) return { allowed: true };
-
-  const usage = await Promise.all(ALL_USAGE_TYPES.map((usageType) => getTenantUsageCounter(tenantState.tenantId!, usageType)));
-  const currentTotal = usage.reduce((sum, record) => sum + record.usageCount, 0);
-  const nextTotal = currentTotal + 1;
-
-  if (tenantState.tier === 'base' && nextTotal > included) {
-    return {
-      allowed: false,
-      message: `Base tier monthly quota exceeded for ${type}. Upgrade tenant billing to continue sending.`,
-    };
-  }
-
-  return { allowed: true };
+  return checkSharedTenantQuota(dynamo, REFDATA_TABLE, tenantState, type);
 }
 
 function buildBillingUsageSnapshot(
@@ -841,7 +1068,7 @@ async function fanOutToSubscribers(
   return recipientCount;
 }
 
-async function getBrandProfile(brandId: string): Promise<{ brandName: string; brandColor: string }> {
+async function getBrandProfile(brandId: string): Promise<{ brandName: string; brandColor: string; brandRegion: string | null }> {
   const res = await dynamo.send(new GetCommand({
     TableName: REFDATA_TABLE,
     Key: { pK: `BRAND#${brandId}`, sK: 'profile' },
@@ -850,6 +1077,7 @@ async function getBrandProfile(brandId: string): Promise<{ brandName: string; br
   return {
     brandName: desc.brandName ?? brandId,
     brandColor: desc.brandColor ?? '#4F46E5',
+    brandRegion: typeof desc.region === 'string' ? desc.region : null,
   };
 }
 

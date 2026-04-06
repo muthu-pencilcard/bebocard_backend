@@ -319,6 +319,34 @@ async function handleStripeWebhook(event: Parameters<APIGatewayProxyHandler>[0])
     // SES purchase confirmation to buyer
     await sendPurchaseConfirmation(session.permULID as string, session.brandName as string, session.denomination as number, session.currency as string);
 
+    // Write RECEIPT# so the Finance tab reflects the gift card purchase
+    const receiptId = ulid();
+    await dynamo.send(new PutCommand({
+      TableName: USER_TABLE,
+      Item: {
+        pK:         `USER#${session.permULID}`,
+        sK:         `RECEIPT#${now.substring(0, 10)}#${receiptId}`,
+        eventType:  'RECEIPT',
+        status:     'CONFIRMED',
+        primaryCat: 'receipt',
+        brandId:    session.brandId,
+        desc: JSON.stringify({
+          merchant:        session.brandName,
+          brandId:         session.brandId,
+          amount:          session.denomination,
+          currency:        session.currency,
+          purchaseDate:    now,
+          receiptType:     'GIFT_CARD_PURCHASE',
+          linkedGiftCardSK: cardSK,
+          category:        'gift_card',
+          source:          'marketplace',
+          sessionId,
+        }),
+        createdAt: now,
+        updatedAt: now,
+      },
+    }));
+
   } else {
     // Gift flow: store encrypted card in AdminDataEvent, generate claim token, send email
     const giftToken = generateGiftToken(sessionId);
@@ -362,6 +390,34 @@ async function handleStripeWebhook(event: Parameters<APIGatewayProxyHandler>[0])
       TableName: ADMIN_TABLE,
       Key: { pK: `GIFT_SESSION#${sessionId}`, sK: 'metadata' },
       UpdateExpression: 'REMOVE recipientEmailRaw',
+    }));
+
+    // Write RECEIPT# to sender's Finance tab
+    const giftReceiptId = ulid();
+    await dynamo.send(new PutCommand({
+      TableName: USER_TABLE,
+      Item: {
+        pK:         `USER#${session.senderPermULID}`,
+        sK:         `RECEIPT#${now.substring(0, 10)}#${giftReceiptId}`,
+        eventType:  'RECEIPT',
+        status:     'CONFIRMED',
+        primaryCat: 'receipt',
+        brandId:    session.brandId,
+        desc: JSON.stringify({
+          merchant:        session.brandName,
+          brandId:         session.brandId,
+          amount:          session.denomination,
+          currency:        session.currency,
+          purchaseDate:    now,
+          receiptType:     'GIFT_CARD_PURCHASE',
+          category:        'gift_card',
+          source:          'gift_send',
+          sessionId,
+          giftToken,
+        }),
+        createdAt: now,
+        updatedAt: now,
+      },
     }));
   }
 
@@ -415,6 +471,20 @@ async function handleGiftClaim(token: string) {
     ExpressionAttributeValues: { ':claimed': 'claimed', ':now': now },
   }));
 
+  // claimReceiptData: the app writes this RECEIPT# via AppSync after saving the card to wallet.
+  // The server cannot write it here since the endpoint is public (no Cognito auth — permULID unknown).
+  const claimReceiptData = {
+    merchant:    gift.brandName,
+    brandId:     gift.brandId,
+    amount:      gift.denomination,
+    currency:    gift.currency,
+    purchaseDate: now,
+    receiptType: 'GIFT_CARD_RECEIVED',
+    category:    'gift_card',
+    source:      'gift_received',
+    linkedGiftCardSK: cardSK,
+  };
+
   return {
     statusCode: 200,
     headers: CORS,
@@ -429,6 +499,7 @@ async function handleGiftClaim(token: string) {
       senderDisplayName: gift.senderDisplayName ?? null,
       message:     gift.message ?? null,
       cardSK,
+      claimReceiptData,
     }),
   };
 }

@@ -526,6 +526,14 @@ describe('gift claim (GET /gift/:token)', () => {
     const vals = (claimUpdate![0] as { input: { ExpressionAttributeValues: Record<string, unknown> } })
       .input.ExpressionAttributeValues;
     expect(vals[':claimed']).toBe('claimed');
+
+    // Response includes claimReceiptData so the app can write RECEIPT# via AppSync
+    expect(body.claimReceiptData).toBeDefined();
+    const crd = body.claimReceiptData as Record<string, unknown>;
+    expect(crd.receiptType).toBe('GIFT_CARD_RECEIVED');
+    expect(crd.brandId).toBe('woolworths');
+    expect(crd.amount).toBe(50);
+    expect(String(crd.linkedGiftCardSK ?? '')).toMatch(/^GIFTCARD#/);
   });
 });
 

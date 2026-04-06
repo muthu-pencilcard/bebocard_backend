@@ -45,16 +45,27 @@ export const handler: ScheduledHandler = async () => {
             const brandName = desc.brandName as string ?? brandId ?? 'Brand';
             if (!brandId) continue;
 
-            // Look up benchmark in REFDATA_TABLE
-            const refRes = await dynamo.send(new GetCommand({
+            // Look up benchmark — prefer BENCHMARK# record, fall back to subscription catalog
+            let benchmarkAmount: number | undefined;
+            const benchmarkRes = await dynamo.send(new GetCommand({
                 TableName: REF_TABLE,
                 Key: { pK: `BENCHMARK#${brandId}`, sK: 'BENCHMARK' },
             }));
+            if (benchmarkRes.Item) {
+                benchmarkAmount = benchmarkRes.Item.benchmarkAmount as number;
+            } else {
+                const catalogRes = await dynamo.send(new GetCommand({
+                    TableName: REF_TABLE,
+                    Key: { pK: `SUBSCRIPTION_CATALOG#${brandId}`, sK: 'profile' },
+                }));
+                if (catalogRes.Item) {
+                    const catalogDesc = JSON.parse(catalogRes.Item.desc ?? '{}');
+                    benchmarkAmount = catalogDesc.benchmarkPrice as number | undefined;
+                }
+            }
 
             // If no benchmark, we can't negotiate
-            if (!refRes.Item) continue;
-
-            const benchmarkAmount = refRes.Item.benchmarkAmount as number;
+            if (!benchmarkAmount) continue;
 
             // If user amount > 15% higher than benchmark
             if (amount > benchmarkAmount * 1.15) {

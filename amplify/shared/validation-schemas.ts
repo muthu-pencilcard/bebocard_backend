@@ -80,6 +80,28 @@ export const StoreInputSchema = z.object({
   hours:      z.record(z.string().max(50)).optional(),
 });
 
+// ── Subscription catalog schemas (brand self-onboarding) ─────────────────────
+
+export const SubscriptionCatalogInputSchema = z.object({
+  providerName: safeText(100),
+  category:     z.enum(['streaming', 'music', 'productivity', 'telecom', 'utilities', 'insurance', 'gaming', 'health', 'other']),
+  invoiceType:  z.enum(['SUBSCRIPTION', 'RECURRING_INVOICE', 'BOTH']).default('SUBSCRIPTION'),
+  plans: z.array(z.object({
+    planName:  safeText(80),
+    amount:    z.number().min(0).max(10_000_000),
+    frequency: z.enum(['weekly', 'fortnightly', 'monthly', 'quarterly', 'annually']),
+    currency:  z.string().length(3).default('AUD'),
+    features:  z.array(safeText(120)).max(20).optional(),
+  })).min(1).max(20),
+  websiteUrl:  httpsUrl,
+  logoUrl:     httpsUrl,
+  cancelUrl:   httpsUrl,
+  portalUrl:   httpsUrl,
+  description: safeText(500).optional(),
+  region:      z.string().max(10).default('AU'),
+  hasLinking:  z.boolean().default(false),
+});
+
 // ── Card-manager schemas ──────────────────────────────────────────────────────
 
 export const AddLoyaltyCardSchema = z.object({
@@ -106,12 +128,16 @@ export const AddGiftCardSchema = z.object({
 });
 
 export const AddInvoiceSchema = z.object({
-  supplier:       safeText(100),
-  amount:         z.number().min(0).max(10_000_000),
-  dueDate:        isoDate.optional(),
-  invoiceNumber:  safeText(50).optional(),
-  category:       safeText(60).optional(),
-  notes:          safeText(500).optional(),
+  supplier:              safeText(100),
+  amount:                z.number().min(0).max(10_000_000),
+  dueDate:               isoDate.optional(),
+  invoiceNumber:         safeText(50).optional(),
+  category:              safeText(60).optional(),
+  notes:                 safeText(500).optional(),
+  linkedSubscriptionSk:  z.string().max(200).optional(),
+  providerId:            safeText(80).optional(),
+  billingPeriod:         z.string().max(25).optional(),
+  invoiceType:           z.enum(['ONE_TIME', 'SUBSCRIPTION_BILLING']).default('ONE_TIME'),
 });
 
 export const AddReceiptSchema = z.object({

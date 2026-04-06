@@ -20,9 +20,12 @@ import { enrollmentHandlerFn } from './functions/enrollment-handler/resource';
 import { smbHandlerFn } from './functions/smb-handler/resource';
 import { giftCardHandlerFn } from './functions/gift-card-handler/resource';
 import { catalogSyncFn } from './functions/catalog-sync/resource';
+import { catalogSubscriptionSyncFn } from './functions/catalog-subscription-sync/resource';
 import { giftCardRefundFn } from './functions/gift-card-refund/resource';
 import { subscriptionNegotiator } from './functions/subscription-negotiator/resource';
 import { widgetActionHandlerFn } from './functions/widget-action-handler/resource';
+import { billingRunHandlerFn } from './functions/billing-run-handler/resource';
+import { discoveryHandlerFn } from './functions/discovery-handler/resource';
 import { Stack, Duration, RemovalPolicy, Tags, CfnOutput } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
@@ -63,9 +66,12 @@ const backend = defineBackend({
   smbHandlerFn,
   giftCardHandlerFn,
   catalogSyncFn,
+  catalogSubscriptionSyncFn,
   giftCardRefundFn,
   subscriptionNegotiator,
   widgetActionHandlerFn,
+  billingRunHandlerFn,
+  discoveryHandlerFn,
 });
 
 // ── Grant DynamoDB access ────────────────────────────────────────────────────
@@ -823,6 +829,22 @@ new events.Rule(Stack.of(catalogSyncLambda), 'WeeklyCatalogSyncRule', {
 Tags.of(catalogSyncLambda).add('Function', 'catalog-sync');
 Tags.of(catalogSyncLambda).add('CostCenter', 'marketplace');
 
+// ── Subscription Catalog Sync ─────────────────────────────────────────────────
+// Weekly cron (Sunday 03:00 UTC) — upserts subscription provider catalog and
+// BENCHMARK# records into RefDataEvent for the marketplace page and negotiator.
+
+const catalogSubscriptionSyncLambda = backend.catalogSubscriptionSyncFn.resources.lambda as lambda.Function;
+catalogSubscriptionSyncLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
+refTable.grantReadWriteData(catalogSubscriptionSyncLambda);
+
+new events.Rule(Stack.of(catalogSubscriptionSyncLambda), 'WeeklySubscriptionCatalogSyncRule', {
+  schedule: events.Schedule.cron({ weekDay: 'SUN', hour: '3', minute: '0' }),
+  targets: [new eventsTargets.LambdaFunction(catalogSubscriptionSyncLambda)],
+});
+
+Tags.of(catalogSubscriptionSyncLambda).add('Function', 'catalog-subscription-sync');
+Tags.of(catalogSubscriptionSyncLambda).add('CostCenter', 'marketplace');
+
 // ── Gift Claim Web Fallback (Phase 13 — web claim page for non-app recipients) ─
 // S3 bucket + CloudFront distribution serving the static claim page at
 // app.bebocard.com/gift/* for recipients who don't have the app installed.
@@ -873,6 +895,38 @@ new CfnOutput(stack, 'GiftClaimWebUrl', {
 Tags.of(giftClaimBucket).add('CostCenter', 'marketplace');
 Tags.of(giftClaimDistribution).add('CostCenter', 'marketplace');
 
+// ── Discovery Handler (public brand/offer/catalogue/newsletter feeds) ─────────
+// No API key required — public read-only catalog data for the app discovery tab.
+// Rate-limited by WAF (shared rule group). Returns region-filtered paginated results.
+
+const discoveryLambda = backend.discoveryHandlerFn.resources.lambda as lambda.Function;
+discoveryLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
+refTable.grantReadData(discoveryLambda);
+
+const discoveryApi = new apigw.RestApi(stack, 'DiscoveryApi', {
+  restApiName: 'bebo-discovery-api',
+  defaultCorsPreflightOptions: {
+    allowOrigins: apigw.Cors.ALL_ORIGINS,
+    allowMethods: ['GET', 'OPTIONS'],
+    allowHeaders: ['Authorization', 'Content-Type'],
+  },
+});
+
+const discoveryIntegration = new apigw.LambdaIntegration(discoveryLambda);
+const discoverResource = discoveryApi.root.addResource('discover');
+discoverResource.addResource('brands').addMethod('GET', discoveryIntegration);
+discoverResource.addResource('offers').addMethod('GET', discoveryIntegration);
+discoverResource.addResource('catalogues').addMethod('GET', discoveryIntegration);
+discoverResource.addResource('newsletters').addMethod('GET', discoveryIntegration);
+
+new CfnOutput(stack, 'DiscoveryApiUrl', {
+  value: discoveryApi.url,
+  description: 'Discovery REST API — GET /discover/{brands|offers|catalogues|newsletters}',
+});
+
+Tags.of(discoveryLambda).add('Function', 'discovery-handler');
+Tags.of(discoveryLambda).add('CostCenter', 'platform');
+
 // ── Gift Card Refund (Phase 13 — Auto-refund unredeemed gifts) ───────────────
 // Daily EventBridge cron queries AdminTable for expired unclaimed gifts, decrypts
 // PIN via KMS, writes back to sender's UserTable wallet.
@@ -910,5 +964,28 @@ new events.Rule(Stack.of(subscriptionNegotiatorLambda), 'DailySubscriptionNegoti
 });
 
 Tags.of(subscriptionNegotiatorLambda).add('Function', 'subscription-negotiator');
+
+// ── Billing Run Handler (Monthly Overage Invoicing) ──────────────────────────
+// EventBridge cron on the 1st of each month at 3 AM UTC — iterates all active
+// tenants, calculates per-category overage, creates Stripe invoice items, and
+// sends billing summary emails via SES.
+
+const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
+billingRunLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
+refTable.grantReadWriteData(billingRunLambda);
+
+// SES for billing summary emails
+billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+  resources: ['*'],
+}));
+
+new events.Rule(Stack.of(billingRunLambda), 'MonthlyBillingRunRule', {
+  schedule: events.Schedule.cron({ day: '1', hour: '3', minute: '0' }),
+  targets: [new eventsTargets.LambdaFunction(billingRunLambda)],
+});
+
+Tags.of(billingRunLambda).add('Function', 'billing-run-handler');
+Tags.of(billingRunLambda).add('CostCenter', 'tenant-side');
 
 export default backend;

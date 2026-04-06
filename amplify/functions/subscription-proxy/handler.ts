@@ -76,6 +76,14 @@ const _restHandler: APIGatewayProxyHandler = async (event) => {
     if (method === 'POST' && amountChangeMatch)
       return handleAmountChange(event, amountChangeMatch[1]);
 
+    const invoiceMatch = path.match(/\/recurring\/([^/]+)\/invoice$/);
+    if (method === 'POST' && invoiceMatch)
+      return handleInvoice(event, invoiceMatch[1]);
+
+    const billingConfirmedMatch = path.match(/\/recurring\/([^/]+)\/billing-confirmed$/);
+    if (method === 'POST' && billingConfirmedMatch)
+      return handleBillingConfirmed(event, billingConfirmedMatch[1]);
+
     return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Not found' }) };
   } catch (e) {
     console.error('[subscription-proxy]', e);
@@ -118,7 +126,7 @@ async function handleRegister(event: Parameters<APIGatewayProxyHandler>[0]) {
   // Fetch brand name + webhook from RefDataEvent
   const brandRef = await dynamo.send(new GetCommand({
     TableName: REF_TABLE,
-    Key: { pK: `BRAND#${validKey.brandId}`, sK: 'PROFILE' },
+    Key: { pK: `BRAND#${validKey.brandId}`, sK: 'profile' },
   }));
   const brandDesc = JSON.parse(brandRef.Item?.desc ?? '{}');
   const brandName = brandDesc.brandName as string ?? validKey.brandId;
@@ -154,6 +162,18 @@ async function handleRegister(event: Parameters<APIGatewayProxyHandler>[0]) {
       updatedAt: now,
     },
     ConditionExpression: 'attribute_not_exists(pK)',
+  }));
+
+  // Write reverse index: subId → permULID, used by all brand-initiated operations
+  await dynamo.send(new PutCommand({
+    TableName: ADMIN_TABLE,
+    Item: {
+      pK:       `RECURRING_IDX#${subId}`,
+      sK:       permULID,
+      status:   'ACTIVE',
+      brandId:  validKey.brandId,
+      createdAt: now,
+    },
   }));
 
   // FCM push to notify user
@@ -300,6 +320,34 @@ async function handleAmountChange(
     },
   }));
 
+  // Write RECEIPT# so the Finance tab shows the price change in billing history
+  const priceChangeReceiptId = ulid();
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK:         `USER#${permULID}`,
+      sK:         `RECEIPT#${now.substring(0, 10)}#${priceChangeReceiptId}`,
+      eventType:  'RECEIPT',
+      status:     'CONFIRMED',
+      primaryCat: 'receipt',
+      desc: JSON.stringify({
+        merchant:             brandName,
+        brandId:              validKey.brandId,
+        amount:               newAmount,
+        oldAmount,
+        currency,
+        purchaseDate:         now,
+        receiptType:          'SUBSCRIPTION_AMOUNT_CHANGE',
+        linkedSubscriptionSk: userKey.sK,
+        category:             'subscription',
+        effectiveDate,
+        reason,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  })).catch(e => console.error('[subscription-proxy] amount-change RECEIPT# write failed', e));
+
   // FCM push
   const token = await getDeviceToken(permULID);
   if (token) {
@@ -367,6 +415,283 @@ async function handleStatus(
   };
 }
 
+// ── POST /recurring/{subId}/invoice — brand pushes an invoice for a billing cycle
+
+interface InvoiceBody {
+  secondaryULID: string;
+  amount: number;
+  currency?: string;
+  dueDate: string;          // ISO 8601 date
+  billingPeriod?: string;   // '2026-04-01/2026-04-30'
+  invoiceNumber?: string;
+}
+
+async function handleInvoice(
+  event: Parameters<APIGatewayProxyHandler>[0],
+  subId: string,
+) {
+  const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
+  const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
+
+  const body: Partial<InvoiceBody> = JSON.parse(event.body ?? '{}');
+  const { amount, currency, dueDate, billingPeriod, invoiceNumber } = body;
+
+  if (amount === undefined || !dueDate) {
+    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing required fields: amount, dueDate' }) };
+  }
+
+  const idxRes = await dynamo.send(new QueryCommand({
+    TableName: ADMIN_TABLE,
+    KeyConditionExpression: 'pK = :pk',
+    ExpressionAttributeValues: { ':pk': `RECURRING_IDX#${subId}` },
+    Limit: 1,
+  }));
+  const idx = idxRes.Items?.[0];
+  if (!idx) return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Subscription not found' }) };
+
+  const permULID = idx.sK as string;
+  const subSK = `RECURRING#${validKey.brandId}#${subId}`;
+
+  // Verify subscription is still active
+  const subRes = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: subSK },
+  }));
+  if (!subRes.Item || subRes.Item.status !== 'ACTIVE') {
+    return { statusCode: 409, headers: CORS, body: JSON.stringify({ error: 'Subscription not active' }) };
+  }
+
+  const desc = JSON.parse(subRes.Item.desc ?? '{}');
+  const brandName    = desc.brandName    as string ?? validKey.brandId;
+  const productName  = desc.productName  as string ?? '';
+  const curr         = currency ?? desc.currency ?? 'AUD';
+  const category     = desc.category     as string ?? 'other';
+  const now          = new Date().toISOString();
+  const { monotonicFactory } = await import('ulid');
+  const invoiceId    = monotonicFactory()();
+  const invoiceSK    = `INVOICE#${dueDate.substring(0, 10)}#${invoiceId}`;
+
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: invoiceSK,
+      eventType: 'INVOICE',
+      status: 'ACTIVE',
+      primaryCat: 'invoice',
+      subCategory: category,
+      desc: JSON.stringify({
+        supplier:             brandName,
+        brandId:              validKey.brandId,
+        providerId:           validKey.brandId,
+        invoiceNumber:        invoiceNumber ?? null,
+        amount,
+        currency:             curr,
+        dueDate,
+        paidDate:             null,
+        status:               'unpaid',
+        category,
+        notes:                productName ? `${productName} billing` : null,
+        invoiceType:          'SUBSCRIPTION_BILLING',
+        linkedSubscriptionSk: subSK,
+        billingPeriod:        billingPeriod ?? null,
+        attachmentKey:        null,
+        createdAt:            now,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+
+  // FCM push
+  const token = await getDeviceToken(permULID);
+  if (token) {
+    try {
+      const { initializeApp, getApps, cert } = await import('firebase-admin/app');
+      const { getMessaging } = await import('firebase-admin/messaging');
+      if (getApps().length === 0) {
+        const sa = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+        if (sa) initializeApp({ credential: cert(JSON.parse(sa)) });
+      }
+      await getMessaging().send({
+        token,
+        data: { type: 'SUBSCRIPTION_INVOICE', subId, invoiceSK },
+        notification: {
+          title: `Invoice from ${brandName}`,
+          body: `${curr} ${amount} due ${dueDate.substring(0, 10)}`,
+        },
+        android: { priority: 'high' },
+        apns: { payload: { aps: { alert: true } } },
+      });
+    } catch (e) {
+      console.error('[subscription-proxy] FCM push failed', e);
+    }
+  }
+
+  return { statusCode: 201, headers: CORS, body: JSON.stringify({ invoiceSK, status: 'PENDING' }) };
+}
+
+// ── POST /recurring/{subId}/billing-confirmed — brand confirms payment received ──
+
+interface BillingConfirmedBody {
+  amount: number;
+  currency?: string;
+  billedAt: string;    // ISO 8601 datetime
+  invoiceSK?: string;  // marks the matching invoice PAID if provided
+}
+
+async function handleBillingConfirmed(
+  event: Parameters<APIGatewayProxyHandler>[0],
+  subId: string,
+) {
+  const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
+  const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
+
+  const body: Partial<BillingConfirmedBody> = JSON.parse(event.body ?? '{}');
+  const { amount, currency, billedAt, invoiceSK } = body;
+
+  if (amount === undefined || !billedAt) {
+    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing required fields: amount, billedAt' }) };
+  }
+
+  const idxRes = await dynamo.send(new QueryCommand({
+    TableName: ADMIN_TABLE,
+    KeyConditionExpression: 'pK = :pk',
+    ExpressionAttributeValues: { ':pk': `RECURRING_IDX#${subId}` },
+    Limit: 1,
+  }));
+  const idx = idxRes.Items?.[0];
+  if (!idx) return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Subscription not found' }) };
+
+  const permULID = idx.sK as string;
+  const subSK    = `RECURRING#${validKey.brandId}#${subId}`;
+
+  const subRes = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: subSK },
+  }));
+  if (!subRes.Item || subRes.Item.status !== 'ACTIVE') {
+    return { statusCode: 409, headers: CORS, body: JSON.stringify({ error: 'Subscription not active' }) };
+  }
+
+  const desc      = JSON.parse(subRes.Item.desc ?? '{}');
+  const brandName = desc.brandName as string ?? validKey.brandId;
+  const curr      = currency ?? desc.currency ?? 'AUD';
+  const frequency = desc.frequency as string ?? 'monthly';
+  const now       = new Date().toISOString();
+
+  // Advance nextBillingDate by one billing period
+  const currentNext = new Date(desc.nextBillingDate ?? billedAt);
+  const nextBillingDate = advanceBillingDate(currentNext, frequency).toISOString().substring(0, 10);
+
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: subSK },
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    ExpressionAttributeValues: {
+      ':desc': JSON.stringify({ ...desc, nextBillingDate, lastBilledAt: billedAt }),
+      ':now': now,
+    },
+  }));
+
+  // Mark linked invoice PAID if provided
+  if (invoiceSK) {
+    const invRes = await dynamo.send(new GetCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: invoiceSK },
+    }));
+    if (invRes.Item) {
+      const invDesc = JSON.parse(invRes.Item.desc ?? '{}');
+      await dynamo.send(new UpdateCommand({
+        TableName: USER_TABLE,
+        Key: { pK: `USER#${permULID}`, sK: invoiceSK },
+        UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+        ExpressionAttributeValues: {
+          ':desc': JSON.stringify({ ...invDesc, status: 'paid', paidDate: billedAt }),
+          ':now': now,
+        },
+      }));
+    }
+  }
+
+  // Write RECEIPT#
+  const { monotonicFactory } = await import('ulid');
+  const receiptId = monotonicFactory()();
+  const receiptSK = `RECEIPT#${billedAt.substring(0, 10)}#${receiptId}`;
+
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: receiptSK,
+      eventType: 'RECEIPT',
+      status: 'ACTIVE',
+      primaryCat: 'receipt',
+      subCategory: validKey.brandId,
+      desc: JSON.stringify({
+        merchant:             brandName,
+        brandId:              validKey.brandId,
+        amount,
+        currency:             curr,
+        purchaseDate:         billedAt,
+        category:             desc.category ?? 'subscription',
+        linkedInvoiceSk:      invoiceSK ?? null,
+        linkedSubscriptionSk: subSK,
+        receiptType:          'SUBSCRIPTION_PAYMENT',
+        createdAt:            now,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+
+  // FCM push
+  const token = await getDeviceToken(permULID);
+  if (token) {
+    try {
+      const { initializeApp, getApps, cert } = await import('firebase-admin/app');
+      const { getMessaging } = await import('firebase-admin/messaging');
+      if (getApps().length === 0) {
+        const sa = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+        if (sa) initializeApp({ credential: cert(JSON.parse(sa)) });
+      }
+      await getMessaging().send({
+        token,
+        data: { type: 'SUBSCRIPTION_PAYMENT_CONFIRMED', subId, receiptSK },
+        notification: {
+          title: 'Payment confirmed',
+          body: `${brandName} — ${curr} ${amount} on ${billedAt.substring(0, 10)}`,
+        },
+        android: { priority: 'normal' },
+        apns: { payload: { aps: { contentAvailable: true } } },
+      });
+    } catch (e) {
+      console.error('[subscription-proxy] FCM push failed', e);
+    }
+  }
+
+  return {
+    statusCode: 200,
+    headers: CORS,
+    body: JSON.stringify({ receiptSK, nextBillingDate, status: 'PAYMENT_CONFIRMED' }),
+  };
+}
+
+function advanceBillingDate(from: Date, frequency: string): Date {
+  const d = new Date(from);
+  switch (frequency) {
+    case 'daily':        d.setDate(d.getDate() + 1);     break;
+    case 'weekly':       d.setDate(d.getDate() + 7);     break;
+    case 'fortnightly':  d.setDate(d.getDate() + 14);    break;
+    case 'monthly':      d.setMonth(d.getMonth() + 1);   break;
+    case 'quarterly':    d.setMonth(d.getMonth() + 3);   break;
+    case 'annually':     d.setFullYear(d.getFullYear() + 1); break;
+  }
+  return d;
+}
+
 // ── Shared cancel helper ──────────────────────────────────────────────────────
 
 export async function cancelSubscription(
@@ -398,6 +723,42 @@ export async function cancelSubscription(
     },
     ConditionExpression: '#s = :active',
   }));
+
+  // Update reverse index status so brand-side lookups reflect the cancellation
+  await dynamo.send(new UpdateCommand({
+    TableName: ADMIN_TABLE,
+    Key: { pK: `RECURRING_IDX#${subId}`, sK: permULID },
+    UpdateExpression: 'SET #s = :s, updatedAt = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': reason, ':now': now },
+  }));
+
+  // Write RECEIPT# so the Finance tab reflects the cancellation
+  const cancelReceiptId = ulid();
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK:         `USER#${permULID}`,
+      sK:         `RECEIPT#${now.substring(0, 10)}#${cancelReceiptId}`,
+      eventType:  'RECEIPT',
+      status:     'CONFIRMED',
+      primaryCat: 'receipt',
+      desc: JSON.stringify({
+        merchant:              desc.brandName ?? brandId,
+        brandId,
+        amount:                0,
+        currency:              desc.currency ?? 'AUD',
+        purchaseDate:          now,
+        receiptType:           'SUBSCRIPTION_CANCELLATION',
+        linkedSubscriptionSk:  `RECURRING#${brandId}#${subId}`,
+        category:              'subscription',
+        reason,
+        cancelledAt:           now,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  })).catch(e => console.error('[subscription-proxy] cancellation RECEIPT# write failed', e));
 
   // Notify brand webhook
   if (desc.webhookUrl) {

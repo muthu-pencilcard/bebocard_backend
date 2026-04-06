@@ -3,9 +3,11 @@ import { DynamoDBDocumentClient, ScanCommand, PutCommand, UpdateCommand, GetComm
 import { KMSClient, DecryptCommand } from '@aws-sdk/client-kms';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
+import { monotonicFactory } from 'ulid';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const kms = new KMSClient({});
+const ulid = monotonicFactory();
 
 const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 const USER_TABLE = process.env.USER_TABLE!;
@@ -67,7 +69,35 @@ export const handler = async () => {
                         },
                     }));
 
-                    // 3. Delete or update the gift record
+                    // 3. Write RECEIPT# so the Finance tab reflects the refund
+                    const receiptId = ulid();
+                    await dynamo.send(new PutCommand({
+                        TableName: USER_TABLE,
+                        Item: {
+                            pK:         `USER#${gift.senderPermULID}`,
+                            sK:         `RECEIPT#${now.substring(0, 10)}#${receiptId}`,
+                            eventType:  'RECEIPT',
+                            status:     'CONFIRMED',
+                            primaryCat: 'receipt',
+                            brandId:    gift.brandId,
+                            desc: JSON.stringify({
+                                merchant:         gift.brandName,
+                                brandId:          gift.brandId,
+                                amount:           gift.denomination,
+                                currency:         gift.currency,
+                                purchaseDate:     now,
+                                receiptType:      'GIFT_CARD_REFUND',
+                                linkedGiftCardSK: cardSK,
+                                category:         'gift_card',
+                                source:           'refund',
+                                giftToken:        gift.pK.split('#')[1],
+                            }),
+                            createdAt: now,
+                            updatedAt: now,
+                        },
+                    })).catch(e => console.error('[gift-card-refund] RECEIPT# write failed', e));
+
+                    // 4. Delete or update the gift record
                     await dynamo.send(new UpdateCommand({
                         TableName: ADMIN_TABLE,
                         Key: { pK: gift.pK, sK: 'metadata' },
@@ -76,7 +106,7 @@ export const handler = async () => {
                         ExpressionAttributeValues: { ':refunded': 'refunded' },
                     }));
 
-                    // 4. Send Firebase push notification directly back to sender about the refund
+                    // 5. Send Firebase push notification directly back to sender about the refund
                     await notifySender(gift.senderPermULID as string, gift.brandName as string, gift.denomination as number, cardSK, cardNumber, pin);
 
                     expiredCount++;

@@ -114,17 +114,27 @@ describe('expired gift refund', () => {
     // KMS decrypt called once
     expect(mockKmsSend).toHaveBeenCalledOnce();
 
-    // PutCommand to write card back to sender's wallet
+    // Two PutCommands: GIFTCARD# (wallet) + RECEIPT# (Finance tab)
     const putCalls = mockDynSend.mock.calls.filter(
       (c: unknown[]) => (c[0] as { __type?: string }).__type === 'PutCommand',
     );
-    expect(putCalls).toHaveLength(1);
+    expect(putCalls).toHaveLength(2);
+
+    // First PutCommand: GIFTCARD# back to sender wallet
     const putItem = (putCalls[0][0] as { input: { Item: Record<string, unknown> } }).input.Item;
     expect(putItem.pK).toBe('USER#PERM-SENDER-001');
     expect(putItem.eventType).toBe('GIFTCARD');
     const desc = JSON.parse(putItem.desc as string);
     expect(desc.cardNumber).toBe('1234-5678');
     expect(desc.source).toBe('refunded_gift');
+
+    // Second PutCommand: RECEIPT# in Finance tab
+    const receiptItem = (putCalls[1][0] as { input: { Item: Record<string, unknown> } }).input.Item;
+    expect(receiptItem.pK).toBe('USER#PERM-SENDER-001');
+    expect(receiptItem.eventType).toBe('RECEIPT');
+    const receiptDesc = JSON.parse(receiptItem.desc as string);
+    expect(receiptDesc.receiptType).toBe('GIFT_CARD_REFUND');
+    expect(receiptDesc.brandId).toBe('woolworths');
 
     // UpdateCommand to mark GIFT# record as refunded
     const updateCalls = mockDynSend.mock.calls.filter(
@@ -159,11 +169,11 @@ describe('expired gift refund', () => {
     // Should not throw even though gift-001 fails
     await (handler as () => Promise<void>)();
 
-    // Only gift-002 is processed successfully
+    // Only gift-002 is processed successfully — 2 PutCommands (GIFTCARD# + RECEIPT#)
     const putCalls = mockDynSend.mock.calls.filter(
       (c: unknown[]) => (c[0] as { __type?: string }).__type === 'PutCommand',
     );
-    expect(putCalls).toHaveLength(1);
+    expect(putCalls).toHaveLength(2);
   });
 
   it('handles pagination (LastEvaluatedKey)', async () => {
@@ -192,7 +202,8 @@ describe('expired gift refund', () => {
     const puts = mockDynSend.mock.calls.filter(
       (c: unknown[]) => (c[0] as { __type?: string }).__type === 'PutCommand',
     );
-    expect(puts).toHaveLength(2);
+    // 2 gifts × 2 PutCommands each (GIFTCARD# + RECEIPT#) = 4
+    expect(puts).toHaveLength(4);
   });
 
   it('does not send FCM when sender has no device token', async () => {

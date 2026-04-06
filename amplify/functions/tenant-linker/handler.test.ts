@@ -300,3 +300,130 @@ describe('card number extraction via happy-path responses', () => {
     expect(res.headers?.Location).toContain('link-success');
   });
 });
+
+// ── GET /auth/link/{brandId}?scope=subscriptions ──────────────────────────────
+
+describe('subscription consent linking (scope=subscriptions)', () => {
+  beforeEach(() => {
+    // Default: Cognito verifies the permULID successfully
+    mockCognitoSend.mockResolvedValue({
+      UserAttributes: [{ Name: 'custom:permULID', Value: 'PERM-001' }],
+    });
+  });
+
+  it('returns 302 to link-success after writing SUBSCRIPTION# consent record', async () => {
+    mockDynSend.mockResolvedValue({});
+
+    const res = await handler(
+      makeEvent('/auth/link/woolworths', {
+        permULID: 'PERM-001',
+        authToken: 'valid-token',
+        scope: 'subscriptions',
+      }),
+      {} as never, () => {},
+    );
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers?.Location).toContain('link-success');
+    expect(res.headers?.Location).toContain('scope=subscriptions');
+    expect(res.headers?.Location).toContain('brand=woolworths');
+
+    // Verify SUBSCRIPTION# PutCommand was written
+    const puts = mockDynSend.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { __type?: string }).__type === 'PutCommand',
+    );
+    // Two PutCommands: one for SUBSCRIPTION# consent, one may be the brand ref lookup
+    // At minimum one PutCommand for the consent record
+    const consentPut = puts.find((c: unknown[]) => {
+      const item = (c[0] as { input?: { Item?: Record<string, unknown> } }).input?.Item;
+      return String(item?.sK ?? '').startsWith('SUBSCRIPTION#');
+    });
+    expect(consentPut).toBeDefined();
+
+    const item = (consentPut![0] as { input: { Item: Record<string, unknown> } }).input.Item;
+    expect(item.sK).toBe('SUBSCRIPTION#woolworths');
+    expect(item.primaryCat).toBe('subscription_consent');
+    expect(item.status).toBe('ACTIVE');
+    const desc = JSON.parse(item.desc as string);
+    expect(desc.brandId).toBe('woolworths');
+    expect(desc.scope).toBe('recurring,invoices');
+    expect(desc.source).toBe('tenant_linked');
+  });
+
+  it('returns 302 to failure when authToken cannot be verified', async () => {
+    mockCognitoSend.mockRejectedValue(new Error('Invalid token'));
+
+    const res = await handler(
+      makeEvent('/auth/link/woolworths', {
+        permULID: 'PERM-001',
+        authToken: 'bad-token',
+        scope: 'subscriptions',
+      }),
+      {} as never, () => {},
+    );
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers?.Location).toContain('link-failed');
+  });
+
+  it('returns 302 to failure when permULID does not match Cognito claim', async () => {
+    mockCognitoSend.mockResolvedValue({
+      UserAttributes: [{ Name: 'custom:permULID', Value: 'DIFFERENT-PERM' }],
+    });
+
+    const res = await handler(
+      makeEvent('/auth/link/telstra', {
+        permULID: 'PERM-001',
+        authToken: 'valid-token',
+        scope: 'subscriptions',
+      }),
+      {} as never, () => {},
+    );
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers?.Location).toContain('link-failed');
+  });
+
+  it('returns 400 when permULID or authToken is missing', async () => {
+    const res = await handler(
+      makeEvent('/auth/link/woolworths', { scope: 'subscriptions' }), // no permULID or authToken
+      {} as never, () => {},
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('still succeeds for unknown brandId not in BRAND_CONFIG (tenant-registered brand)', async () => {
+    // Brand not in BRAND_CONFIG but registered in RefDataEvent
+    mockDynSend.mockImplementation((cmd: { __type: string }) => {
+      if (cmd.__type === 'GetCommand') {
+        return Promise.resolve({ Item: { desc: JSON.stringify({ brandName: 'AGL Energy' }) } });
+      }
+      return Promise.resolve({});
+    });
+
+    const res = await handler(
+      makeEvent('/auth/link/agl', {
+        permULID: 'PERM-001',
+        authToken: 'valid-token',
+        scope: 'subscriptions',
+      }),
+      {} as never, () => {},
+    );
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers?.Location).toContain('link-success');
+
+    const puts = mockDynSend.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { __type?: string }).__type === 'PutCommand',
+    );
+    const consentPut = puts.find((c: unknown[]) => {
+      const item = (c[0] as { input?: { Item?: Record<string, unknown> } }).input?.Item;
+      return String(item?.sK ?? '').startsWith('SUBSCRIPTION#');
+    });
+    expect(consentPut).toBeDefined();
+    const desc = JSON.parse(
+      (consentPut![0] as { input: { Item: { desc: string } } }).input.Item.desc,
+    );
+    expect(desc.brandName).toBe('AGL Energy');
+  });
+});

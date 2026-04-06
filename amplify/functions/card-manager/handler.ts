@@ -3,7 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import https from 'https';
 import { monotonicFactory } from 'ulid';
-import { withAuditLog } from '../../shared/audit-logger';
+import { withAuditLog, writeAuditLog } from '../../shared/audit-logger';
 import {
   AddLoyaltyCardSchema,
   AddGiftCardSchema,
@@ -64,6 +64,11 @@ type Args = {
   invoiceSK?: string;
   status?: string;
   paidDate?: string;
+  linkedSubscriptionSk?: string;
+  billingPeriod?: string;
+  invoiceType?: string;
+  // Subscriptions
+  providerId?: string;
   // Receipts
   merchant?: string;
   purchaseDate?: string;
@@ -496,7 +501,10 @@ async function updateBalance(permULID: string, cardSK: string, newBalance: numbe
 async function addInvoice(permULID: string, args: Args) {
   const validation = AddInvoiceSchema.safeParse(args);
   if (!validation.success) throw new Error(validation.error.issues[0]?.message ?? 'Invalid invoice input');
-  const { supplier, amount, dueDate, invoiceNumber, category, notes, currency, brandId } = args;
+  const {
+    supplier, amount, dueDate, invoiceNumber, category, notes, currency, brandId,
+    linkedSubscriptionSk, providerId, billingPeriod, invoiceType,
+  } = args;
   const now = new Date().toISOString();
   const id = ulid();
   // sK sorts by due date for easy range queries
@@ -513,16 +521,20 @@ async function addInvoice(permULID: string, args: Args) {
       subCategory: category ?? 'other',
       desc: JSON.stringify({
         supplier,
-        brandId: brandId ?? null,
-        invoiceNumber: invoiceNumber ?? null,
+        brandId:              brandId              ?? null,
+        providerId:           providerId           ?? null,
+        invoiceNumber:        invoiceNumber        ?? null,
         amount,
-        currency: currency ?? 'AUD',
+        currency:             currency             ?? 'AUD',
         dueDate,
-        paidDate: null,
-        status: 'unpaid',
-        category: category ?? 'other',
-        notes: notes ?? null,
-        attachmentKey: null,
+        paidDate:             null,
+        status:               'unpaid',
+        category:             category             ?? 'other',
+        notes:                notes                ?? null,
+        attachmentKey:        null,
+        invoiceType:          invoiceType          ?? 'ONE_TIME',
+        linkedSubscriptionSk: linkedSubscriptionSk ?? null,
+        billingPeriod:        billingPeriod        ?? null,
         createdAt: now,
       }),
       createdAt: now,
@@ -736,6 +748,18 @@ async function updateGranularSubscription(permULID: string, brandId: string, arg
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
   }));
+
+  // Log engagement event under AUDIT#<brandId> so it appears in brand analytics
+  const changedChannels = fields.filter(f => args[f] !== undefined);
+  writeAuditLog(dynamo, {
+    actor: brandId,
+    actorType: 'brand',
+    action: 'subscription.changed',
+    resource: `SUBSCRIPTION#${brandId}`,
+    outcome: 'success',
+    metadata: { changedChannels },
+  }).catch(() => {});
+
   return { success: true };
 }
 
@@ -795,6 +819,15 @@ async function snoozeOffers(permULID: string, brandId?: string, until?: string |
         ':now': now,
       },
     }));
+    writeAuditLog(dynamo, {
+      actor: brandId,
+      actorType: 'brand',
+      action: 'offer.snoozed',
+      resource: `SUBSCRIPTION#${brandId}`,
+      outcome: 'success',
+      metadata: { until: expiresAt ?? 'cleared' },
+    }).catch(() => {});
+
     return { success: true, brandId, offersSnoozeUntil: expiresAt };
   }
 
@@ -832,6 +865,20 @@ async function markNewsletterRead(permULID: string, newsletterSK: string) {
     ExpressionAttributeNames: { '#s': 'status' },
     ExpressionAttributeValues: { ':read': 'READ', ':now': new Date().toISOString() },
   }));
+
+  // newsletterSK format: NEWSLETTER#<brandId>#<newsletterId>
+  const parts = newsletterSK.split('#');
+  const brandId = parts[1];
+  if (brandId) {
+    writeAuditLog(dynamo, {
+      actor: brandId,
+      actorType: 'brand',
+      action: 'newsletter.read',
+      resource: newsletterSK,
+      outcome: 'success',
+    }).catch(() => {});
+  }
+
   return { success: true };
 }
 
@@ -992,6 +1039,21 @@ async function respondToConsent(
     },
   }));
 
+  // Log consent decision under AUDIT#<brandId> so it appears in brand analytics
+  writeAuditLog(dynamo, {
+    actor: desc.brandId,
+    actorType: 'brand',
+    action: 'consent.decision',
+    resource: `CONSENT#${requestId}`,
+    outcome: 'success',
+    metadata: {
+      status: newStatus,
+      approvedFieldCount: safeApproved.length,
+      requestedFieldCount: desc.requestedFields.length,
+      purpose: desc.purpose,
+    },
+  }).catch(() => {});
+
   // Relay approved field values to brand webhook
   if (desc.brandWebhookUrl) {
     await postWebhookCardManager(desc.brandWebhookUrl, {
@@ -1027,6 +1089,17 @@ async function setSubscription(permULID: string, brandId: string, active: boolea
       ':now': now,
     },
   }));
+
+  // Log engagement event under AUDIT#<brandId> so it appears in brand analytics
+  writeAuditLog(dynamo, {
+    actor: brandId,
+    actorType: 'brand',
+    action: active ? 'subscriber.joined' : 'subscriber.churned',
+    resource: `SUBSCRIPTION#${brandId}`,
+    outcome: 'success',
+    metadata: { channel: 'offers' },
+  }).catch(() => {});
+
   return { success: true };
 }
 
@@ -1042,7 +1115,7 @@ async function cancelRecurringHandler(permULID: string, subId: string, brandId: 
 // ── Manual Subscriptions ──────────────────────────────────────────────────────
 
 async function addManualSubscription(permULID: string, args: Args) {
-  const { brandName, productName, amount, currency, frequency, nextBillingDate, category } = args;
+  const { brandName, productName, amount, currency, frequency, nextBillingDate, category, providerId } = args;
   const now = new Date().toISOString();
   const id = (await import('ulid')).monotonicFactory()();
   const subSK = `RECURRING#manual#${id}`;
@@ -1055,7 +1128,7 @@ async function addManualSubscription(permULID: string, args: Args) {
       eventType: 'SUBSCRIPTION',
       status: 'ACTIVE',
       primaryCat: 'subscription',
-      subCategory: 'manual',
+      subCategory: providerId ? 'catalog' : 'manual',
       desc: JSON.stringify({
         brandName,
         productName,
@@ -1064,7 +1137,8 @@ async function addManualSubscription(permULID: string, args: Args) {
         frequency,
         nextBillingDate,
         category,
-        source: 'manual',
+        providerId:  providerId ?? null,   // catalog provider ID (e.g. 'agl', 'netflix')
+        source: providerId ? 'catalog' : 'manual',
         addedAt: now,
       }),
       createdAt: now,

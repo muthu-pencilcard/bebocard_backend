@@ -1,16 +1,52 @@
 import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 export const ALL_USAGE_TYPES = [
+  // Core brand-initiated events (all tiers)
   'offers',
   'newsletters',
   'catalogues',
   'invoices',
   'geolocation',
   'payments',
+  'consent',
+  // Engagement events — Engagement tier and above
+  'newsletter_reads',
+  'offer_engagements',
+  'catalogue_views',
+  'delivery_outcomes',
+  // Intelligence events — Intelligence tier and above
+  'consent_decisions',
+  'payment_decisions',
+  'enrollment_decisions',
+  'subscription_changes',
 ] as const;
 
 export type UsageType = typeof ALL_USAGE_TYPES[number];
-export type TenantTier = 'base' | 'engagement' | 'intelligence';
+export type TenantTier = 'base' | 'engagement' | 'intelligence' | 'enterprise';
+
+const TIER_ORDER: Record<TenantTier, number> = { base: 0, engagement: 1, intelligence: 2, enterprise: 3 };
+
+/** Minimum tier required to meter or access this usage type. Absent = all tiers. */
+export const USAGE_TYPE_MIN_TIER: Partial<Record<UsageType, TenantTier>> = {
+  newsletter_reads:     'engagement',
+  offer_engagements:    'engagement',
+  catalogue_views:      'engagement',
+  delivery_outcomes:    'engagement',
+  consent_decisions:    'intelligence',
+  payment_decisions:    'intelligence',
+  enrollment_decisions: 'intelligence',
+  subscription_changes: 'intelligence',
+};
+
+/**
+ * Returns true when the tenant tier is high enough to access a usage type.
+ * Use this in API routes to gate engagement/intelligence analytics.
+ */
+export function canAccessUsageType(tier: TenantTier, type: UsageType): boolean {
+  const minTier = USAGE_TYPE_MIN_TIER[type];
+  if (!minTier) return true;
+  return TIER_ORDER[tier] >= TIER_ORDER[minTier];
+}
 
 function parseRecord(value: unknown): Record<string, unknown> {
   if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
@@ -28,15 +64,34 @@ export function getUsageMonthKey(date = new Date()): string {
 
 export function normalizeTenantTier(value: unknown): TenantTier {
   if (value === 'engagement' || value === 'growth') return 'engagement';
-  if (value === 'intelligence' || value === 'enterprise') return 'intelligence';
+  if (value === 'enterprise') return 'enterprise';
+  if (value === 'intelligence') return 'intelligence';
   return 'base';
+}
+
+export const TIER_INCLUDED_EVENTS: Record<TenantTier, number> = {
+  base: 250,
+  engagement: 2500,
+  intelligence: 25000,
+  enterprise: 999999999, // Essentially unlimited; managed by custom contracts
+};
+
+export const TIER_OVERAGE_RATES: Record<TenantTier, number> = {
+  base: 0.45,
+  engagement: 0.20,
+  intelligence: 0.08,
+  enterprise: 0.00, // Custom billing
+};
+
+/** Per-category overage rate — consent is higher value; all others use the tier default. */
+export function getCategoryOverageRate(tier: TenantTier, _category: UsageType): number {
+  if (_category === 'consent' && tier === 'intelligence') return 0.15;
+  return TIER_OVERAGE_RATES[tier];
 }
 
 export function parseTenantIncludedEvents(value: unknown, tier: TenantTier): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (tier === 'base') return 250;
-  if (tier === 'engagement') return 2500;
-  return null;
+  return TIER_INCLUDED_EVENTS[tier] ?? null;
 }
 
 export function isBillingGraceExpired(desc: Record<string, unknown>, item?: Record<string, unknown> | null): boolean {
@@ -107,6 +162,42 @@ export async function getTenantUsageCounter(
     lastUpdatedAt: (desc.lastUpdatedAt as string | undefined) ?? null,
     lastBrandId: (desc.lastBrandId as string | undefined) ?? null,
   };
+}
+
+/**
+ * Checks whether the tenant has exceeded their monthly quota.
+ * - Base tier: hard block when quota exceeded
+ * - Engagement / Intelligence: soft limit — events continue, overage invoiced
+ *
+ * Returns `usageRatio` so callers can determine threshold alerts (80%, 100%).
+ */
+export async function checkTenantQuota(
+  dynamo: DynamoDBDocumentClient,
+  refTable: string,
+  tenantState: { tenantId: string | null; tier: TenantTier; includedEventsPerMonth: number | null },
+  type: UsageType,
+): Promise<{ allowed: boolean; message?: string; currentTotal?: number; usageRatio?: number }> {
+  if (!tenantState.tenantId) return { allowed: true };
+
+  const included = tenantState.includedEventsPerMonth;
+  if (included == null) return { allowed: true };
+
+  const usageRecords = await Promise.all(
+    ALL_USAGE_TYPES.map((usageType) => getTenantUsageCounter(dynamo, refTable, tenantState.tenantId!, usageType)),
+  );
+  const currentTotal = usageRecords.reduce((sum, record) => sum + record.usageCount, 0);
+  const usageRatio = included > 0 ? currentTotal / included : 0;
+
+  if (tenantState.tier === 'base' && currentTotal + 1 > included) {
+    return {
+      allowed: false,
+      message: `Base tier monthly quota exceeded for ${type}. Upgrade tenant billing to continue sending.`,
+      currentTotal,
+      usageRatio,
+    };
+  }
+
+  return { allowed: true, currentTotal, usageRatio };
 }
 
 export async function incrementTenantUsageCounter(

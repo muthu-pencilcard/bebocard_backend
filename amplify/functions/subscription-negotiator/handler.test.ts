@@ -114,13 +114,118 @@ describe('missing data', () => {
     expect(mockFcmSend).not.toHaveBeenCalled();
   });
 
-  it('skips when no benchmark record exists for the brand', async () => {
+  it('skips when no benchmark record exists and no catalog record exists for the brand', async () => {
     mockSend.mockImplementation((cmd: { __type: string }) => {
       if (cmd.__type === 'ScanCommand') return Promise.resolve({ Items: [makeSubscription(200)] });
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: undefined }); // no benchmark
+      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: undefined }); // no benchmark, no catalog
       return Promise.resolve({});
     });
     await (handler as () => Promise<void>)();
+    expect(mockFcmSend).not.toHaveBeenCalled();
+  });
+});
+
+// ── Catalog fallback (BENCHMARK# missing → SUBSCRIPTION_CATALOG# lookup) ──────
+
+describe('catalog benchmark fallback', () => {
+  it('uses SUBSCRIPTION_CATALOG# benchmarkPrice when BENCHMARK# record is absent', async () => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: Record<string, unknown> } }) => {
+      if (cmd.__type === 'ScanCommand') return Promise.resolve({ Items: [makeSubscription(100, 'netflix')] });
+      if (cmd.__type === 'GetCommand') {
+        const pk = String((cmd.input?.Key ?? {})['pK'] ?? '');
+        if (pk.startsWith('BENCHMARK#')) {
+          return Promise.resolve({ Item: undefined }); // no BENCHMARK# record
+        }
+        if (pk.startsWith('SUBSCRIPTION_CATALOG#')) {
+          return Promise.resolve({
+            Item: {
+              desc: JSON.stringify({ benchmarkPrice: 7.99 }), // $100 vs $7.99 → way above 15% → alert
+            },
+          });
+        }
+        // DEVICE_TOKEN
+        return Promise.resolve({ Item: { desc: JSON.stringify({ token: 'tok-123' }) } });
+      }
+      return Promise.resolve({});
+    });
+
+    await (handler as () => Promise<void>)();
+
+    const puts = mockSend.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { __type?: string }).__type === 'PutCommand',
+    );
+    expect(puts).toHaveLength(1);
+    const item = (puts[0][0] as { input: { Item: Record<string, unknown> } }).input.Item;
+    expect(item.sK).toBe('SAVING_OPPORTUNITY#netflix');
+    const desc = JSON.parse(item.desc as string);
+    expect(desc.benchmarkAmount).toBe(7.99);
+    expect(desc.potentialSaving).toBeCloseTo(92.01, 1);
+
+    expect(mockFcmSend).toHaveBeenCalledOnce();
+  });
+
+  it('skips when SUBSCRIPTION_CATALOG# desc has no benchmarkPrice', async () => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: Record<string, unknown> } }) => {
+      if (cmd.__type === 'ScanCommand') return Promise.resolve({ Items: [makeSubscription(200, 'unknown-brand')] });
+      if (cmd.__type === 'GetCommand') {
+        const pk = String((cmd.input?.Key ?? {})['pK'] ?? '');
+        if (pk.startsWith('BENCHMARK#')) return Promise.resolve({ Item: undefined });
+        if (pk.startsWith('SUBSCRIPTION_CATALOG#')) {
+          return Promise.resolve({
+            Item: { desc: JSON.stringify({ name: 'Some Service' }) }, // no benchmarkPrice
+          });
+        }
+        return Promise.resolve({ Item: undefined });
+      }
+      return Promise.resolve({});
+    });
+
+    await (handler as () => Promise<void>)();
+    expect(mockFcmSend).not.toHaveBeenCalled();
+  });
+
+  it('does not alert via catalog fallback when amount is within 15% of catalog benchmark', async () => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: Record<string, unknown> } }) => {
+      if (cmd.__type === 'ScanCommand') return Promise.resolve({ Items: [makeSubscription(13, 'spotify')] });
+      if (cmd.__type === 'GetCommand') {
+        const pk = String((cmd.input?.Key ?? {})['pK'] ?? '');
+        if (pk.startsWith('BENCHMARK#')) return Promise.resolve({ Item: undefined });
+        if (pk.startsWith('SUBSCRIPTION_CATALOG#')) {
+          return Promise.resolve({
+            Item: { desc: JSON.stringify({ benchmarkPrice: 12.99 }) }, // $13 vs $12.99 — well within 15%
+          });
+        }
+        return Promise.resolve({ Item: undefined });
+      }
+      return Promise.resolve({});
+    });
+
+    await (handler as () => Promise<void>)();
+    expect(mockFcmSend).not.toHaveBeenCalled();
+  });
+
+  it('prefers BENCHMARK# record over SUBSCRIPTION_CATALOG# when both exist', async () => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: Record<string, unknown> } }) => {
+      if (cmd.__type === 'ScanCommand') return Promise.resolve({ Items: [makeSubscription(100, 'netflix')] });
+      if (cmd.__type === 'GetCommand') {
+        const pk = String((cmd.input?.Key ?? {})['pK'] ?? '');
+        if (pk.startsWith('BENCHMARK#')) {
+          return Promise.resolve({ Item: { benchmarkAmount: 90 } }); // within 15% → no alert
+        }
+        // If we reach this, the handler incorrectly fell through to catalog
+        if (pk.startsWith('SUBSCRIPTION_CATALOG#')) {
+          return Promise.resolve({
+            Item: { desc: JSON.stringify({ benchmarkPrice: 50 }) }, // would trigger alert if used
+          });
+        }
+        return Promise.resolve({ Item: { desc: JSON.stringify({ token: 'tok' }) } });
+      }
+      return Promise.resolve({});
+    });
+
+    await (handler as () => Promise<void>)();
+
+    // BENCHMARK# says $90 (within 15% of $100), so no alert — catalog's $50 is NOT used
     expect(mockFcmSend).not.toHaveBeenCalled();
   });
 });

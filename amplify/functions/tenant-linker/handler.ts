@@ -105,14 +105,18 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     const headers = event.headers ?? {};
     const userAgent = headers['user-agent'] ?? headers['User-Agent'] ?? '';
 
-    // GET /auth/link/{brandId}?permULID=<permULID>&authToken=<accessToken>
-    const linkMatch = path.match(/\/auth\/link\/([a-z]+)$/);
+    // GET /auth/link/{brandId}?permULID=<permULID>&authToken=<accessToken>[&scope=subscriptions]
+    const linkMatch = path.match(/\/auth\/link\/([a-z-]+)$/);
     if (linkMatch) {
+      // Subscription consent path — no external OAuth needed, just verify + write consent
+      if (params.scope === 'subscriptions') {
+        return linkSubscriptions(linkMatch[1], params.permULID ?? '', params.authToken ?? '');
+      }
       return initiateOAuth(linkMatch[1], params.permULID ?? '', params.authToken ?? '', userAgent);
     }
 
     // GET /auth/callback/{brandId}?code=...&state=<nonce>
-    const callbackMatch = path.match(/\/auth\/callback\/([a-z]+)$/);
+    const callbackMatch = path.match(/\/auth\/callback\/([a-z-]+)$/);
     if (callbackMatch) {
       return handleCallback(callbackMatch[1], params.code ?? '', params.state ?? '', userAgent);
     }
@@ -123,6 +127,69 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return redirect(`${APP_FAILURE_URL}?reason=server_error`);
   }
 };
+
+// ---------------------------------------------------------------------------
+// Subscription consent linking
+// No external OAuth needed — user identity verified via BeboCard authToken.
+// The brand website redirects here after the user taps "Link BeboCard".
+// On success: writes SUBSCRIPTION# consent record, then redirects to success URL.
+// Brand can then call POST /recurring/register + /invoice using their API key.
+// ---------------------------------------------------------------------------
+
+const REF_TABLE = process.env.REFDATA_TABLE ?? process.env.REF_TABLE!;
+
+async function linkSubscriptions(brandId: string, permULID: string, authToken: string) {
+  if (!permULID || !authToken) return { statusCode: 400, body: 'Missing auth context' };
+
+  // Must be a known brand in BRAND_CONFIG or registered in RefDataEvent
+  const verifiedPermULID = await verifyAuthToken(authToken, permULID);
+  if (!verifiedPermULID) return redirect(`${APP_FAILURE_URL}?reason=invalid_auth`);
+
+  // Resolve brand display name from RefDataEvent (prefer tenant record, fall back to BRAND_CONFIG)
+  let brandName = BRAND_CONFIG[brandId]?.displayName ?? brandId;
+  try {
+    const brandRef = await dynamo.send(new GetCommand({
+      TableName: REF_TABLE,
+      Key: { pK: `BRAND#${brandId}`, sK: 'PROFILE' },
+    }));
+    if (brandRef.Item) {
+      const d = JSON.parse(brandRef.Item.desc ?? '{}');
+      brandName = (d.brandName as string) ?? brandName;
+    }
+  } catch { /* non-fatal */ }
+
+  const now = new Date().toISOString();
+
+  // Write SUBSCRIPTION# consent record — this is the same record that gates
+  // segment data return in scan-handler and fan-out in fanOutToSubscribers.
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${verifiedPermULID}`,
+      sK: `SUBSCRIPTION#${brandId}`,
+      eventType: 'SUBSCRIPTION',
+      status: 'ACTIVE',
+      primaryCat: 'subscription_consent',
+      subCategory: brandId,
+      desc: JSON.stringify({
+        brandId,
+        brandName,
+        scope: 'recurring,invoices',
+        source: 'tenant_linked',   // distinguishes from user-initiated opt-ins
+        linkedAt: now,
+        offers: true,
+        newsletters: true,
+        reminders: true,
+        catalogues: true,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+
+  console.log(`[tenant-linker] Subscription consent granted for ${brandId} → USER#${verifiedPermULID}`);
+  return redirect(`${APP_SUCCESS_URL}?brand=${brandId}&scope=subscriptions&linked=true`);
+}
 
 // ---------------------------------------------------------------------------
 // Phase 1 — Initiate OAuth

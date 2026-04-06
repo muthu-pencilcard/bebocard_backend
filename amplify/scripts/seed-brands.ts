@@ -5,7 +5,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 
-const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'ap-southeast-2' }));
+const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION ?? 'ap-southeast-2' }));
 
 const TABLE = process.env.REFDATA_TABLE!;
 

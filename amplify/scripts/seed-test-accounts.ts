@@ -13,7 +13,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { monotonicFactory } from 'ulid';
 
-const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'ap-southeast-2' }));
+const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION ?? 'ap-southeast-2' }));
 const ulid = monotonicFactory();
 
 const USER_TABLE   = process.env.USER_TABLE!;
