@@ -151,9 +151,11 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 
 postConfirmLambda.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonCognitoPowerUser'));
 
+// Wildcard user pool ARN — avoids UserPool → Lambda → LambdaRolePolicy → UserPool cycle
+// within the auth stack (UserPool lists Lambda as trigger; Lambda policy must not ref UserPool resource).
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminUpdateUserAttributes'],
-  resources: [backend.auth.resources.userPool.userPoolArn],
+  resources: [`arn:aws:cognito-idp:${dataStack.region}:${dataStack.account}:userpool/*`],
 }));
 
 // Use wildcard ARN patterns (not cross-stack token exports) to avoid auth → data circular dep.
