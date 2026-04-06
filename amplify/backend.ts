@@ -881,7 +881,7 @@ const giftClaimDistribution = new cloudfront.Distribution(stack, 'GiftClaimDistr
 });
 
 new s3deploy.BucketDeployment(stack, 'GiftClaimWebDeploy', {
-  sources: [s3deploy.Source.asset('../gift-claim-web')],
+  sources: [s3deploy.Source.asset('./gift-claim-web')],
   destinationBucket: giftClaimBucket,
   distribution: giftClaimDistribution,
   distributionPaths: ['/*'],
