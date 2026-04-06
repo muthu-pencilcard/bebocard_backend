@@ -156,11 +156,13 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: [backend.auth.resources.userPool.userPoolArn],
 }));
 
+// Use wildcard ARN patterns (not cross-stack token exports) to avoid auth → data circular dep.
+// Tables follow the Amplify Gen 2 naming convention: <ModelName>-<appId>-<branch>-<env>
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
   resources: [
-    userTable.tableArn,
-    adminTable.tableArn,
+    `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/UserDataEvent-*`,
+    `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/AdminDataEvent-*`,
   ],
 }));
 
