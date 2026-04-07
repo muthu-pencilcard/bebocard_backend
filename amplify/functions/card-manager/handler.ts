@@ -91,7 +91,10 @@ type Args = {
 };
 
 const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
-  const operation = event.info.fieldName;
+  // event.info.fieldName is the standard location in Amplify Gen 2 AppSync resolvers.
+  // Fall back to event.fieldName for sandboxes deployed with older resolver templates.
+  const operation = event.info?.fieldName ?? (event as unknown as Record<string, string>).fieldName;
+  if (!operation) throw new Error('Missing fieldName in AppSync event — resolver may need redeployment');
   const args = event.arguments;
 
   const permULID = (event.identity as { claims: Record<string, string> })
