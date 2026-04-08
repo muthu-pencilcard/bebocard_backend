@@ -12,7 +12,7 @@ type HandlerFn<TArgs = Record<string, unknown>, TResult = unknown> = (
 export function withGraphQLHandler<TArgs = Record<string, unknown>, TResult = unknown>(
   fn: HandlerFn<TArgs, TResult>,
 ): AppSyncResolverHandler<TArgs, TResult> {
-  return async (event: AppSyncResolverEvent<TArgs>, _context: Context) => {
+  return async (event: AppSyncResolverEvent<TArgs>, _context?: Context) => {
     const claims = (event.identity as any)?.claims as Record<string, string> | undefined;
     const permULID = claims?.['custom:permULID'];
     if (!permULID) {

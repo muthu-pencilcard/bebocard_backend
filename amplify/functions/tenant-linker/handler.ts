@@ -16,7 +16,7 @@
  * The SCAN index is updated so POS Lambdas can look up the card at checkout.
  */
 
-import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import type { APIGatewayProxyHandlerV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { CognitoIdentityProviderClient, GetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -104,12 +104,9 @@ async function getBrandOAuthConfig(brandId: string): Promise<ResolvedBrandOAuthC
   if (staticCfg) return staticCfg;
 
   // Try to load from RefDataEvent for dynamic tenants
-  const brandRef = await dynamo.send(new GetCommand({
-    TableName: REF_TABLE, // uses environment variable
-    Key: { pK: `BRAND#${brandId}`, sK: 'PROFILE' },
-  }));
+  const brandRef = await getBrandProfileRecord(brandId);
   if (!brandRef.Item) return null;
-  const d = JSON.parse(brandRef.Item.desc ?? '{}');
+  const d = JSON.parse(String(brandRef.Item.desc ?? '{}')) as Record<string, any>;
   if (!d.oauthConfig) return null;
 
   return {
@@ -130,7 +127,11 @@ async function getBrandOAuthConfig(brandId: string): Promise<ResolvedBrandOAuthC
 // Handler
 // ---------------------------------------------------------------------------
 
-export const handler: APIGatewayProxyHandlerV2 = async (event) => {
+export const handler = async (
+  event: Parameters<APIGatewayProxyHandlerV2>[0],
+  _context?: unknown,
+  _callback?: unknown,
+): Promise<APIGatewayProxyStructuredResultV2> => {
   const path = event.rawPath ?? '';
   const params = event.queryStringParameters ?? {};
 
@@ -181,13 +182,10 @@ async function linkSubscriptions(brandId: string, permULID: string, authToken: s
   // Resolve brand display name from RefDataEvent (prefer tenant record, fall back to BRAND_CONFIG)
   let brandName = BRAND_CONFIG[brandId]?.displayName ?? brandId;
   try {
-    const brandRef = await dynamo.send(new GetCommand({
-      TableName: REF_TABLE,
-      Key: { pK: `BRAND#${brandId}`, sK: 'PROFILE' },
-    }));
+    const brandRef = await getBrandProfileRecord(brandId);
     if (brandRef.Item) {
-      const d = JSON.parse(brandRef.Item.desc ?? '{}');
-      brandName = (d.brandName as string) ?? brandName;
+      const d = JSON.parse(String(brandRef.Item.desc ?? '{}')) as Record<string, unknown>;
+      if (typeof d.brandName === 'string') brandName = d.brandName;
     }
   } catch { /* non-fatal */ }
 
@@ -222,6 +220,17 @@ async function linkSubscriptions(brandId: string, permULID: string, authToken: s
 
   console.log(`[tenant-linker] Subscription consent granted for ${brandId} → USER#${verifiedPermULID}`);
   return redirect(`${APP_SUCCESS_URL}?brand=${brandId}&scope=subscriptions&linked=true`);
+}
+
+async function getBrandProfileRecord(brandId: string): Promise<{ Item?: Record<string, unknown> }> {
+  for (const sortKey of ['profile', 'PROFILE']) {
+    const result = await dynamo.send(new GetCommand({
+      TableName: REF_TABLE,
+      Key: { pK: `BRAND#${brandId}`, sK: sortKey },
+    })) as { Item?: Record<string, unknown> } | undefined;
+    if (result?.Item) return result;
+  }
+  return {};
 }
 
 // ---------------------------------------------------------------------------

@@ -4,11 +4,20 @@ const { mockSend, mockCancelSubscription } = vi.hoisted(() => ({
   mockSend: vi.fn(),
   mockCancelSubscription: vi.fn().mockResolvedValue(undefined),
 }));
+const { mockHttpsRequest } = vi.hoisted(() => ({
+  mockHttpsRequest: vi.fn(),
+}));
 
 import { handler } from './handler';
 
 vi.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: vi.fn(function (this: Record<string, unknown>) {}),
+}));
+
+vi.mock('https', () => ({
+  default: {
+    request: mockHttpsRequest,
+  },
 }));
 
 vi.mock('@aws-sdk/lib-dynamodb', () => {
@@ -77,6 +86,7 @@ describe('gift card marketplace (Phase 13)', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockSend.mockReset();
+    mockHttpsRequest.mockReset();
   });
 
   it('purchaseGiftCard creates PENDING order record', async () => {
@@ -117,6 +127,60 @@ describe('gift card marketplace (Phase 13)', () => {
       arguments: { cardSK: 'GIFTCARD#nonexistent', brandId: 'woolworths' },
     } as any;
     await expect(handler(event, null as any, null as any)).rejects.toThrow('Gift card not found');
+  });
+
+  it('syncGiftCardBalance persists updated balance and lastBalanceSync when webhook succeeds', async () => {
+    mockSend
+      .mockResolvedValueOnce({
+        Item: {
+          desc: JSON.stringify({
+            cardNumber: '1234',
+            balance: 50,
+            currency: 'AUD',
+            brandId: 'woolworths',
+          }),
+        },
+      })
+      .mockResolvedValueOnce({
+        Item: {
+          desc: JSON.stringify({
+            balanceWebhookUrl: 'https://brand.example.com/balance',
+            balanceWebhookSecret: 'secret',
+          }),
+        },
+      })
+      .mockResolvedValueOnce({});
+
+    mockHttpsRequest.mockImplementation((options: any, callback: (res: any) => void) => {
+      const res = {
+        on: (event: string, handler: (chunk?: Buffer) => void) => {
+          if (event === 'data') handler(Buffer.from(JSON.stringify({ balance: 42.5, currency: 'AUD' })));
+          if (event === 'end') handler();
+        },
+      };
+      callback(res);
+      return {
+        on: vi.fn(),
+        write: vi.fn(),
+        end: vi.fn(),
+      };
+    });
+
+    const event = {
+      info: { fieldName: 'syncGiftCardBalance' },
+      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      arguments: { cardSK: 'GIFTCARD#delivery-01', brandId: 'woolworths' },
+    } as any;
+
+    const res: any = await handler(event, null as any, null as any);
+    expect(res.synced).toBe(true);
+    expect(res.balance).toBe(42.5);
+
+    const updateCall = mockSend.mock.calls[2]?.[0]?.input;
+    const updatedDesc = JSON.parse(String(updateCall.ExpressionAttributeValues[':desc']));
+    expect(updatedDesc.balance).toBe(42.5);
+    expect(updatedDesc.currency).toBe('AUD');
+    expect(updatedDesc.lastBalanceSync).toBeDefined();
   });
 });
 

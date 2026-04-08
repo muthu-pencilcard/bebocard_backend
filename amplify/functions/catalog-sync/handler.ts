@@ -25,7 +25,7 @@ const REF_TABLE = process.env.REFDATA_TABLE ?? process.env.REF_TABLE!;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-export const handler = async () => {
+export const handler = async (_event?: unknown, _context?: unknown, _callback?: unknown) => {
   const results: Record<string, { upserted: number; errors: number }> = {};
 
   await Promise.allSettled([

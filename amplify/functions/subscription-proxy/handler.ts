@@ -49,7 +49,7 @@ const CORS = {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-export const handler = async (event: unknown) => {
+export const handler = async (event: unknown, _context?: unknown, _callback?: unknown) => {
   const apiHandler = withAuditLog(dynamo, _restHandler);
   return apiHandler(event as Parameters<APIGatewayProxyHandler>[0], {} as never, {} as never);
 };
@@ -522,7 +522,7 @@ async function handleInvoice(
           body: `${curr} ${amount} due ${dueDate.substring(0, 10)}`,
         },
         android: { priority: 'high' },
-        apns: { payload: { aps: { alert: true } } },
+        apns: { payload: { aps: { contentAvailable: true } } },
       });
     } catch (e) {
       console.error('[subscription-proxy] FCM push failed', e);

@@ -51,11 +51,12 @@ vi.mock('../../shared/tenant-billing', () => ({
   incrementTenantUsageCounter: mockIncrementUsage,
 }));
 
-import { handler } from './handler.js';
+import { handler as rawHandler } from './handler.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-type AppSyncEvent = Parameters<typeof handler>[0];
+type AppSyncEvent = Parameters<typeof rawHandler>[0];
+const handler = ((event: AppSyncEvent) => rawHandler(event, {} as never, () => {})) as (event: AppSyncEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>): AppSyncEvent {
   return {

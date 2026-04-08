@@ -50,6 +50,7 @@ function makeEvent(
 ) {
   return {
     rawPath: path,
+    rawQueryString: '',
     queryStringParameters,
     headers: { 'user-agent': 'TestBrowser/1.0', ...headers },
     requestContext: {} as never,
@@ -57,7 +58,7 @@ function makeEvent(
     routeKey: '$default',
     isBase64Encoded: false,
     body: undefined,
-  } as Parameters<typeof handler>[0];
+  } as unknown as Parameters<typeof handler>[0];
 }
 
 beforeEach(() => {
@@ -78,6 +79,7 @@ beforeEach(() => {
 
 describe('GET /auth/link/{brandId}', () => {
   it('returns 400 for an unknown brandId', async () => {
+    mockDynSend.mockResolvedValue({});
     const res = await handler(makeEvent('/auth/link/unknownbrand', { permULID: 'P1', authToken: 'tok' }), {} as never, () => {});
     expect(res.statusCode).toBe(400);
     expect(res.body).toContain('Unknown brand');
@@ -227,7 +229,7 @@ describe('GET /auth/callback/{brandId}', () => {
     });
     mockDynSend.mockImplementation((cmd: { __type: string }) => {
       if (cmd.__type === 'GetCommand') {
-        const c = cmd as { input: { Key: Record<string, unknown> } };
+        const c = cmd as unknown as { input: { Key: Record<string, unknown> } };
         const pk = String(c.input?.Key?.pK ?? '');
         if (pk.startsWith('OAUTHSTATE#')) return Promise.resolve({ Item: { desc: stateDesc } });
         if (pk.startsWith('USER#')) return Promise.resolve({ Item: { secondaryULID: 'SEC-001' } }); // IDENTITY record
@@ -282,7 +284,7 @@ describe('card number extraction via happy-path responses', () => {
     });
     mockDynSend.mockImplementation((cmd: { __type: string }) => {
       if (cmd.__type === 'GetCommand') {
-        const c = cmd as { input: { Key: Record<string, unknown> } };
+        const c = cmd as unknown as { input: { Key: Record<string, unknown> } };
         const pk = String(c.input?.Key?.pK ?? '');
         if (pk.startsWith('OAUTHSTATE#')) return Promise.resolve({ Item: { desc: stateDesc } });
         if (pk.startsWith('USER#')) return Promise.resolve({ Item: { secondaryULID: 'SEC-001' } });

@@ -177,7 +177,7 @@ async function addCard(permULID: string, args: Args) {
       TableName: REFDATA_TABLE,
       Key: { pK: `BRAND#${brandId}`, sK: 'profile' },
     }));
-    brandProfile = (ref.Item?.desc as Record<string, unknown>) ?? {};
+    brandProfile = parseRecord(ref.Item?.desc);
   }
 
   // Write card to UserDataEvent
@@ -192,10 +192,10 @@ async function addCard(permULID: string, args: Args) {
       subCategory: isCustom ? 'custom' : brandId,
       desc: JSON.stringify({
         brandId: isCustom ? 'custom' : brandId,
-        brandName: isCustom ? customBrandName : brandProfile.name,
-        brandColor: isCustom ? customBrandColor : brandProfile.color,
+        brandName: isCustom ? customBrandName : (brandProfile.name ?? brandProfile.brandName),
+        brandColor: isCustom ? customBrandColor : (brandProfile.color ?? brandProfile.brandColor),
         cardNumber,
-        cardLabel: cardLabel ?? (isCustom ? customBrandName : brandProfile.name),
+        cardLabel: cardLabel ?? (isCustom ? customBrandName : (brandProfile.name ?? brandProfile.brandName)),
         isCustom: !!isCustom,
         pointsBalance: 0,
         addedAt: now,
@@ -1412,7 +1412,12 @@ async function syncGiftCardBalance(permULID: string, cardSK: string, brandId: st
     Key: { pK: `USER#${permULID}`, sK: cardSK },
     UpdateExpression: 'SET desc = :desc, updatedAt = :now',
     ExpressionAttributeValues: {
-      ':desc': JSON.stringify({ ...cardDesc, balance: newBalance, currency: currency ?? cardDesc.currency }),
+      ':desc': JSON.stringify({
+        ...cardDesc,
+        balance: newBalance,
+        currency: currency ?? cardDesc.currency,
+        lastBalanceSync: now,
+      }),
       ':now': now,
     },
   }));

@@ -205,7 +205,7 @@ describe('POST /scan', () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['scan'] });
 
-    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: { sK?: string; pK?: string } } }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: { sK?: string; pK?: string }; Item?: { eventType?: string } } }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: [{
@@ -286,6 +286,41 @@ describe('POST /scan', () => {
     const body = JSON.parse(res!.body);
     expect(body.tier).toBe('frequent');
     expect(body.spendBucket).toBe('100-200');
+  });
+
+  it('returns the authoritative receiptSK when a concurrent retry already created the sentinel', async () => {
+    mockExtractApiKey.mockReturnValue('bebo_valid.key');
+    mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['receipt'] });
+
+    let sentinelGetCount = 0;
+    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: { sK?: string; pK?: string }; Item?: { eventType?: string } } }) => {
+      if (cmd.__type === 'QueryCommand') {
+        return Promise.resolve({ Items: [SCAN_ITEM] });
+      }
+      if (cmd.__type === 'GetCommand' && cmd.input?.Key?.sK?.startsWith('RECEIPT_IDEM#')) {
+        sentinelGetCount += 1;
+        if (sentinelGetCount === 1) return Promise.resolve({ Item: undefined });
+        return Promise.resolve({ Item: { receiptSK: 'RECEIPT#2026-04-08#OTHER' } });
+      }
+      if (cmd.__type === 'PutCommand' && cmd.input?.Key == null && cmd.input?.Item?.eventType === 'RECEIPT_IDEM') {
+        return Promise.reject(new Error('ConditionalCheckFailedException'));
+      }
+      return Promise.resolve({});
+    });
+
+    const event = makeEvent('/receipt', {
+      secondaryULID: 'SEC-001',
+      merchant: 'Woolworths Metro',
+      amount: 42.5,
+      purchaseDate: '2026-04-08T10:00:00.000Z',
+    });
+    const res = await handler(event, {} as never, () => {});
+    expect(res!.statusCode).toBe(200);
+    expect(JSON.parse(res!.body)).toEqual({ success: true, receiptSK: 'RECEIPT#2026-04-08#OTHER' });
+    expect(mockSend.mock.calls.some(([cmd]: unknown[]) =>
+      (cmd as { __type?: string; input?: { Item?: { eventType?: string } } }).__type === 'PutCommand'
+      && (cmd as { input?: { Item?: { eventType?: string } } }).input?.Item?.eventType === 'RECEIPT'
+    )).toBe(false);
   });
 
   it('omits tier and spendBucket when no subscription exists', async () => {

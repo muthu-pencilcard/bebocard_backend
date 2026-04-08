@@ -237,7 +237,31 @@ async function handleReceipt(
       createdAt: new Date().toISOString(),
     },
     ConditionExpression: 'attribute_not_exists(pK)',
-  })).catch(() => { /* race condition */ });
+  })).catch(async () => {
+    const duplicate = await dynamo.send(new GetCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: `${itemTag}_IDEM#${idempotencyKey}` },
+    }));
+    const duplicateSK = duplicate.Item?.receiptSK as string | undefined;
+    if (duplicateSK) {
+      return { duplicateSK };
+    }
+    throw new Error('Receipt idempotency check failed');
+  }).then((result) => {
+    if (result && typeof result === 'object' && 'duplicateSK' in result) {
+      return result.duplicateSK as string;
+    }
+    return null;
+  });
+
+  const duplicateReceipt = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: `${itemTag}_IDEM#${idempotencyKey}` },
+  }));
+  const authoritativeReceiptSK = duplicateReceipt.Item?.receiptSK as string | undefined;
+  if (authoritativeReceiptSK && authoritativeReceiptSK !== receiptSK) {
+    return { statusCode: 200, headers, body: JSON.stringify({ success: true, receiptSK: authoritativeReceiptSK }) };
+  }
 
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,

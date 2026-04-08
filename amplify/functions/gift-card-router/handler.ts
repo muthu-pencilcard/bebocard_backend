@@ -43,7 +43,7 @@ const CORS = {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-export const handler = async (event: unknown) => {
+export const handler = async (event: unknown, _context?: unknown, _callback?: unknown) => {
   const apiHandler = withAuditLog(dynamo, _restHandler);
   return apiHandler(event as Parameters<APIGatewayProxyHandler>[0], {} as never, {} as never);
 };

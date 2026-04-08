@@ -14,6 +14,7 @@ const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const USER_TABLE = process.env.USER_TABLE!;
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 const MIN_COHORT = parseInt(process.env.MIN_COHORT_THRESHOLD ?? '50', 10);
+const KEY_ID_INDEX = process.env.KEY_ID_GSI_NAME ?? 'refDataEventsByKeyId';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -284,7 +285,7 @@ async function validateTenantApiKey(rawKey: string): Promise<ValidatedTenant | n
   // Resolve via byKeyId GSI — same index used by brand key validation
   const res = await dynamo.send(new QueryCommand({
     TableName: REFDATA_TABLE,
-    IndexName: 'byKeyId',
+    IndexName: KEY_ID_INDEX,
     KeyConditionExpression: 'keyId = :kid',
     ExpressionAttributeValues: { ':kid': keyId },
     Limit: 1,

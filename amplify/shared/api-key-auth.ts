@@ -5,6 +5,7 @@ import { monotonicFactory } from 'ulid';
 const ADMIN_TABLE = process.env.ADMIN_TABLE;
 
 const ulid = monotonicFactory();
+const KEY_ID_INDEX = process.env.KEY_ID_GSI_NAME ?? 'refDataEventsByKeyId';
 
 export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'catalogues' | 'analytics' | 'stores' | 'payment' | 'consent' | 'recurring' | 'gift_card' | 'enrollment' | 'smb';
 
@@ -108,7 +109,7 @@ export async function validateApiKey(
   // brandId is embedded in the keyId ULID prefix stored in the sk
   const res = await ddb.send(new QueryCommand({
     TableName: REFDATA_TABLE,
-    IndexName: 'byKeyId',               // GSI: keyId → BRAND record
+    IndexName: KEY_ID_INDEX,            // GSI: keyId → BRAND / TENANT API key record
     KeyConditionExpression: 'keyId = :kid',
     ExpressionAttributeValues: { ':kid': keyId },
     Limit: 1,
