@@ -93,6 +93,39 @@ const BRAND_CONFIG: Record<string, BrandOAuthConfig> = {
   },
 };
 
+interface ResolvedBrandOAuthConfig extends BrandOAuthConfig {
+  clientId?: string;
+  clientSecret?: string;
+  cardJsonPath?: string;
+}
+
+async function getBrandOAuthConfig(brandId: string): Promise<ResolvedBrandOAuthConfig | null> {
+  const staticCfg = BRAND_CONFIG[brandId];
+  if (staticCfg) return staticCfg;
+
+  // Try to load from RefDataEvent for dynamic tenants
+  const brandRef = await dynamo.send(new GetCommand({
+    TableName: REF_TABLE, // uses environment variable
+    Key: { pK: `BRAND#${brandId}`, sK: 'PROFILE' },
+  }));
+  if (!brandRef.Item) return null;
+  const d = JSON.parse(brandRef.Item.desc ?? '{}');
+  if (!d.oauthConfig) return null;
+
+  return {
+    displayName: d.brandName ?? brandId,
+    color: d.brandColor ?? '#000000',
+    authUrl: d.oauthConfig.authUrl,
+    tokenUrl: d.oauthConfig.tokenUrl,
+    cardApiUrl: d.oauthConfig.cardApiUrl,
+    clientIdEnv: '', // empty since we will pass exact clientId
+    scopes: d.oauthConfig.scopes ?? 'openid profile',
+    clientId: d.oauthConfig.clientId,
+    clientSecret: d.oauthConfig.clientSecret,
+    cardJsonPath: d.oauthConfig.cardJsonPath,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -196,11 +229,11 @@ async function linkSubscriptions(brandId: string, permULID: string, authToken: s
 // ---------------------------------------------------------------------------
 
 async function initiateOAuth(brandId: string, permULID: string, authToken: string, userAgent: string) {
-  const cfg = BRAND_CONFIG[brandId];
+  const cfg = await getBrandOAuthConfig(brandId);
   if (!cfg) return { statusCode: 400, body: `Unknown brand: ${brandId}` };
   if (!permULID || !authToken) return { statusCode: 400, body: 'Missing auth context' };
 
-  const clientId = process.env[cfg.clientIdEnv];
+  const clientId = cfg.clientId ?? process.env[cfg.clientIdEnv];
   if (!clientId) return { statusCode: 503, body: 'Brand integration not configured' };
   const verifiedPermULID = await verifyAuthToken(authToken, permULID);
   if (!verifiedPermULID) return redirect(`${APP_FAILURE_URL}?reason=invalid_state`);
@@ -220,7 +253,7 @@ async function initiateOAuth(brandId: string, permULID: string, authToken: strin
 // ---------------------------------------------------------------------------
 
 async function handleCallback(brandId: string, code: string, stateToken: string, userAgent: string) {
-  const cfg = BRAND_CONFIG[brandId];
+  const cfg = await getBrandOAuthConfig(brandId);
   if (!cfg || !code || !stateToken) {
     return redirect(`${APP_FAILURE_URL}?reason=invalid_params`);
   }
@@ -231,8 +264,8 @@ async function handleCallback(brandId: string, code: string, stateToken: string,
   }
   const { permULID, codeVerifier } = state;
 
-  const clientId = process.env[cfg.clientIdEnv];
-  const clientSecret = process.env[`${cfg.clientIdEnv.replace('_CLIENT_ID', '')}_CLIENT_SECRET`];
+  const clientId = cfg.clientId ?? process.env[cfg.clientIdEnv];
+  const clientSecret = cfg.clientSecret ?? process.env[`${cfg.clientIdEnv.replace('_CLIENT_ID', '')}_CLIENT_SECRET`];
   if (!clientId || !clientSecret) {
     return redirect(`${APP_FAILURE_URL}?reason=not_configured`);
   }
@@ -271,7 +304,7 @@ async function handleCallback(brandId: string, code: string, stateToken: string,
   }
 
   const cardData = await cardRes.json() as Record<string, unknown>;
-  const cardNumber = extractCardNumber(brandId, cardData);
+  const cardNumber = extractCardNumber(brandId, cardData, cfg);
 
   if (!cardNumber) {
     return redirect(`${APP_FAILURE_URL}?reason=card_not_found`);
@@ -289,7 +322,18 @@ async function handleCallback(brandId: string, code: string, stateToken: string,
 // ---------------------------------------------------------------------------
 
 /** Extract card number from each brand's API response shape */
-function extractCardNumber(brandId: string, data: Record<string, unknown>): string | null {
+function extractCardNumber(brandId: string, data: Record<string, unknown>, cfg?: ResolvedBrandOAuthConfig): string | null {
+  if (cfg?.cardJsonPath) {
+    // Basic dot-notation path extraction
+    const parts = cfg.cardJsonPath.split('.');
+    let curr: any = data;
+    for (const p of parts) {
+      if (curr == null) break;
+      curr = curr[p];
+    }
+    if (typeof curr === 'string' || typeof curr === 'number') return String(curr);
+  }
+
   switch (brandId) {
     case 'woolworths':
       return (data.cardNumber ?? data.card_number ?? data.rewardsCardNumber) as string ?? null;
@@ -300,7 +344,7 @@ function extractCardNumber(brandId: string, data: Record<string, unknown>): stri
     case 'qantas':
       return (data.frequentFlyerNumber ?? data.memberNumber ?? data.qffNumber) as string ?? null;
     default:
-      return null;
+      return (data.cardNumber ?? data.card_number ?? data.memberNumber) as string ?? null;
   }
 }
 

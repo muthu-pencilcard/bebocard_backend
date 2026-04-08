@@ -44,7 +44,8 @@ const _handler: APIGatewayProxyHandler = async (event) => {
 
   try {
     if (path.endsWith('/scan')) return handleLoyaltyCheck(event, headers);
-    if (path.endsWith('/receipt')) return handleReceipt(event, headers);
+    if (path.endsWith('/receipt')) return handleReceipt(event, headers, false);
+    if (path.endsWith('/invoice')) return handleReceipt(event, headers, true);
     return { statusCode: 404, headers, body: JSON.stringify({ error: 'Unknown route' }) };
   } catch (err) {
     console.error('[scan-handler]', err);
@@ -166,6 +167,7 @@ interface ReceiptRequest {
 async function handleReceipt(
   event: Parameters<APIGatewayProxyHandler>[0],
   headers: Record<string, string>,
+  isInvoice: boolean,
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'receipt') : null;
@@ -208,42 +210,43 @@ async function handleReceipt(
     .update(`${permULID}|${brandId}|${purchaseDate.substring(0, 10)}|${merchant}|${amount}`)
     .digest('hex');
 
+  const itemTag = isInvoice ? 'INVOICE' : 'RECEIPT';
+  const prefix = isInvoice ? 'invoice' : 'receipt';
+
   const existingReceipt = await dynamo.send(new GetCommand({
     TableName: USER_TABLE,
-    Key: { pK: `USER#${permULID}`, sK: `RECEIPT_IDEM#${idempotencyKey}` },
+    Key: { pK: `USER#${permULID}`, sK: `${itemTag}_IDEM#${idempotencyKey}` },
   }));
   if (existingReceipt.Item) {
     const existingSK = existingReceipt.Item.receiptSK as string;
     return { statusCode: 200, headers, body: JSON.stringify({ success: true, receiptSK: existingSK }) };
   }
 
-  // Save receipt
-  const receiptSK = `RECEIPT#${purchaseDate.substring(0, 10)}#${ulid()}`;
+  // Save receipt/invoice
+  const receiptSK = `${itemTag}#${purchaseDate.substring(0, 10)}#${ulid()}`;
 
-  // Write idempotency sentinel first. If the Lambda is retried after this write
-  // but before the receipt write, the next invocation will find the sentinel and
-  // return early. The receipt write is a best-effort follow-up.
+  // Write idempotency sentinel first.
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,
     Item: {
       pK: `USER#${permULID}`,
-      sK: `RECEIPT_IDEM#${idempotencyKey}`,
-      eventType: 'RECEIPT_IDEM',
+      sK: `${itemTag}_IDEM#${idempotencyKey}`,
+      eventType: `${itemTag}_IDEM`,
       status: 'ACTIVE',
       receiptSK,
       createdAt: new Date().toISOString(),
     },
     ConditionExpression: 'attribute_not_exists(pK)',
-  })).catch(() => { /* race condition: another invocation wrote it first — safe to ignore */ });
+  })).catch(() => { /* race condition */ });
 
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,
     Item: {
       pK: `USER#${permULID}`,
       sK: receiptSK,
-      eventType: 'RECEIPT',
+      eventType: itemTag,
       status: 'ACTIVE',
-      primaryCat: 'receipt',
+      primaryCat: prefix,
       subCategory: brandId,
       desc: JSON.stringify({
         merchant,
@@ -267,9 +270,11 @@ async function handleReceipt(
   }));
 
   // Push notification to user
+  // Push notification to user
   const deviceToken = await getDeviceToken(`USER#${permULID}`);
   if (deviceToken) {
-    const title = `Receipt from ${merchant}`;
+    const label = isInvoice ? 'Invoice' : 'Receipt';
+    const title = `${label} from ${merchant}`;
     const notifBody = body.pointsEarned
       ? `$${amount} · ${body.pointsEarned} pts earned`
       : `$${amount}`;
@@ -278,17 +283,17 @@ async function handleReceipt(
         token: deviceToken,
         notification: { title, body: notifBody },
         data: {
-          type: 'receipt',
+          type: prefix,
           receiptSK,
           brandId,
           merchant,
           amount: String(amount),
         },
         apns: { payload: { aps: { alert: { title, body: notifBody }, sound: 'default' } } },
-        android: { priority: 'high', notification: { channelId: 'bebo_receipts' } },
+        android: { priority: 'high', notification: { channelId: `bebo_${prefix}s` } },
       });
     } catch (e) {
-      // Push failure must not fail the receipt save
+      // Push failure must not fail the save
       console.error('[scan-handler] FCM send failed:', e);
     }
   }

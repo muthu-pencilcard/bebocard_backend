@@ -298,8 +298,16 @@ Tags.of(segmentDLQ).add('CostCenter', 'tenant-side');
 segmentLambda.addEventSource(new DynamoEventSource(userTable, {
   startingPosition: lambda.StartingPosition.TRIM_HORIZON,
   filters: [
-    lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') }),
-    lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('MODIFY') }),
+    lambda.FilterCriteria.filter({
+      eventName: lambda.FilterRule.or('INSERT', 'MODIFY', 'REMOVE'),
+      dynamodb: {
+        Keys: {
+          sK: {
+            S: [{ prefix: 'RECEIPT#' }, { prefix: 'INVOICE#' }, { prefix: 'SUBSCRIPTION#' }],
+          },
+        },
+      },
+    }),
   ],
   retryAttempts: 3,
 }));
