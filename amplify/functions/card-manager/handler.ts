@@ -97,9 +97,21 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
   if (!operation) throw new Error('Missing fieldName in AppSync event — resolver may need redeployment');
   const args = event.arguments;
 
-  const permULID = (event.identity as { claims: Record<string, string> })
-    ?.claims?.['custom:permULID'];
-  if (!permULID) throw new Error('Identity missing permULID');
+  let permULID = (event.identity as { claims: Record<string, string> })
+    ?.claims?.['custom:permULID']
+    ?? (event.identity as { claims: Record<string, string> })
+    ?.claims?.['permULID'];
+
+  if (!permULID) {
+    // If custom:permULID is missing (e.g. post-confirmation didn't run or claims haven't refreshed),
+    // fall back to the owner claim (sub or email) as the permULID.
+    // This matches the frontend's self-initialization fallback logic.
+    permULID = (event.identity as { claims: Record<string, string> })
+      ?.claims?.['cognito:username']
+      ?? (event.identity as { username?: string })?.username;
+  }
+
+  if (!permULID) throw new Error('Identity missing permULID and owner claim');
 
   // Amplify's allow.owner() checks record.owner against the 'cognito:username' JWT claim.
   // With username_attributes: ['email'], cognito:username IS the email address — not the sub.
