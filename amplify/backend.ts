@@ -149,8 +149,10 @@ postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
+  // Wildcard covers all bebocard SSM params regardless of appId/branch resolution at synthesis.
+  // Prevents IAM denials if AWS_APP_ID/AWS_BRANCH env vars differ between deploy runs.
   resources: [
-    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/${amplifyAppId}/${amplifyBranch}/*`,
+    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/*`,
   ],
 }));
 

@@ -49,7 +49,18 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
   const rotatesAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24h
   const userId = event.userName;
 
-  const { USER_TABLE, ADMIN_TABLE } = await getTableNames();
+  console.log(`[post-confirmation] START user=${userId} pool=${event.userPoolId}`);
+  console.log(`[post-confirmation] ENV USER_TABLE_PARAM=${process.env.USER_TABLE_PARAM} ADMIN_TABLE_PARAM=${process.env.ADMIN_TABLE_PARAM}`);
+
+  let USER_TABLE: string;
+  let ADMIN_TABLE: string;
+  try {
+    ({ USER_TABLE, ADMIN_TABLE } = await getTableNames());
+    console.log(`[post-confirmation] Tables resolved: USER=${USER_TABLE} ADMIN=${ADMIN_TABLE}`);
+  } catch (err) {
+    console.error('[post-confirmation] FAILED to get table names from SSM:', err);
+    throw err;
+  }
 
   event.response = {};
 
