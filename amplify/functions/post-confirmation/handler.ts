@@ -75,6 +75,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       subCategory: 'wallet',
       secondaryULID,          // top-level — used for conditional update in rotateQR
       rotatesAt,              // top-level — read by device to know when to rotate
+      owner: userId,          // required for AppSync 'allow: owner' authorization
       desc: JSON.stringify({
         permULID,
         cognitoUserId: userId,
@@ -94,6 +95,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       sK: permULID,
       eventType: 'SCAN_INDEX',
       status: 'ACTIVE',
+      owner: userId,          // required for potential future AppSync reads
       desc: JSON.stringify({ cards: [], createdAt: now }),
       createdAt: now,
       updatedAt: now,

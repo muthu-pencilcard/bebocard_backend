@@ -101,28 +101,32 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     ?.claims?.['custom:permULID'];
   if (!permULID) throw new Error('Identity missing permULID');
 
+  const owner = (event.identity as { sub?: string, username?: string })?.sub 
+    ?? (event.identity as { sub?: string, username?: string })?.username;
+  if (!owner) throw new Error('Identity missing owner claim (sub/username)');
+
   switch (operation) {
     // Loyalty cards
-    case 'addLoyaltyCard': return addCard(permULID, args);
+    case 'addLoyaltyCard': return addCard(permULID, owner, args);
     case 'removeLoyaltyCard': return removeCard(permULID, args.cardSK!);
     case 'setDefaultCard': return setDefaultCard(permULID, args.cardSK!, args.brandId!);
     case 'rotateQR': return rotateQR(permULID);
     // Subscriptions (legacy single-toggle + new granular)
-    case 'subscribeToOffers': return setSubscription(permULID, args.brandId!, true);
-    case 'unsubscribeFromOffers': return setSubscription(permULID, args.brandId!, false);
-    case 'updateSubscription': return updateGranularSubscription(permULID, args.brandId!, args);
-    case 'updatePreferences': return updateUserPreferences(permULID, (args as any).reminders as Record<string, boolean>);
+    case 'subscribeToOffers': return setSubscription(permULID, owner, args.brandId!, true);
+    case 'unsubscribeFromOffers': return setSubscription(permULID, owner, args.brandId!, false);
+    case 'updateSubscription': return updateGranularSubscription(permULID, owner, args.brandId!, args);
+    case 'updatePreferences': return updateUserPreferences(permULID, owner, (args as any).reminders as Record<string, boolean>);
     case 'snoozeOffers': return snoozeOffers(permULID, args.brandId, args.until ?? null);
     // Gift cards
-    case 'addGiftCard': return addGiftCard(permULID, args);
+    case 'addGiftCard': return addGiftCard(permULID, owner, args);
     case 'removeGiftCard': return archiveRecord(permULID, args.cardSK!);
     case 'updateGiftCardBalance': return updateBalance(permULID, args.cardSK!, args.balance!);
     // Invoices
-    case 'addInvoice': return addInvoice(permULID, args);
+    case 'addInvoice': return addInvoice(permULID, owner, args);
     case 'updateInvoiceStatus': return updateInvoiceStatus(permULID, args.invoiceSK!, args.status!, args.paidDate);
     case 'removeInvoice': return archiveRecord(permULID, args.invoiceSK!);
     // Receipts
-    case 'addReceipt': return addReceipt(permULID, args);
+    case 'addReceipt': return addReceipt(permULID, owner, args);
     case 'removeReceipt': return archiveRecord(permULID, args.receiptSK!);
     // Newsletters
     case 'markNewsletterRead': return markNewsletterRead(permULID, args.newsletterSK!);
@@ -132,12 +136,12 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     case 'respondToConsent': return respondToConsent(permULID, args.requestId!, args.approvedFields ?? []);
     // Subscription revocation proxy
     case 'cancelRecurring': return cancelRecurringHandler(permULID, args.subId!, args.brandId!);
-    case 'addManualSubscription': return addManualSubscription(permULID, args);
+    case 'addManualSubscription': return addManualSubscription(permULID, owner, args);
     // QR rotation frequency (tracking severance — Patent Claims 75–86)
     case 'setRotationFrequency': return setRotationFrequency(permULID, args.frequency!);
     // Enrollment marketplace
     case 'respondToEnrollment': return enrollmentRespondHandler(permULID, args.enrollmentId!, args.accepted!);
-    case 'initiateEnrollment': return enrollmentInitiateHandler(permULID, args.brandId!);
+    case 'initiateEnrollment': return enrollmentInitiateHandler(permULID, owner, args.brandId!);
     // SMB stamp cards (Phase 11)
     case 'getStampCard': return getStampCard(permULID, args.stampBrandId!);
     case 'listStampCards': return listStampCards(permULID);
@@ -163,7 +167,7 @@ function parseRecord(value: unknown): Record<string, unknown> {
 
 // ── Add loyalty card ──────────────────────────────────────────────────────────
 
-async function addCard(permULID: string, args: Args) {
+async function addCard(permULID: string, owner: string, args: Args) {
   const validation = AddLoyaltyCardSchema.safeParse(args);
   if (!validation.success) throw new Error(validation.error.issues[0]?.message ?? 'Invalid card input');
   const { brandId, cardNumber, cardLabel, isCustom, customBrandName, customBrandColor } = args;
@@ -190,6 +194,7 @@ async function addCard(permULID: string, args: Args) {
       status: 'ACTIVE',
       primaryCat: 'loyalty_card',
       subCategory: isCustom ? 'custom' : brandId,
+      owner,
       desc: JSON.stringify({
         brandId: isCustom ? 'custom' : brandId,
         brandName: isCustom ? customBrandName : (brandProfile.name ?? brandProfile.brandName),
@@ -219,7 +224,7 @@ async function addCard(permULID: string, args: Args) {
 
     // Ensure a subscription record exists so offers are on by default when a
     // card is linked, even if the app does not issue a follow-up mutation.
-    await updateGranularSubscription(permULID, brandId!, {
+    await updateGranularSubscription(permULID, owner, brandId!, {
       offers: true,
       reminders: true,
     });
@@ -436,7 +441,7 @@ async function archiveRecord(permULID: string, sK: string) {
 
 // ── Gift cards ────────────────────────────────────────────────────────────────
 
-async function addGiftCard(permULID: string, args: Args) {
+async function addGiftCard(permULID: string, owner: string, args: Args) {
   const validation = AddGiftCardSchema.safeParse(args);
   if (!validation.success) throw new Error(validation.error.issues[0]?.message ?? 'Invalid gift card input');
   const { brandName, brandColor, cardNumber, cardLabel, balance, currency, expiryDate } = args;
@@ -452,6 +457,7 @@ async function addGiftCard(permULID: string, args: Args) {
       status: 'ACTIVE',
       primaryCat: 'gift_card',
       subCategory: 'custom',
+      owner,
       desc: JSON.stringify({
         brandName: brandName ?? 'Gift Card',
         brandId: 'custom',
@@ -501,7 +507,7 @@ async function updateBalance(permULID: string, cardSK: string, newBalance: numbe
 
 // ── Invoices ──────────────────────────────────────────────────────────────────
 
-async function addInvoice(permULID: string, args: Args) {
+async function addInvoice(permULID: string, owner: string, args: Args) {
   const validation = AddInvoiceSchema.safeParse(args);
   if (!validation.success) throw new Error(validation.error.issues[0]?.message ?? 'Invalid invoice input');
   const {
@@ -522,6 +528,7 @@ async function addInvoice(permULID: string, args: Args) {
       status: 'ACTIVE',
       primaryCat: 'invoice',
       subCategory: category ?? 'other',
+      owner,
       desc: JSON.stringify({
         supplier,
         brandId:              brandId              ?? null,
@@ -579,7 +586,7 @@ async function updateInvoiceStatus(
 
 // ── Receipts ──────────────────────────────────────────────────────────────────
 
-async function addReceipt(permULID: string, args: Args) {
+async function addReceipt(permULID: string, owner: string, args: Args) {
   const validation = AddReceiptSchema.safeParse(args);
   if (!validation.success) throw new Error(validation.error.issues[0]?.message ?? 'Invalid receipt input');
   const { merchant, amount, purchaseDate, category, notes, warrantyExpiry, items, loyaltyCardSK, currency, photoKey } = args;
@@ -597,6 +604,7 @@ async function addReceipt(permULID: string, args: Args) {
       status: 'ACTIVE',
       primaryCat: 'receipt',
       subCategory: category ?? 'other',
+      owner,
       desc: JSON.stringify({
         merchant,
         amount,
@@ -707,7 +715,7 @@ async function setDefaultCard(permULID: string, cardSK: string, brandId: string)
 
 // ── Granular subscription update ──────────────────────────────────────────────
 
-async function updateGranularSubscription(permULID: string, brandId: string, args: Args) {
+async function updateGranularSubscription(permULID: string, owner: string, brandId: string, args: Args) {
   const now = new Date().toISOString();
   const existing = await dynamo.send(new GetCommand({
     TableName: USER_TABLE,
@@ -732,6 +740,7 @@ async function updateGranularSubscription(permULID: string, brandId: string, arg
     ':cat': 'subscription',
     ':brand': brandId,
     ':active': 'ACTIVE',
+    ':owner': owner,
   };
 
   const fields: Array<keyof Args> = ['offers', 'newsletters', 'reminders', 'catalogues'];
@@ -747,7 +756,7 @@ async function updateGranularSubscription(permULID: string, brandId: string, arg
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${brandId}` },
-    UpdateExpression: `SET ${updates.join(', ')}`,
+    UpdateExpression: `SET ${updates.join(', ')}, owner = :owner`,
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
   }));
@@ -768,7 +777,7 @@ async function updateGranularSubscription(permULID: string, brandId: string, arg
 
 // ── User preferences (reminder toggles) ───────────────────────────────────────
 
-async function updateUserPreferences(permULID: string, reminders: Record<string, boolean>) {
+async function updateUserPreferences(permULID: string, owner: string, reminders: Record<string, boolean>) {
   const now = new Date().toISOString();
   const existing = await dynamo.send(new GetCommand({
     TableName: USER_TABLE,
@@ -1069,7 +1078,7 @@ async function respondToConsent(
   return { success: true, status: newStatus, approvedFields: safeApproved };
 }
 
-async function setSubscription(permULID: string, brandId: string, active: boolean) {
+async function setSubscription(permULID: string, owner: string, brandId: string, active: boolean) {
   const now = new Date().toISOString();
   const existing = await dynamo.send(new GetCommand({
     TableName: USER_TABLE,
@@ -1080,16 +1089,15 @@ async function setSubscription(permULID: string, brandId: string, active: boolea
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${brandId}` },
-    UpdateExpression: 'SET #s = :status, desc = :desc, offers = :offers, eventType = :et, primaryCat = :cat, subCategory = :brand, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)',
+    UpdateExpression: 'SET #s = :status, eventType = :et, primaryCat = :cat, subCategory = :brand, updatedAt = :now, owner = :owner, createdAt = if_not_exists(createdAt, :now)',
     ExpressionAttributeNames: { '#s': 'status' },
     ExpressionAttributeValues: {
       ':status': active ? 'ACTIVE' : 'INACTIVE',
-      ':desc': JSON.stringify(desc),
-      ':offers': active,
       ':et': 'SUBSCRIPTION',
       ':cat': 'subscription',
       ':brand': brandId,
       ':now': now,
+      ':owner': owner,
     },
   }));
 
@@ -1117,7 +1125,7 @@ async function cancelRecurringHandler(permULID: string, subId: string, brandId: 
 
 // ── Manual Subscriptions ──────────────────────────────────────────────────────
 
-async function addManualSubscription(permULID: string, args: Args) {
+async function addManualSubscription(permULID: string, owner: string, args: Args) {
   const { brandName, productName, amount, currency, frequency, nextBillingDate, category, providerId } = args;
   const now = new Date().toISOString();
   const id = (await import('ulid')).monotonicFactory()();
@@ -1132,6 +1140,7 @@ async function addManualSubscription(permULID: string, args: Args) {
       status: 'ACTIVE',
       primaryCat: 'subscription',
       subCategory: providerId ? 'catalog' : 'manual',
+      owner,
       desc: JSON.stringify({
         brandName,
         productName,
@@ -1159,7 +1168,7 @@ async function enrollmentRespondHandler(permULID: string, enrollmentId: string, 
   return respondToEnrollmentFn(dynamo, permULID, enrollmentId, accepted);
 }
 
-async function enrollmentInitiateHandler(permULID: string, brandId: string) {
+async function enrollmentInitiateHandler(permULID: string, owner: string, brandId: string) {
   const { generateAlias } = await import('../enrollment-handler/handler');
   const now = new Date().toISOString();
   const { monotonicFactory } = await import('ulid');
@@ -1193,6 +1202,7 @@ async function enrollmentInitiateHandler(permULID: string, brandId: string) {
       status: 'ACCEPTED',
       primaryCat: 'enrollment',
       subCategory: brandId,
+      owner,
       desc: JSON.stringify({ enrollmentId, brandId, alias, respondedAt: now }),
       createdAt: now,
       updatedAt: now,
