@@ -101,9 +101,13 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     ?.claims?.['custom:permULID'];
   if (!permULID) throw new Error('Identity missing permULID');
 
-  const owner = (event.identity as { sub?: string, username?: string })?.sub 
-    ?? (event.identity as { sub?: string, username?: string })?.username;
-  if (!owner) throw new Error('Identity missing owner claim (sub/username)');
+  // Amplify's allow.owner() checks record.owner against the 'cognito:username' JWT claim.
+  // With username_attributes: ['email'], cognito:username IS the email address — not the sub.
+  // Using sub here would set owner to a UUID that never matches cognito:username, breaking all reads.
+  const owner = (event.identity as { claims: Record<string, string> })
+    ?.claims?.['cognito:username']
+    ?? (event.identity as { username?: string })?.username;
+  if (!owner) throw new Error('Identity missing owner claim (cognito:username)');
 
   switch (operation) {
     // Loyalty cards
@@ -788,11 +792,13 @@ async function updateUserPreferences(permULID: string, owner: string, reminders:
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: 'PREFERENCES' },
-    UpdateExpression: 'SET desc = :desc, eventType = :et, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)',
+    UpdateExpression: 'SET desc = :desc, eventType = :et, updatedAt = :now, createdAt = if_not_exists(createdAt, :now), #ow = if_not_exists(#ow, :owner)',
+    ExpressionAttributeNames: { '#ow': 'owner' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify(desc),
       ':et': 'PREFERENCES',
       ':now': now,
+      ':owner': owner,
     },
   }));
   return { success: true };
