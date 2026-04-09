@@ -105,13 +105,13 @@ export const SubscriptionCatalogInputSchema = z.object({
 // ── Card-manager schemas ──────────────────────────────────────────────────────
 
 export const AddLoyaltyCardSchema = z.object({
-  brandId:          z.string().max(64).optional(),
+  brandId:          z.string().max(64).optional().nullable(),
   cardNumber:       z.string().trim().min(1).max(50),
-  cardLabel:        safeText(60).optional(),
-  isCustom:         z.boolean().optional(),
-  customBrandName:  safeText(80).optional(),
-  customBrandColor: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected #RRGGBB').optional(),
-  isDefault:        z.boolean().optional(),
+  cardLabel:        safeText(60).optional().nullable(),
+  isCustom:         z.boolean().optional().nullable(),
+  customBrandName:  safeText(80).optional().nullable(),
+  customBrandColor: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected #RRGGBB').optional().nullable(),
+  isDefault:        z.boolean().optional().nullable(),
 }).refine(
   d => d.isCustom ? !!d.customBrandName : !!d.brandId,
   { message: 'brandId required for standard cards; customBrandName required for custom cards' },
