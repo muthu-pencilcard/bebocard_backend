@@ -741,7 +741,7 @@ async function updateGranularSubscription(permULID: string, owner: string, brand
 
   // Build update expression dynamically — only update provided fields
   const updates: string[] = [
-    'desc = :desc',
+    '#d = :desc',
     'updatedAt = :now',
     'createdAt = if_not_exists(createdAt, :now)',
     'eventType = :et',
@@ -749,7 +749,7 @@ async function updateGranularSubscription(permULID: string, owner: string, brand
     'subCategory = :brand',
     '#s = :active',
   ];
-  const names: Record<string, string> = { '#s': 'status' };
+  const names: Record<string, string> = { '#s': 'status', '#d': 'desc', '#ow': 'owner' };
   const values: Record<string, unknown> = {
     ':now': now,
     ':et': 'SUBSCRIPTION',
@@ -772,7 +772,7 @@ async function updateGranularSubscription(permULID: string, owner: string, brand
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${brandId}` },
-    UpdateExpression: `SET ${updates.join(', ')}, owner = :owner`,
+    UpdateExpression: `SET ${updates.join(', ')}, #ow = :owner`,
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
   }));
@@ -804,8 +804,8 @@ async function updateUserPreferences(permULID: string, owner: string, reminders:
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: 'PREFERENCES' },
-    UpdateExpression: 'SET desc = :desc, eventType = :et, updatedAt = :now, createdAt = if_not_exists(createdAt, :now), #ow = if_not_exists(#ow, :owner)',
-    ExpressionAttributeNames: { '#ow': 'owner' },
+    UpdateExpression: 'SET #d = :desc, eventType = :et, updatedAt = :now, createdAt = if_not_exists(createdAt, :now), #ow = if_not_exists(#ow, :owner)',
+    ExpressionAttributeNames: { '#ow': 'owner', '#d': 'desc' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify(desc),
       ':et': 'PREFERENCES',
@@ -838,8 +838,8 @@ async function snoozeOffers(permULID: string, brandId?: string, until?: string |
     await dynamo.send(new UpdateCommand({
       TableName: USER_TABLE,
       Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${brandId}` },
-      UpdateExpression: 'SET desc = :desc, eventType = :et, primaryCat = :cat, subCategory = :brand, #s = :active, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)',
-      ExpressionAttributeNames: { '#s': 'status' },
+      UpdateExpression: 'SET #d = :desc, eventType = :et, primaryCat = :cat, subCategory = :brand, #s = :active, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)',
+      ExpressionAttributeNames: { '#s': 'status', '#d': 'desc' },
       ExpressionAttributeValues: {
         ':desc': JSON.stringify(desc),
         ':et': 'SUBSCRIPTION',

@@ -24,43 +24,43 @@ const segmentFrequency = z.enum(['new', 'occasional', 'frequent', 'lapsed']);
 
 export const OfferInputSchema = z.object({
   title:          safeText(100),
-  description:    safeText(1000).optional(),
-  imageUrl:       httpsUrl,
+  description:    safeText(1000).optional().nullable(),
+  imageUrl:       httpsUrl.nullable(),
   validFrom:      isoDate,
   validTo:        isoDate,
-  targetStoreIds: z.array(z.string().max(64)).max(100).optional(),
-  minVisitCount:  z.number().int().min(0).max(9999).optional(),
-  category:       z.string().max(64).optional(),
+  targetStoreIds: z.array(z.string().max(64)).max(100).optional().nullable(),
+  minVisitCount:  z.number().int().min(0).max(9999).optional().nullable(),
+  category:       z.string().max(64).optional().nullable(),
 }).refine((d: { validFrom: string; validTo: string }) => d.validTo >= d.validFrom, { message: 'validTo must be on or after validFrom' });
 
 export const NewsletterInputSchema = z.object({
   subject:  safeText(200),
-  bodyHtml: z.string().trim().min(1).max(50_000),  // HTML allowed in body only
-  imageUrl: httpsUrl,
-  ctaUrl:   httpsUrl,
-  ctaLabel: safeText(60).optional(),
+  bodyHtml: z.string().trim().min(1).max(50_000),
+  imageUrl: httpsUrl.nullable(),
+  ctaUrl:   httpsUrl.nullable(),
+  ctaLabel: safeText(60).optional().nullable(),
 });
 
 export const CatalogueInputSchema = z.object({
   title:           safeText(100),
-  description:     safeText(1000).optional(),
-  imageUrl:        httpsUrl,
-  headerImageUrl:  httpsUrl,
-  validFrom:       isoDate.optional(),
-  validTo:         isoDate.optional(),
-  ctaLabel:        safeText(60).optional(),
-  ctaUrl:          httpsUrl,
-  cataloguePdfKey: z.string().max(512).optional(),
+  description:     safeText(1000).optional().nullable(),
+  imageUrl:        httpsUrl.nullable(),
+  headerImageUrl:  httpsUrl.nullable(),
+  validFrom:       isoDate.optional().nullable(),
+  validTo:         isoDate.optional().nullable(),
+  ctaLabel:        safeText(60).optional().nullable(),
+  ctaUrl:          httpsUrl.nullable(),
+  cataloguePdfKey: z.string().max(512).optional().nullable(),
   targetSegments:  z.object({
-    spendBuckets: z.array(segmentBucket).max(4).optional(),
-    visitFrequencies: z.array(segmentFrequency).max(4).optional(),
-  }).optional(),
+    spendBuckets: z.array(segmentBucket).max(4).optional().nullable(),
+    visitFrequencies: z.array(segmentFrequency).max(4).optional().nullable(),
+  }).optional().nullable(),
   items: z.array(z.object({
     name: safeText(120),
-    price: z.number().min(0).max(1_000_000).optional(),
-    imageUrl: httpsUrl,
-    ctaUrl: httpsUrl,
-  })).max(500).optional(),
+    price: z.number().min(0).max(1_000_000).optional().nullable(),
+    imageUrl: httpsUrl.nullable(),
+    ctaUrl: httpsUrl.nullable(),
+  })).max(500).optional().nullable(),
 }).refine(
   d => !d.validFrom || !d.validTo || d.validTo >= d.validFrom,
   { message: 'validTo must be on or after validFrom' },
@@ -76,11 +76,9 @@ export const StoreInputSchema = z.object({
   latitude:   z.number().min(-90).max(90),
   longitude:  z.number().min(-180).max(180),
   radiusKm:   z.number().min(0.05).max(5).default(0.2),
-  phone:      z.string().max(20).optional(),
-  hours:      z.record(z.string().max(50)).optional(),
+  phone:      z.string().max(20).optional().nullable(),
+  hours:      z.record(z.string().max(50)).optional().nullable(),
 });
-
-// ── Subscription catalog schemas (brand self-onboarding) ─────────────────────
 
 export const SubscriptionCatalogInputSchema = z.object({
   providerName: safeText(100),
@@ -91,18 +89,16 @@ export const SubscriptionCatalogInputSchema = z.object({
     amount:    z.number().min(0).max(10_000_000),
     frequency: z.enum(['weekly', 'fortnightly', 'monthly', 'quarterly', 'annually']),
     currency:  z.string().length(3).default('AUD'),
-    features:  z.array(safeText(120)).max(20).optional(),
+    features:  z.array(safeText(120)).max(20).optional().nullable(),
   })).min(1).max(20),
-  websiteUrl:  httpsUrl,
-  logoUrl:     httpsUrl,
-  cancelUrl:   httpsUrl,
-  portalUrl:   httpsUrl,
-  description: safeText(500).optional(),
+  websiteUrl:  httpsUrl.nullable(),
+  logoUrl:     httpsUrl.nullable(),
+  cancelUrl:   httpsUrl.nullable(),
+  portalUrl:   httpsUrl.nullable(),
+  description: safeText(500).optional().nullable(),
   region:      z.string().max(10).default('AU'),
   hasLinking:  z.boolean().default(false),
 });
-
-// ── Card-manager schemas ──────────────────────────────────────────────────────
 
 export const AddLoyaltyCardSchema = z.object({
   brandId:          z.string().max(64).optional().nullable(),
@@ -119,24 +115,24 @@ export const AddLoyaltyCardSchema = z.object({
 
 export const AddGiftCardSchema = z.object({
   brandName:   safeText(80),
-  brandColor:  z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  brandColor:  z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().nullable(),
   balance:     z.number().min(0).max(100_000),
   currency:    z.string().length(3).default('AUD'),
-  expiryDate:  isoDate.optional(),
-  cardNumber:  z.string().max(50).optional(),
-  pinCode:     z.string().max(20).optional(),
+  expiryDate:  isoDate.optional().nullable(),
+  cardNumber:  z.string().max(50).optional().nullable(),
+  pinCode:     z.string().max(20).optional().nullable(),
 });
 
 export const AddInvoiceSchema = z.object({
   supplier:              safeText(100),
   amount:                z.number().min(0).max(10_000_000),
-  dueDate:               isoDate.optional(),
-  invoiceNumber:         safeText(50).optional(),
-  category:              safeText(60).optional(),
-  notes:                 safeText(500).optional(),
-  linkedSubscriptionSk:  z.string().max(200).optional(),
-  providerId:            safeText(80).optional(),
-  billingPeriod:         z.string().max(25).optional(),
+  dueDate:               isoDate.optional().nullable(),
+  invoiceNumber:         safeText(50).optional().nullable(),
+  category:              safeText(60).optional().nullable(),
+  notes:                 safeText(500).optional().nullable(),
+  linkedSubscriptionSk:  z.string().max(200).optional().nullable(),
+  providerId:            safeText(80).optional().nullable(),
+  billingPeriod:         z.string().max(25).optional().nullable(),
   invoiceType:           z.enum(['ONE_TIME', 'SUBSCRIPTION_BILLING']).default('ONE_TIME'),
 });
 
@@ -145,9 +141,9 @@ export const AddReceiptSchema = z.object({
   amount:         z.number().min(0).max(10_000_000),
   purchaseDate:   isoDate,
   currency:       z.string().length(3).default('AUD'),
-  category:       safeText(60).optional(),
-  notes:          safeText(500).optional(),
-  warrantyExpiry: isoDate.optional(),
-  items:          z.array(z.unknown()).max(200).optional(),
-  photoKey:       z.string().max(512).optional(),
+  category:       safeText(60).optional().nullable(),
+  notes:          safeText(500).optional().nullable(),
+  warrantyExpiry: isoDate.optional().nullable(),
+  items:          z.array(z.unknown()).max(200).optional().nullable(),
+  photoKey:       z.string().max(512).optional().nullable(),
 });
