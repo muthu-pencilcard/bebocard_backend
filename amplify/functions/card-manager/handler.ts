@@ -683,7 +683,8 @@ async function _appendToScanIndex(
   await dynamo.send(new UpdateCommand({
     TableName: ADMIN_TABLE,
     Key: { pK: `SCAN#${secondaryULID}`, sK: permULID },
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+    ExpressionAttributeNames: { '#d': 'desc' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify({ ...indexDesc, cards: updated }),
       ':now': new Date().toISOString(),
@@ -715,7 +716,8 @@ async function setDefaultCard(permULID: string, cardSK: string, brandId: string)
   await dynamo.send(new UpdateCommand({
     TableName: ADMIN_TABLE,
     Key: { pK: `SCAN#${secondaryULID}`, sK: permULID },
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+    ExpressionAttributeNames: { '#d': 'desc' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify({ ...indexDesc, cards: updated }),
       ':now': new Date().toISOString(),

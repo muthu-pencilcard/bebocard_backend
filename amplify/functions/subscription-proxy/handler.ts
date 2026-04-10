@@ -313,7 +313,8 @@ async function handleAmountChange(
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: userKey,
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+    ExpressionAttributeNames: { '#d': 'desc' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify(desc),
       ':now': now,
@@ -589,7 +590,8 @@ async function handleBillingConfirmed(
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: subSK },
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+    ExpressionAttributeNames: { '#d': 'desc' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify({ ...desc, nextBillingDate, lastBilledAt: billedAt }),
       ':now': now,
@@ -607,7 +609,8 @@ async function handleBillingConfirmed(
       await dynamo.send(new UpdateCommand({
         TableName: USER_TABLE,
         Key: { pK: `USER#${permULID}`, sK: invoiceSK },
-        UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+        UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+        ExpressionAttributeNames: { '#d': 'desc' },
         ExpressionAttributeValues: {
           ':desc': JSON.stringify({ ...invDesc, status: 'paid', paidDate: billedAt }),
           ':now': now,
@@ -713,8 +716,8 @@ export async function cancelSubscription(
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: key,
-    UpdateExpression: 'SET #s = :s, desc = :desc, updatedAt = :now',
-    ExpressionAttributeNames: { '#s': 'status' },
+    UpdateExpression: 'SET #s = :s, #d = :desc, updatedAt = :now',
+    ExpressionAttributeNames: { '#s': 'status', '#d': 'desc' },
     ExpressionAttributeValues: {
       ':s': reason,
       ':desc': JSON.stringify({ ...desc, status: reason, cancelledAt: now }),

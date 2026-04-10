@@ -63,7 +63,7 @@ describe('card-manager privacy tests', () => {
     it('rotateQR safely generates new ULID and rotates atomicity', async () => {
         const event = {
             info: { fieldName: 'rotateQR' },
-            identity: { claims: { 'custom:permULID': 'perm-ulid-123' } },
+            identity: { claims: { 'custom:permULID': 'perm-ulid-123', 'cognito:username': 'test-user' } },
             arguments: {},
         } as any;
 
@@ -93,7 +93,7 @@ describe('gift card marketplace (Phase 13)', () => {
     mockSend.mockResolvedValue({ Item: { desc: '{"purchaseWebhookUrl": null}' } });
     const event = {
       info: { fieldName: 'purchaseGiftCard' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: { brandId: 'woolworths', catalogItemId: 'cat-001', denomination: 50, currency: 'AUD' },
     } as any;
     const res: any = await handler(event, null as any, null as any);
@@ -111,7 +111,7 @@ describe('gift card marketplace (Phase 13)', () => {
 
     const event = {
       info: { fieldName: 'syncGiftCardBalance' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: { cardSK: 'GIFTCARD#delivery-01', brandId: 'woolworths' },
     } as any;
     const res: any = await handler(event, null as any, null as any);
@@ -123,7 +123,7 @@ describe('gift card marketplace (Phase 13)', () => {
     mockSend.mockResolvedValueOnce({ Item: undefined });
     const event = {
       info: { fieldName: 'syncGiftCardBalance' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: { cardSK: 'GIFTCARD#nonexistent', brandId: 'woolworths' },
     } as any;
     await expect(handler(event, null as any, null as any)).rejects.toThrow('Gift card not found');
@@ -168,7 +168,7 @@ describe('gift card marketplace (Phase 13)', () => {
 
     const event = {
       info: { fieldName: 'syncGiftCardBalance' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: { cardSK: 'GIFTCARD#delivery-01', brandId: 'woolworths' },
     } as any;
 
@@ -197,7 +197,7 @@ describe('offer snooze (Phase 19)', () => {
 
     const event = {
       info: { fieldName: 'snoozeOffers' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: { brandId: 'woolworths', until: '2026-05-01T00:00:00.000Z' },
     } as any;
 
@@ -216,7 +216,7 @@ describe('offer snooze (Phase 19)', () => {
 
     const event = {
       info: { fieldName: 'snoozeOffers' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: { until: '2026-05-01T00:00:00.000Z' },
     } as any;
 
@@ -233,7 +233,7 @@ describe('offer snooze (Phase 19)', () => {
 function makeEvent(fieldName: string, args: Record<string, unknown> = {}, permULID = 'test-perm') {
   return {
     info:      { fieldName },
-    identity:  { claims: { 'custom:permULID': permULID } },
+    identity:  { claims: { 'custom:permULID': permULID, 'cognito:username': 'test-user' } },
     arguments: args,
   } as any;
 }
@@ -544,7 +544,7 @@ describe('invoice usage tracking (Phase 20)', () => {
 
     const event = {
       info: { fieldName: 'addInvoice' },
-      identity: { claims: { 'custom:permULID': 'test-perm' } },
+      identity: { claims: { 'custom:permULID': 'test-perm', 'cognito:username': 'test-user' } },
       arguments: {
         brandId: 'woolworths',
         supplier: 'Woolworths',
