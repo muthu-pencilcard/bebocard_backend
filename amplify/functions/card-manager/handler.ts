@@ -144,8 +144,10 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     // Receipts
     case 'addReceipt': return addReceipt(permULID, owner, args);
     case 'removeReceipt': return archiveRecord(permULID, args.receiptSK!);
-    // Newsletters
+    // Newsletters + catalogues + offers engagement
     case 'markNewsletterRead': return markNewsletterRead(permULID, args.newsletterSK!);
+    case 'markCatalogueViewed': return markCatalogueViewed(permULID, args.catalogueSK!);
+    case 'markOfferEngaged': return markOfferEngaged(permULID, args.offerSK!);
     // Payment routing
     case 'respondToCheckout': return respondToCheckout(permULID, args.orderId!, args.approved!, args.paymentToken);
     // Consent-gated identity release
@@ -902,13 +904,69 @@ async function markNewsletterRead(permULID: string, newsletterSK: string) {
   const parts = newsletterSK.split('#');
   const brandId = parts[1];
   if (brandId) {
-    writeAuditLog(dynamo, {
-      actor: brandId,
-      actorType: 'brand',
-      action: 'newsletter.read',
-      resource: newsletterSK,
-      outcome: 'success',
-    }).catch(() => {});
+    const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, brandId);
+    await Promise.all([
+      incrementTenantUsageCounter(dynamo, REFDATA_TABLE, tenantState.tenantId, brandId, 'newsletter_reads'),
+      writeAuditLog(dynamo, {
+        actor: brandId,
+        actorType: 'brand',
+        action: 'newsletter.read',
+        resource: newsletterSK,
+        outcome: 'success',
+      }),
+    ]).catch(() => {});
+  }
+
+  return { success: true };
+}
+
+async function markCatalogueViewed(permULID: string, catalogueSK: string) {
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: catalogueSK },
+    UpdateExpression: 'SET #s = :read, updatedAt = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':read': 'READ', ':now': new Date().toISOString() },
+  }));
+
+  // catalogueSK format: CATALOGUE#<brandId>#<catalogueId>
+  const parts = catalogueSK.split('#');
+  const brandId = parts[1];
+  if (brandId) {
+    const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, brandId);
+    await Promise.all([
+      incrementTenantUsageCounter(dynamo, REFDATA_TABLE, tenantState.tenantId, brandId, 'catalogue_views'),
+      writeAuditLog(dynamo, {
+        actor: brandId,
+        actorType: 'brand',
+        action: 'catalogue.viewed',
+        resource: catalogueSK,
+        outcome: 'success',
+      }),
+    ]).catch(() => {});
+  }
+
+  return { success: true };
+}
+
+async function markOfferEngaged(permULID: string, offerSK: string) {
+  // offerSK format: OFFER#<brandId>#<offerId> — stored in user's local context, not UserDataEvent
+  // We only track the engagement event; no record update needed in UserDataEvent
+  const parts = offerSK.split('#');
+  const brandId = parts[1];
+  if (brandId) {
+    const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, brandId);
+    await Promise.all([
+      incrementTenantUsageCounter(dynamo, REFDATA_TABLE, tenantState.tenantId, brandId, 'offer_engagements'),
+      writeAuditLog(dynamo, {
+        actor: brandId,
+        actorType: 'brand',
+        action: 'offer.engaged',
+        resource: offerSK,
+        outcome: 'success',
+        metadata: { permULID },
+      }),
+    ]).catch(() => {});
   }
 
   return { success: true };

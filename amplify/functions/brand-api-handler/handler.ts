@@ -291,15 +291,25 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
     title: `New offer from your loyalty brand`,
     body: body.title as string,
     data: { type: 'NEW_OFFER', offerId, brandId },
-  }).then(count => {
-    writeAuditLog(dynamo, {
-      actor: brandId,
-      actorType: 'brand',
-      action: 'offer.delivered',
-      resource: `OFFER#${offerId}`,
-      outcome: 'success',
-      metadata: { delivered: count },
-    }).catch(() => {});
+  }).then(async count => {
+    const fanoutAt = new Date().toISOString();
+    await Promise.all([
+      // Store delivery count on the offer record so the portal can surface it
+      dynamo.send(new UpdateCommand({
+        TableName: REFDATA_TABLE,
+        Key: { pK: `BRAND#${brandId}`, sK: `OFFER#${offerId}` },
+        UpdateExpression: 'SET fanoutCount = :c, fanoutAt = :at',
+        ExpressionAttributeValues: { ':c': count, ':at': fanoutAt },
+      })),
+      writeAuditLog(dynamo, {
+        actor: brandId,
+        actorType: 'brand',
+        action: 'offer.delivered',
+        resource: `OFFER#${offerId}`,
+        outcome: 'success',
+        metadata: { delivered: count },
+      }),
+    ]).catch(() => {});
   }).catch(e => console.error('[createOffer] fanOut error:', e));
 
   return ok(event, {
@@ -437,15 +447,24 @@ async function sendNewsletter(event: APIGatewayProxyEvent, brandId: string) {
         updatedAt: now,
       },
     }));
-  }).then(count => {
-    writeAuditLog(dynamo, {
-      actor: brandId,
-      actorType: 'brand',
-      action: 'newsletter.delivered',
-      resource: `NEWSLETTER#${newsletterId}`,
-      outcome: 'success',
-      metadata: { delivered: count },
-    }).catch(() => {});
+  }).then(async count => {
+    const fanoutAt = new Date().toISOString();
+    await Promise.all([
+      dynamo.send(new UpdateCommand({
+        TableName: REFDATA_TABLE,
+        Key: { pK: `BRAND#${brandId}`, sK: `NEWSLETTER#${newsletterId}` },
+        UpdateExpression: 'SET fanoutCount = :c, fanoutAt = :at',
+        ExpressionAttributeValues: { ':c': count, ':at': fanoutAt },
+      })),
+      writeAuditLog(dynamo, {
+        actor: brandId,
+        actorType: 'brand',
+        action: 'newsletter.delivered',
+        resource: `NEWSLETTER#${newsletterId}`,
+        outcome: 'success',
+        metadata: { delivered: count },
+      }),
+    ]).catch(() => {});
   }).catch(e => console.error('[sendNewsletter] fanOut error:', e));
 
   return ok(event, {
@@ -556,15 +575,24 @@ async function createCatalogue(event: APIGatewayProxyEvent, brandId: string) {
       }));
     },
     async (permULID) => matchesTargetSegments(permULID, brandId, payload.targetSegments),
-  ).then(count => {
-    writeAuditLog(dynamo, {
-      actor: brandId,
-      actorType: 'brand',
-      action: 'catalogue.delivered',
-      resource: `CATALOGUE#${catalogueId}`,
-      outcome: 'success',
-      metadata: { delivered: count },
-    }).catch(() => {});
+  ).then(async count => {
+    const fanoutAt = new Date().toISOString();
+    await Promise.all([
+      dynamo.send(new UpdateCommand({
+        TableName: REFDATA_TABLE,
+        Key: { pK: `BRAND#${brandId}`, sK: `CATALOGUE#${catalogueId}` },
+        UpdateExpression: 'SET fanoutCount = :c, fanoutAt = :at',
+        ExpressionAttributeValues: { ':c': count, ':at': fanoutAt },
+      })),
+      writeAuditLog(dynamo, {
+        actor: brandId,
+        actorType: 'brand',
+        action: 'catalogue.delivered',
+        resource: `CATALOGUE#${catalogueId}`,
+        outcome: 'success',
+        metadata: { delivered: count },
+      }),
+    ]).catch(() => {});
   }).catch(e => console.error('[createCatalogue] fanOut error:', e));
 
   return ok(event, {
@@ -1040,14 +1068,14 @@ async function fanOutToSubscribers(
           if (isFutureIso(prefs.offersGlobalSnoozeUntil)) return;
         }
 
+        if (shouldSendToUser && !(await shouldSendToUser(permULID))) return;
+
         const tokenItem = await dynamo.send(new GetCommand({
           TableName: USER_TABLE,
           Key: { pK: `USER#${permULID}`, sK: 'DEVICE_TOKEN' },
         }));
         const token = tokenItem.Item?.desc ? JSON.parse(tokenItem.Item.desc).token : null;
         if (!token) return;
-
-        if (shouldSendToUser && !(await shouldSendToUser(permULID))) return;
 
         if (perSubscriberFn) await perSubscriberFn(permULID).catch(console.error);
 
@@ -1110,7 +1138,7 @@ async function matchesTargetSegments(
     Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
   }));
 
-  if (!segmentRes.Item?.desc) return false;
+  if (!segmentRes.Item?.desc) return true; // No segment record yet → user not yet in cohort → include (inclusive default)
   const desc = JSON.parse(segmentRes.Item.desc);
   const spendBucket = desc.spendBucket as string | undefined;
   const visitFrequency = desc.visitFrequency as string | undefined;

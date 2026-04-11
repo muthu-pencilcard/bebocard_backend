@@ -73,8 +73,9 @@ export function sanitizeHtml(html: string): string {
   result = result.replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, '');
   result = result.replace(/\s+on\w+\s*=\s*[^\s>]*/gi, '');
 
-  // 5. Strip javascript: protocol anywhere
+  // 5. Strip javascript: and vbscript: protocols anywhere
   result = result.replace(/javascript\s*:/gi, '');
+  result = result.replace(/vbscript\s*:/gi, '');
 
   // 6. Strip data: URIs
   result = result.replace(/data\s*:[^;>]*/gi, '');
