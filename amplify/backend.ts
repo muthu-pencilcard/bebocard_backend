@@ -185,8 +185,8 @@ const exportsBucket = new s3.Bucket(stack, 'UserDataExports', {
   lifecycleRules: [{ expiration: Duration.days(1) }], // Auto-delete after 24 hours
 });
 
-const glueDatabase = new (backend.data.resources as any).cfnResources.cfnTables['UserDataEvent']
-  .stack.node.defaultChild.parent.parent.parent.node.findAll()
+const glueDatabase = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent']
+  ?.stack.node.defaultChild.parent.parent.parent.node.findAll()
   .find((n: any) => n.cfnResourceType === 'AWS::Glue::Database') 
   ?? new (require('aws-cdk-lib/aws-glue').CfnDatabase)(stack, 'AnalyticsDatabase', {
     catalogId: stack.account,
