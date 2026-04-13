@@ -58,6 +58,8 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cfOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as glue from 'aws-cdk-lib/aws-glue';
+import * as athena from 'aws-cdk-lib/aws-athena';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
@@ -188,12 +190,12 @@ const exportsBucket = new s3.Bucket(stack, 'UserDataExports', {
 const glueDatabase = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent']
   ?.stack.node.defaultChild.parent.parent.parent.node.findAll()
   .find((n: any) => n.cfnResourceType === 'AWS::Glue::Database') 
-  ?? new (require('aws-cdk-lib/aws-glue').CfnDatabase)(stack, 'AnalyticsDatabase', {
+  ?? new glue.CfnDatabase(stack, 'AnalyticsDatabase', {
     catalogId: stack.account,
     databaseInput: { name: `bebo_analytics_${stage}`, description: 'BeboCard Intelligence Data Lake' },
   });
 
-const athenaWorkgroup = new (require('aws-cdk-lib/aws-athena').CfnWorkGroup)(stack, 'AnalyticsWorkgroup', {
+const athenaWorkgroup = new athena.CfnWorkGroup(stack, 'AnalyticsWorkgroup', {
   name: `bebo-intel-${stage}`,
   description: 'Intelligence tier analytics queries',
   workGroupConfiguration: {
