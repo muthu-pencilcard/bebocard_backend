@@ -364,7 +364,6 @@ receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKe
 const scanHandlerLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
 (scanHandlerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
-createHighTrafficUtilizationAlarm(scanHandlerLambda, 'ScanHandler');
 
 scanHandlerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
