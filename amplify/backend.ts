@@ -131,23 +131,26 @@ const tableNames = {
 const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
 
 const dataStack = Stack.of(userTable);
-const stack = Stack.of(backend.postConfirmationFn.resources.lambda);
+const authStack = backend.auth.resources.userPool.stack;
 const stage = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'dev';
 const branchName = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'sandbox';
 const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
 const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
 
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
+const stack = dataStack; // Global alias for backward compatibility in this file
+const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
 const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABLE`;
 const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
+const restApiUrlParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/SCAN_API_URL`;
 
 new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
 new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
-const analyticsBucket = new s3.Bucket(stack, 'AnalyticsLake', {
+const analyticsBucket = new s3.Bucket(dataStack, 'AnalyticsLake', {
   removalPolicy: RemovalPolicy.RETAIN,
   versioned: true, // Required for CRR (P3-12)
   intelligentTieringConfigurations: [
@@ -555,7 +558,7 @@ analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // ── Scan API (v1 & Legacy) ──
-const scanApi = new apigw.RestApi(stack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
+const scanApi = new apigw.RestApi(dataStack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
 const scanIntegration = new apigw.LambdaIntegration(scanLambda);
 
 // v1 routes
@@ -583,8 +586,13 @@ const billingRes = scanV1.addResource('billing');
 const stripeWebhookRes = billingRes.addResource('stripe-webhook');
 stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLambda), { apiKeyRequired: false });
 
-// Wire scanApi URL into post-confirmation (P2-6)
-postConfirmLambda.addEnvironment('SCAN_API_URL', scanApi.url);
+// We use a decoupled environment variable for the API URL to break the auth -> data circular dependency.
+postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
+
+new ssm.StringParameter(dataStack, 'ScanApiUrlParam', {
+  parameterName: restApiUrlParamName,
+  stringValue: scanApi.url,
+});
 
 // Legacy routes — 301 permanent redirect to /v1/ equivalents (P2-7)
 // Brands that haven't updated their integration receive a redirect, not an error.
