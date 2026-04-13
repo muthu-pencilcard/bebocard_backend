@@ -12,7 +12,8 @@ export const auth = defineAuth({
   },
   userAttributes: {
     email: { required: true, mutable: true },
-    birthdate: { required: true, mutable: true },
+    // birthdate cannot be set required on an existing UserPool (standard attributes are immutable after creation).
+    // Enforce age/birthdate at the app layer in post-confirmation Lambda instead.
     'custom:permULID': { dataType: 'String', mutable: false },
     'custom:ageBucket': { dataType: 'String', mutable: true },
     'custom:parentEmail': { dataType: 'String', mutable: true },
