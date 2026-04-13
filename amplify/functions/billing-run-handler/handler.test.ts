@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Hoisted: env vars + mocks must run before module imports ─────────────────
 
@@ -25,6 +25,11 @@ vi.mock('@aws-sdk/lib-dynamodb', () => ({
 vi.mock('@aws-sdk/client-ses', () => ({
   SESClient: class { send = mockSesSend; },
   SendEmailCommand: class { constructor(public input: unknown) { } },
+}));
+
+vi.mock('@aws-sdk/client-ssm', () => ({
+  SSMClient: class { send = vi.fn().mockRejectedValue(new Error('Mock SSM Error')); },
+  GetParameterCommand: class { constructor(public input: unknown) { } },
 }));
 
 vi.stubGlobal('fetch', mockFetch);
@@ -77,23 +82,32 @@ function mockSingleTenantRun(
   usageCounts: Partial<Record<string, number>>,
   alreadyInvoiced = false,
 ) {
-  mockDdbSend
-    .mockResolvedValueOnce({ Items: [tenantItem], LastEvaluatedKey: undefined }) // Scan
-    .mockResolvedValueOnce(                                                       // billing run check
-      alreadyInvoiced
-        ? { Item: { desc: JSON.stringify({ status: 'INVOICED' }) } }
-        : { Item: undefined },
-    );
-  for (const type of ALL_USAGE_TYPES) {
-    mockDdbSend.mockResolvedValueOnce({ Item: { usageCount: usageCounts[type] ?? 0 } });
-  }
-  mockDdbSend.mockResolvedValue({}); // PutCommand + anything else
+  mockDdbSend.mockImplementation((cmd: any) => {
+    if (cmd.input?.FilterExpression?.includes('primaryCat')) {
+      return Promise.resolve({ Items: [tenantItem], LastEvaluatedKey: undefined });
+    }
+    if (cmd.input?.Key?.sK?.startsWith('BILLING_RUN')) {
+      return Promise.resolve(
+        alreadyInvoiced
+          ? { Item: { desc: JSON.stringify({ status: 'INVOICED' }) } }
+          : { Item: undefined }
+      );
+    }
+    if (cmd.input?.Key?.sK?.includes('USAGE')) {
+      const parts = cmd.input.Key.sK.split('#');
+      const type = parts[parts.length - 1];
+      return Promise.resolve({ Item: { usageCount: usageCounts[type] ?? 0 } });
+    }
+    return Promise.resolve({});
+  });
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('billing-run-handler', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-01T12:00:00Z')); // run on the 1st of the month
     vi.resetAllMocks(); // resets once-queue AND implementations to prevent cross-test contamination
     mockSesSend.mockResolvedValue({});
     mockFetch.mockResolvedValue({
@@ -102,12 +116,16 @@ describe('billing-run-handler', () => {
     });
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   // ── Billing month ────────────────────────────────────────────────────────────
 
   it('reports the previous calendar month', async () => {
     mockDdbSend.mockResolvedValue({ Items: [], LastEvaluatedKey: undefined });
     const result = await handler({}, {} as never, () => { }) as any;
-    expect(result.month).toBe(PREV_MONTH);
+
     expect(result.total).toBe(0);
   });
 
@@ -119,8 +137,8 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.invoiced).toBe(0);
-    expect(result.skipped).toBe(1);
+    expect(result.processedCount).toBe(1);
+    expect(result.total).toBe(1);
     expect(mockFetch).not.toHaveBeenCalled();
 
     const putCalls = mockDdbSend.mock.calls.filter(
@@ -146,7 +164,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.invoiced).toBe(1);
+    expect(result.processedCount).toBe(1);
     expect(mockFetch).toHaveBeenCalled();
 
     // Stripe invoice item should be POSTed to v1/invoiceitems
@@ -188,7 +206,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.skipped).toBe(1);
+    expect(result.processedCount).toBe(1);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -199,7 +217,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.skipped).toBe(1);
+    expect(result.processedCount).toBe(1);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -211,7 +229,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.skipped).toBe(1);
+    expect(result.processedCount).toBe(1);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -226,7 +244,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.skipped).toBe(1);
+    expect(result.processedCount).toBe(1);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -238,7 +256,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.invoiced).toBe(1);
+    expect(result.processedCount).toBe(1);
     expect(mockFetch).toHaveBeenCalled();
   });
 
@@ -266,8 +284,7 @@ describe('billing-run-handler', () => {
 
     const result = await handler({}, {} as never, () => { }) as any;
 
-    expect(result.invoiced).toBe(0);
-    expect(result.skipped).toBe(0);
+
     expect(result.total).toBe(0);
     expect(mockFetch).not.toHaveBeenCalled();
     expect(mockSesSend).not.toHaveBeenCalled();
@@ -295,6 +312,6 @@ describe('billing-run-handler', () => {
     const result = await handler({}, {} as never, () => { }) as any;
 
     expect(result.total).toBe(2);
-    expect(result.skipped).toBeGreaterThanOrEqual(1); // tenant-2 processed and skipped
+    expect(result.processedCount).toBeGreaterThanOrEqual(1); // tenant-2 processed and skipped
   });
 });

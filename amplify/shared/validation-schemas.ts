@@ -31,6 +31,7 @@ export const OfferInputSchema = z.object({
   targetStoreIds: z.array(z.string().max(64)).max(100).optional().nullable(),
   minVisitCount:  z.number().int().min(0).max(9999).optional().nullable(),
   category:       z.string().max(64).optional().nullable(),
+  campaignType:   z.enum(['untargeted', 'acquisition', 'loyalty_reward', 're_engagement', 'seasonal', 'clearance']).default('untargeted'),
 }).refine((d: { validFrom: string; validTo: string }) => d.validTo >= d.validFrom, { message: 'validTo must be on or after validFrom' });
 
 export const NewsletterInputSchema = z.object({
@@ -108,6 +109,9 @@ export const AddLoyaltyCardSchema = z.object({
   customBrandName:  safeText(80).optional().nullable(),
   customBrandColor: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected #RRGGBB').optional().nullable(),
   isDefault:        z.boolean().optional().nullable(),
+  barcodeType:      z.string().max(20).optional().nullable(),
+  storeId:          z.string().max(64).optional().nullable(),
+  attributionBrandId: z.string().max(64).optional().nullable(),
 }).refine(
   d => d.isCustom ? !!d.customBrandName : !!d.brandId,
   { message: 'brandId required for standard cards; customBrandName required for custom cards' },

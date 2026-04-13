@@ -47,6 +47,7 @@ export const handler: DynamoDBStreamHandler = async (event) => {
 
       try {
         await recomputeSegment(permULID, brandId);
+        await recomputeGlobalSegment(permULID);
       } catch (err) {
         console.error('[segment-processor] recompute failed', { permULID, brandId, err });
         // Do not rethrow — one failed record must not block the rest of the batch
@@ -87,13 +88,14 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
       KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
       // Exclude ARCHIVED receipts (soft-deleted via card-manager/archiveRecord) so
       // removed receipts don't inflate totalSpend or visitCount.
-      FilterExpression: 'subCategory = :brand AND #status = :active',
+      FilterExpression: 'subCategory = :brand AND (#status = :active OR #status = :claimed)',
       ExpressionAttributeNames: { '#status': 'status' },
       ExpressionAttributeValues: {
         ':pk': `USER#${permULID}`,
         ':prefix': 'RECEIPT#',
         ':brand': brandId,
         ':active': 'ACTIVE',
+        ':claimed': 'CLAIMED',
       },
       ExclusiveStartKey: lastKey,
     }));
@@ -147,6 +149,87 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
       status: 'ACTIVE',
       primaryCat: 'segment',
       subCategory: brandId,
+      desc: JSON.stringify(desc),
+      updatedAt: new Date().toISOString(),
+    },
+  }));
+}
+
+// ── Global Segment recomputation ─────────────────────────────────────────────
+// Aggregates across ALL brands to create a cross-brand persona
+
+async function recomputeGlobalSegment(permULID: string): Promise<void> {
+  const receipts: Array<{ amount: number; purchaseDate: string; category?: string }> = [];
+  let lastKey: Record<string, unknown> | undefined;
+
+  do {
+    const res = await dynamo.send(new QueryCommand({
+      TableName: USER_TABLE,
+      KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
+      FilterExpression: '#status = :active OR #status = :claimed',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':pk': `USER#${permULID}`,
+        ':prefix': 'RECEIPT#',
+        ':active': 'ACTIVE',
+        ':claimed': 'CLAIMED',
+      },
+      ExclusiveStartKey: lastKey,
+    }));
+
+    for (const item of res.Items ?? []) {
+      const desc = parseDesc(item.desc);
+      if (typeof desc.amount === 'number') {
+        receipts.push({
+          amount: desc.amount as number,
+          purchaseDate: (desc.purchaseDate as string) ?? '',
+          category: (desc.category as string) ?? 'other'
+        });
+      }
+    }
+    lastKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastKey);
+
+  if (receipts.length === 0) return;
+
+  const totalSpend = receipts.reduce((sum, r) => sum + r.amount, 0);
+  const visitCount = receipts.length;
+  const lastVisit = receipts.map(r => r.purchaseDate).filter(Boolean).sort().pop() ?? '';
+  const lastVisitDaysAgo = lastVisit
+    ? Math.floor((Date.now() - new Date(lastVisit).getTime()) / 86_400_000)
+    : 9999;
+
+  // 1. Determine Personas based on category spend
+  const catTotals: Record<string, number> = {};
+  for (const r of receipts) {
+    catTotals[r.category!] = (catTotals[r.category!] ?? 0) + r.amount;
+  }
+  const personas: string[] = [];
+  if (totalSpend > 500) personas.push('high_value');
+  if (visitCount > 15) personas.push('power_user');
+  if ((catTotals['groceries'] ?? 0) > totalSpend * 0.4) personas.push('grocery_focused');
+  if ((catTotals['dining'] ?? 0) > totalSpend * 0.3) personas.push('dining_enthusiast');
+  if ((catTotals['fuel'] ?? 0) > 30) personas.push('vehicle_owner');
+
+  const desc = {
+    spendBucket: toSpendBucket(totalSpend),
+    visitFrequency: toVisitFrequency(visitCount, lastVisitDaysAgo),
+    totalSpend: Math.round(totalSpend * 100) / 100,
+    visitCount,
+    lastVisit,
+    persona: personas,
+    computedAt: new Date().toISOString(),
+    // Global segment doesn't have a single "subscribed" flag as it's for internal BI/Dashboard
+  };
+
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: 'SEGMENT#global',
+      eventType: 'SEGMENT',
+      status: 'ACTIVE',
+      primaryCat: 'segment',
       desc: JSON.stringify(desc),
       updatedAt: new Date().toISOString(),
     },

@@ -5,16 +5,29 @@ import type { DynamoDBStreamEvent } from 'aws-lambda';
 // USER_HASH_SALT is read at module level in handler.ts, so it must be set
 // before the module is imported (vi.hoisted runs before all imports).
 
-const { mockAthenaStartQuery, mockAthenaGetExecution } = vi.hoisted(() => {
+const { mockDdbSend, mockAthenaStartQuery, mockAthenaGetExecution } = vi.hoisted(() => {
   process.env.USER_HASH_SALT     = 'test-salt-value-abc123';
   process.env.ANALYTICS_BUCKET   = 'test-analytics-bucket';
   process.env.ATHENA_WORKGROUP    = 'test-workgroup';
   process.env.GLUE_DATABASE       = 'bebocard_analytics';
+  process.env.REFDATA_TABLE       = 'test-refdata-table';
   return {
+    mockDdbSend: vi.fn(),
     mockAthenaStartQuery: vi.fn(),
     mockAthenaGetExecution: vi.fn(),
   };
 });
+
+vi.mock('@aws-sdk/client-dynamodb', () => ({
+  DynamoDBClient: vi.fn(function (this: Record<string, unknown>) {}),
+}));
+
+vi.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: vi.fn().mockReturnValue({ send: mockDdbSend }) },
+  GetCommand: vi.fn(function (this: Record<string, unknown>, input: unknown) {
+    Object.assign(this, { __type: 'GetCommand', input });
+  }),
+}));
 
 vi.mock('@aws-sdk/client-athena', () => ({
   AthenaClient: vi.fn(function (this: Record<string, unknown>) {
@@ -78,6 +91,15 @@ beforeEach(() => {
   process.env.ATHENA_WORKGROUP   = 'test-workgroup';
   process.env.GLUE_DATABASE      = 'bebocard_analytics';
   process.env.USER_HASH_SALT     = 'test-salt-value-abc123';
+  process.env.REFDATA_TABLE      = 'test-refdata-table';
+
+  mockDdbSend.mockImplementation((cmd: any) => {
+    if (cmd.__type === 'GetCommand' && cmd.input?.Key?.sK === 'profile') {
+      if (cmd.input.Key.pK.startsWith('BRAND#')) return Promise.resolve({ Item: { tenantId: 'tenant-1' } });
+      if (cmd.input.Key.pK.startsWith('TENANT#')) return Promise.resolve({ Item: { tier: 'INTELLIGENCE', desc: '{}' } });
+    }
+    return Promise.resolve({});
+  });
 
   // Default: Athena query starts and succeeds immediately
   mockAthenaStartQuery.mockResolvedValue({ QueryExecutionId: 'qry-001' });
@@ -190,9 +212,10 @@ describe('Athena error handling', () => {
     await expect(handler({ Records: [makeRecord({})] }, {} as never, () => {})).rejects.toThrow('CANCELLED');
   });
 
-  it('throws when StartQueryExecution returns no QueryExecutionId', async () => {
+  it('logs an error and continues when StartQueryExecution returns no QueryExecutionId', async () => {
     mockAthenaStartQuery.mockResolvedValue({});
-    await expect(handler({ Records: [makeRecord({})] }, {} as never, () => {})).rejects.toThrow();
+    await handler({ Records: [makeRecord({})] }, {} as never, () => {});
+    expect(mockAthenaGetExecution).not.toHaveBeenCalled();
   });
 });
 

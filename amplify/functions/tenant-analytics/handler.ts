@@ -5,6 +5,13 @@ import {
   GetCommand,
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
+import {
+  AthenaClient,
+  StartQueryExecutionCommand,
+  GetQueryExecutionCommand,
+  GetQueryResultsCommand,
+  QueryExecutionState,
+} from '@aws-sdk/client-athena';
 import { createHash, timingSafeEqual as cryptoTimingSafeEqual } from 'crypto';
 import { extractApiKey } from '../../shared/api-key-auth';
 import { withAuditLog } from '../../shared/audit-logger';
@@ -13,8 +20,14 @@ const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const USER_TABLE = process.env.USER_TABLE!;
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
+const REPORT_TABLE = process.env.REPORT_TABLE!;
 const MIN_COHORT = parseInt(process.env.MIN_COHORT_THRESHOLD ?? '50', 10);
 const KEY_ID_INDEX = process.env.KEY_ID_GSI_NAME ?? 'refDataEventsByKeyId';
+
+const athena = new AthenaClient({});
+const ANALYTICS_BUCKET = process.env.ANALYTICS_BUCKET!;
+const ATHENA_WORKGROUP = process.env.ATHENA_WORKGROUP!;
+const GLUE_DATABASE    = process.env.GLUE_DATABASE!;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -28,7 +41,7 @@ interface TenantRecord {
   status: 'ACTIVE' | 'REVOKED';
 }
 
-type TenantScope = 'segments' | 'receipts_aggregate' | 'subscriber_count';
+type TenantScope = 'segments' | 'receipts_aggregate' | 'subscriber_count' | 'intelligence';
 
 interface ValidatedTenant {
   tenantId: string;
@@ -62,10 +75,34 @@ interface SegmentsResponse {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 const _handler: APIGatewayProxyHandler = async (event) => {
-  const headers = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
   };
+
+  const path = event.path ?? '';
+
+  // ── API Versioning Redirect (P2-7 & P3-12 Deprecation) ──
+  if (!path.startsWith('/v1/')) {
+    const v1Path = `/v1${path.startsWith('/') ? '' : '/'}${path}`;
+    console.warn(`[tenant-analytics] Legacy unversioned request to ${path}. Redirecting to ${v1Path}`);
+    return {
+      statusCode: 308, // Permanent Redirect
+      headers: { 
+        ...headers, 
+        'Location': v1Path,
+        'Deprecation': 'true',
+        'Sunset': 'Wed, 01 Jul 2026 00:00:00 GMT',
+        'Link': `<${v1Path}>; rel="replacement"`,
+        'X-BeboCard-Notice': 'This endpoint is deprecated. Transition to /v1/ routes immediately.'
+      },
+      body: JSON.stringify({ 
+        error: 'Deprecated Endpoint', 
+        message: 'Please update your integration to use /v1 prefix. Support for unversioned routes will be removed in v2.0.',
+        suggestedPath: v1Path 
+      })
+    };
+  }
 
   try {
     const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
@@ -78,14 +115,20 @@ const _handler: APIGatewayProxyHandler = async (event) => {
       return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid API key' }) };
     }
 
-    const path = event.path ?? '';
-
     if (path.endsWith('/analytics/segments')) {
       return handleSegments(event, headers, tenant);
     }
 
     if (path.endsWith('/analytics/subscriber-count')) {
       return handleSubscriberCount(event, headers, tenant);
+    }
+
+    if (path.endsWith('/analytics/intelligence')) {
+      return handleIntelligence(event, headers, tenant);
+    }
+    
+    if (path.endsWith('/analytics/trends')) {
+      return handleTrends(event, headers, tenant);
     }
 
     return { statusCode: 404, headers, body: JSON.stringify({ error: 'Unknown route' }) };
@@ -326,6 +369,159 @@ function normalise(counts: Record<string, number>, total: number): Record<string
 function currentPeriod(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// ── Bebo Intelligence: Data Lake Querying (P2-5) ──────────────────────────────
+//
+// Direct Athena queries against the Iceberg table for granular spend insights.
+// Always enforced via 'brand_id' filter and pseudonymised 'user_hash'.
+
+async function handleIntelligence(
+  event: Parameters<APIGatewayProxyHandler>[0],
+  headers: Record<string, string>,
+  tenant: ValidatedTenant,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  if (!tenant.allowedScopes.includes('intelligence')) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  const brandId = event.queryStringParameters?.['brandId'];
+  if (!brandId || !tenant.brandIds.includes(brandId)) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  const queryType = event.queryStringParameters?.['type'] ?? 'spend_mix';
+
+  try {
+    // 1. Optimization: Check for pre-computed report first (P2-17)
+    const today = new Date().toISOString().split('T')[0];
+    const reportRes = await dynamo.send(new GetCommand({
+      TableName: REPORT_TABLE,
+      Key: { pK: `REPORT#${brandId}`, sK: `DAILY#${today}` },
+    }));
+
+    if (reportRes.Item && queryType === 'spend_mix') {
+      const stats = JSON.parse(reportRes.Item.desc ?? '{}');
+      if (stats.categoryMix) {
+        console.info(`[tenant-analytics] Serving spend_mix from pre-computed report for ${brandId}`);
+        return { 
+          statusCode: 200, 
+          headers, 
+          body: JSON.stringify({ 
+            brandId, 
+            type: queryType, 
+            data: stats.categoryMix,
+            source: 'report_snapshot' 
+          }) 
+        };
+      }
+    }
+
+    let sql = '';
+    
+    if (queryType === 'spend_mix') {
+      sql = `SELECT category, sum(amount) as total_amount, count(*) as tx_count, avg(amount) as atv 
+             FROM "${GLUE_DATABASE}"."receipts" 
+             WHERE brand_id = '${brandId}' 
+             GROUP BY category 
+             ORDER BY total_amount DESC`;
+    } else {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Unsupported intelligence type' }) };
+    }
+
+    const { QueryExecutionId } = await athena.send(new StartQueryExecutionCommand({
+      QueryString: sql,
+      WorkGroup: ATHENA_WORKGROUP,
+      ResultConfiguration: { OutputLocation: `s3://${ANALYTICS_BUCKET}/athena-results/` },
+    }));
+
+    if (!QueryExecutionId) throw new Error('Query failed to start');
+
+    // Polling logic (simplified for Lambda execution window — max 20s wait)
+    const results = await pollAthenaResults(QueryExecutionId);
+    
+    return { statusCode: 200, headers, body: JSON.stringify({ brandId, type: queryType, data: results, source: 'athena_live' }) };
+    
+  } catch (err: any) {
+    console.error('[tenant-analytics] Athena intelligence error:', err);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: 'Intelligence engine offline' }) };
+  }
+}
+
+async function pollAthenaResults(queryId: string): Promise<any[]> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const res = await athena.send(new GetQueryExecutionCommand({ QueryExecutionId: queryId }));
+    const state = res.QueryExecution?.Status?.State;
+    if (state === QueryExecutionState.SUCCEEDED) {
+      const results = await athena.send(new GetQueryResultsCommand({ QueryExecutionId: queryId }));
+      return parseAthenaResults(results);
+    }
+    if (state === QueryExecutionState.FAILED || state === QueryExecutionState.CANCELLED) {
+      throw new Error(`Query ${state}: ${res.QueryExecution?.Status?.StateChangeReason}`);
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('Query timed out');
+}
+
+function parseAthenaResults(results: any): any[] {
+  const rows = results.ResultSet.Rows ?? [];
+  if (rows.length < 2) return [];
+  const headers = rows[0].Data.map((d: any) => d.VarCharValue);
+  return rows.slice(1).map((row: any) => {
+    const entry: any = {};
+    row.Data.forEach((d: any, i: number) => {
+      entry[headers[i]] = d.VarCharValue;
+    });
+    return entry;
+  });
+}
+
+// ── GET /analytics/trends ─────────────────────────────────────────────────────
+//
+// Returns historical daily snapshots for a brand.
+// Used for trend lines in the portal.
+//
+// Query params:
+//   brandId  — required, must be in tenant.brandIds
+//   period   — optional, '7d' | '30d' | '90d' (default '30d')
+
+async function handleTrends(
+  event: Parameters<APIGatewayProxyHandler>[0],
+  headers: Record<string, string>,
+  tenant: ValidatedTenant,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  const brandId = event.queryStringParameters?.['brandId'];
+  if (!brandId || !tenant.brandIds.includes(brandId)) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  const period = event.queryStringParameters?.['period'] ?? '30d';
+  const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
+  const fromDate = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString().split('T')[0];
+
+  // Query ReportDataEvent for DAILY# snapshots
+  const res = await dynamo.send(new QueryCommand({
+    TableName: REPORT_TABLE,
+    KeyConditionExpression: 'pK = :pk AND sK >= :sk',
+    ExpressionAttributeValues: {
+      ':pk': `REPORT#${brandId}`,
+      ':sk': `DAILY#${fromDate}`,
+    },
+    Limit: 100,
+  }));
+
+  const snapshots = (res.Items ?? []).map(item => ({
+    date: item.sK.replace('DAILY#', ''),
+    metrics: JSON.parse(item.desc ?? '{}'),
+  }));
+
+  return {
+    statusCode: 200,
+    headers,
+    body: JSON.stringify({ brandId, period, snapshots }),
+  };
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

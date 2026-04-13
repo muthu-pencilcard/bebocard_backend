@@ -6,19 +6,28 @@ import {
   QueryExecutionState,
 } from '@aws-sdk/client-athena';
 import { createHmac } from 'crypto';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const athena = new AthenaClient({});
 
 const ANALYTICS_BUCKET = process.env.ANALYTICS_BUCKET!;
 const ATHENA_WORKGROUP = process.env.ATHENA_WORKGROUP!;
 const GLUE_DATABASE    = process.env.GLUE_DATABASE!;
-const USER_HASH_SALT   = process.env.USER_HASH_SALT!;
+const REFDATA_TABLE    = process.env.REFDATA_TABLE!;
+const USER_HASH_SALT   = process.env.USER_HASH_SALT!; // Global fallback
+
+// Cache for tenant metadata
+const tenantCache: Record<string, { salt: string; tenantId: string; tier: string; analyticsBucket?: string }> = {};
+const brandTenantCache: Record<string, string> = {};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface ReceiptRow {
-  userHash:     string;
+  userHash:     string | null;
   brandId:      string;
+  tenantId:     string;
   purchaseDate: string;   // YYYY-MM-DD
   amount:       number;
   currency:     string;
@@ -54,22 +63,34 @@ export const handler: DynamoDBStreamHandler = async (event) => {
 
     const pk = newImage['pK']?.S ?? '';
     const sk = newImage['sK']?.S ?? '';
-    if (!pk.startsWith('USER#') || !sk.startsWith('RECEIPT#')) continue;
+    const isAnonymous = pk.startsWith('ANON#');
+
+    if (!isAnonymous && (!pk.startsWith('USER#') || !sk.startsWith('RECEIPT#'))) continue;
+    if (isAnonymous && sk !== 'receipt') continue;
 
     const descStr = newImage['desc']?.S ?? '{}';
     let desc: Record<string, unknown>;
     try { desc = JSON.parse(descStr); } catch { continue; }
 
-    // Only receipts that arrived via brand POS scan path carry secondaryULID.
-    // This is the consent-free analytics gate: brand submitted the data to us.
-    if (!desc['secondaryULID']) continue;
+    // Only receipts that arrived via brand POS scan path carry secondaryULID OR are in anonymousMode.
+    if (!desc['secondaryULID'] && !desc['isAnonymous']) continue;
 
-    const permULID = pk.replace('USER#', '');
     const brandId  = (newImage['subCategory']?.S ?? String(desc['brandId'] ?? '')) as string;
     if (!brandId) continue;
 
-    // Pseudonymous user identifier — permULID never stored in analytics table
-    const userHash = createHmac('sha256', USER_HASH_SALT).update(permULID).digest('hex');
+    // Resolve Tenant Context
+    const tenantId = await getTenantIdForBrand(brandId);
+    if (!tenantId) continue;
+
+    const tenantMeta = await getTenantMetadata(tenantId);
+    if (!tenantMeta || tenantMeta.tier === 'ENGAGEMENT') continue;
+
+    // Pseudonymous user identifier — unique PER TENANT (P1-1). NULL for anonymous (P1-9).
+    let userHash: string | null = null;
+    if (!isAnonymous) {
+      const permULID = pk.replace('USER#', '');
+      userHash = createHmac('sha256', tenantMeta.salt).update(permULID).digest('hex');
+    }
 
     const rawDate    = sanitizeDate(String(desc['purchaseDate'] ?? '')) ?? new Date().toISOString().substring(0, 10);
     const amount     = sanitizeAmount(desc['amount']);
@@ -78,42 +99,54 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     const merchant   = sanitizeText(String(desc['merchant'] ?? ''));
     const ingestedAt = new Date().toISOString().replace('T', ' ').replace('Z', '');
 
-    if (amount === null) continue;   // reject non-numeric amounts
+    if (amount === null) continue;
 
-    rows.push({ userHash, brandId, purchaseDate: rawDate, amount, currency, category, merchant, ingestedAt });
+    rows.push({ userHash, brandId, tenantId, purchaseDate: rawDate, amount, currency, category, merchant, ingestedAt });
   }
 
   if (rows.length === 0) return;
 
-  // Build single INSERT for the entire batch — one Athena round-trip per Lambda invocation.
-  // All string values are escaped via dedicated sanitizers; numeric/date values are
-  // type-enforced so no string injection path exists for those columns.
-  const valuesList = rows.map(r =>
-    `('${r.userHash}', '${escapeSql(r.brandId)}', DATE '${r.purchaseDate}', ` +
-    `${r.amount}, '${escapeSql(r.currency)}', '${escapeSql(r.category)}', '${escapeSql(r.merchant)}', TIMESTAMP '${r.ingestedAt}')`,
-  ).join(',\n    ');
-
-  const sql = `INSERT INTO \`${GLUE_DATABASE}\`.\`receipts\`
-  (user_hash, brand_id, purchase_date, amount, currency, category, merchant, ingested_at)
-VALUES
-  ${valuesList}`;
-
-  const queryId = await startQuery(sql);
-  if (!queryId) {
-    console.error('[receipt-iceberg-writer] Failed to start Athena query');
-    throw new Error('Athena query did not start');
+  // Group rows by tenant — they write to different tables
+  const rowsByTenant: Record<string, ReceiptRow[]> = {};
+  for (const row of rows) {
+    if (!rowsByTenant[row.tenantId]) rowsByTenant[row.tenantId] = [];
+    rowsByTenant[row.tenantId].push(row);
   }
 
-  await waitForQuery(queryId);
+  for (const [tenantId, tenantRows] of Object.entries(rowsByTenant)) {
+    const tableName = `receipts_${tenantId.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
+    const tenantMeta = await getTenantMetadata(tenantId);
+    
+    const valuesList = tenantRows.map(r =>
+      `(${r.userHash ? `'${r.userHash}'` : 'NULL'}, '${escapeSql(r.brandId)}', DATE '${r.purchaseDate}', ` +
+      `${r.amount}, '${escapeSql(r.currency)}', '${escapeSql(r.category)}', '${escapeSql(r.merchant)}', TIMESTAMP '${r.ingestedAt}')`,
+    ).join(',\n      ');
+
+    const sql = `INSERT INTO \`${GLUE_DATABASE}\`.\`${tableName}\`
+    (user_hash, brand_id, purchase_date, amount, currency, category, merchant, ingested_at)
+  VALUES
+    ${valuesList}`;
+
+    const queryId = await startQuery(sql, tenantMeta?.analyticsBucket);
+    if (!queryId) {
+      console.error(`[receipt-iceberg-writer] Failed to start Athena query for tenant ${tenantId}`);
+      continue;
+    }
+    await waitForQuery(queryId);
+  }
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function startQuery(sql: string): Promise<string | undefined> {
+async function startQuery(sql: string, customBucket?: string): Promise<string | undefined> {
+  const outputLocation = customBucket 
+    ? `s3://${customBucket}/athena-results/` 
+    : `s3://${ANALYTICS_BUCKET}/athena-results/`;
+
   const res = await athena.send(new StartQueryExecutionCommand({
     QueryString:         sql,
     WorkGroup:           ATHENA_WORKGROUP,
-    ResultConfiguration: { OutputLocation: `s3://${ANALYTICS_BUCKET}/athena-results/` },
+    ResultConfiguration: { OutputLocation: outputLocation },
   }));
   return res.QueryExecutionId;
 }
@@ -144,6 +177,50 @@ async function waitForQuery(
   }
 
   throw new Error(`Athena query ${queryId} did not complete within ${maxWaitMs}ms`);
+}
+
+async function getTenantIdForBrand(brandId: string): Promise<string | null> {
+  if (brandTenantCache[brandId]) return brandTenantCache[brandId];
+  
+  const res = await ddb.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: 'profile' }
+  }));
+  
+  const tenantId = res.Item?.tenantId as string | undefined;
+  if (tenantId) brandTenantCache[brandId] = tenantId;
+  return tenantId ?? null;
+}
+
+async function getTenantMetadata(tenantId: string) {
+  if (tenantCache[tenantId]) return tenantCache[tenantId];
+
+  const res = await ddb.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: 'profile' }
+  }));
+
+  if (!res.Item) return null;
+  const desc = JSON.parse(res.Item.desc || '{}');
+  
+  // Resolve analytics bucket for Enterprise-tier residency (P1-3)
+  let analyticsBucket: string | undefined;
+  if (res.Item.tier === 'ENTERPRISE') {
+    if (desc.analyticsConfig?.customBucketArn) {
+      analyticsBucket = desc.analyticsConfig.customBucketArn.split(':').pop();
+    } else if (desc.analyticsConfig?.bucketType === 'DEDICATED') {
+      analyticsBucket = `bebocard-enterprise-${tenantId.toLowerCase()}`;
+    }
+  }
+
+  const meta = {
+    tenantId,
+    salt: desc.salt as string || USER_HASH_SALT,
+    tier: res.Item.tier as string || 'ENGAGEMENT',
+    analyticsBucket
+  };
+  tenantCache[tenantId] = meta;
+  return meta;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -283,21 +283,20 @@ describe('rotateQR (Phase 10)', () => {
     expect(res.rotatesAt).toBeDefined();
 
     // Verify new SCAN index was written to AdminDataEvent
-    const newScanPut = mockSend.mock.calls.find(([cmd]: any[]) =>
-      cmd.__type === 'PutCommand' && String(cmd.input?.Item?.pK).startsWith('SCAN#'),
-    );
+    const txCmd = mockSend.mock.calls.find(([cmd]: any[]) => cmd.__type === 'TransactWriteCommand');
+    expect(txCmd).toBeDefined();
+    const newScanPut = txCmd![0].input.TransactItems.find((item: any) => item.Put && String(item.Put.Item.pK).startsWith('SCAN#'));
     expect(newScanPut).toBeDefined();
-    const scanItem = (newScanPut![0] as any).input.Item;
+    const scanItem = newScanPut.Put.Item;
     expect(scanItem.status).toBe('ACTIVE');
     expect(JSON.parse(scanItem.desc).cards).toHaveLength(1); // cards copied from old index
 
     // Verify old SCAN index was revoked
-    const revokeUpdate = mockSend.mock.calls.find(([cmd]: any[]) =>
-      cmd.__type === 'UpdateCommand' &&
-      cmd.input?.ExpressionAttributeValues?.[':revoked'] === 'REVOKED',
+    const revokeUpdate = txCmd![0].input.TransactItems.find((item: any) => 
+      item.Update && item.Update.ExpressionAttributeValues?.[':revoked'] === 'REVOKED'
     );
     expect(revokeUpdate).toBeDefined();
-    expect((revokeUpdate![0] as any).input.Key.pK).toBe('SCAN#old-ulid');
+    expect(revokeUpdate.Update.Key.pK).toBe('SCAN#old-ulid');
 
     // Verify rotation log was written to UserDataEvent
     const rotationLog = mockSend.mock.calls.find(([cmd]: any[]) =>
@@ -329,25 +328,39 @@ describe('rotateQR (Phase 10)', () => {
     await expect(handler(makeEvent('rotateQR'), null as any, null as any)).rejects.toThrow('IDENTITY record not found');
   });
 
-  it('handles concurrent rotation: returns alreadyRotated:true with fresh values', async () => {
-    // UpdateCommand on IDENTITY throws ConditionalCheckFailedException (another device rotated first)
+  it('handles concurrent rotation (Race Guard): re-reads identity and returning authoritative values on conflict', async () => {
+    // 1. GetCommand IDENTITY (returning old values)
+    // 2. TransactWrite throws CancellationReasons[1].Code === 'ConditionalCheckFailed'
+    // 3. Re-read GetCommand IDENTITY (returning values from the winner)
     mockSend
       .mockResolvedValueOnce({
-        Item: { secondaryULID: 'old-ulid', desc: JSON.stringify({ rotationFrequency: 'every_7d' }) },
+        Item: { secondaryULID: 'old-ulid', desc: JSON.stringify({ rotationFrequency: 'every_24h' }) },
       })
-      .mockResolvedValueOnce({ Item: { desc: JSON.stringify({ cards: [] }) } })
-      .mockResolvedValueOnce({}) // PutCommand new SCAN
-      .mockResolvedValueOnce({}) // UpdateCommand revoke old
-      .mockRejectedValueOnce(Object.assign(new Error('Condition failed'), { name: 'ConditionalCheckFailedException' }))
-      .mockResolvedValueOnce({ // Re-read IDENTITY after conflict
-        Item: { secondaryULID: 'concurrent-new-ulid', rotatesAt: '2026-04-10T00:00:00.000Z' },
+      .mockResolvedValueOnce({ Item: { desc: '{}' } }) // Old SCAN index
+      .mockRejectedValueOnce({
+        name: 'TransactionCanceledException',
+        CancellationReasons: [
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' }, // IDENTITY update failed
+          { Code: 'None' }
+        ]
+      })
+      .mockResolvedValueOnce({
+        Item: { secondaryULID: 'winner-ulid', rotatesAt: '2026-04-12T10:00:00Z' }
       });
 
     const res: any = await handler(makeEvent('rotateQR'), null as any, null as any);
+    
     expect(res.success).toBe(true);
     expect(res.alreadyRotated).toBe(true);
-    expect(res.newSecondaryULID).toBe('concurrent-new-ulid');
-    expect(res.rotatesAt).toBe('2026-04-10T00:00:00.000Z');
+    expect(res.newSecondaryULID).toBe('winner-ulid');
+    expect(res.rotatesAt).toBe('2026-04-12T10:00:00Z');
+    
+    // Check that we attempted a transaction with the correct oldULID as the condition
+    const txCall = mockSend.mock.calls.find(([cmd]) => cmd.__type === 'TransactWriteCommand');
+    const identityUpdate = (txCall![0] as any).input.TransactItems[1].Update;
+    expect(identityUpdate.ConditionExpression).toContain('secondaryULID = :old');
+    expect(identityUpdate.ExpressionAttributeValues[':old']).toBe('old-ulid');
   });
 });
 

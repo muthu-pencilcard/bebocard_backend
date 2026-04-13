@@ -85,11 +85,11 @@ async function discoverOffers(region: string | undefined, limit: number, cursor:
   const now = new Date().toISOString();
   const scan = await dynamo.send(new ScanCommand({
     TableName: REFDATA_TABLE,
-    FilterExpression: 'primaryCat = :cat AND #status = :active',
+    FilterExpression: '(primaryCat = :cat OR primaryCat = :curated) AND #status = :active',
     ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: { ':cat': 'offer', ':active': 'ACTIVE' },
+    ExpressionAttributeValues: { ':cat': 'offer', ':curated': 'curated_offer', ':active': 'ACTIVE' },
     ExclusiveStartKey: decodeCursor(cursor),
-    Limit: limit * 4,
+    Limit: limit * 6,
   }));
 
   const offers = (scan.Items ?? []).map((item) => {
@@ -108,6 +108,9 @@ async function discoverOffers(region: string | undefined, limit: number, cursor:
       validFrom: desc.validFrom as string ?? null,
       validTo: validTo ?? null,
       category: desc.category as string ?? null,
+      trackingUrl: desc.trackingUrl as string ?? null,
+      isBeboCurated: desc.isBeboCurated as boolean ?? false,
+      source: desc.source as string ?? null,
     };
   }).filter((o): o is NonNullable<typeof o> =>
     o !== null && (!region || !o.brandRegion || o.brandRegion.toUpperCase() === region.toUpperCase()),
@@ -201,6 +204,9 @@ async function discoverNewsletters(region: string | undefined, limit: number, cu
 }
 
 // ── Main handler ───────────────────────────────────────────────────────────────
+//
+// personalization: if Authorizer claims are present, we boost brands already in wallet.
+// (P2-14: Personalised relevance feed)
 
 export const handler: Handler = async (event: any) => {
   const method = (event.httpMethod as string ?? 'GET').toUpperCase();
@@ -209,15 +215,61 @@ export const handler: Handler = async (event: any) => {
 
   if (method === 'OPTIONS') return { statusCode: 200, headers: CORS, body: '' };
 
+  // Resolve identity if available (AppSync/Cognito Authorizer)
+  const permULID = event.requestContext?.authorizer?.claims?.['custom:permULID'] 
+    || event.requestContext?.authorizer?.claims?.['permULID'];
+
   const region = qs.region;
   const limit = Math.min(Math.max(Number(qs.limit ?? 20), 1), MAX_LIMIT);
   const cursor = qs.cursor;
 
-  console.info(`[discovery] ${method} ${path} region=${region ?? 'all'}`);
+  console.info(`[discovery] ${method} ${path} region=${region ?? 'all'} user=${permULID ?? 'anon'}`);
+
+  let walletBrands: string[] = [];
+  if (permULID) {
+    try {
+      const walletRes = await dynamo.send(new ScanCommand({
+        TableName: process.env.USER_TABLE!,
+        FilterExpression: 'pK = :pk AND eventType = :cat',
+        ExpressionAttributeValues: { ':pk': `USER#${permULID}`, ':cat': 'CARD' },
+        ProjectionExpression: 'subCategory',
+      }));
+      walletBrands = (walletRes.Items ?? []).map(i => i.subCategory as string);
+    } catch (err) {
+      console.warn('[discovery] failed to fetch wallet brands for personalization:', err);
+    }
+  }
 
   try {
-    if (path.endsWith('/brands')) return await discoverBrands(region, limit, cursor);
-    if (path.endsWith('/offers')) return await discoverOffers(region, limit, cursor);
+    let result: any;
+    if (path.endsWith('/brands')) {
+        result = await discoverBrands(region, limit, cursor);
+        if (permULID && result.statusCode === 200) {
+            const body = JSON.parse(result.body);
+            body.brands.sort((a: any, b: any) => {
+                const aIn = walletBrands.includes(a.brandId) ? 1 : 0;
+                const bIn = walletBrands.includes(b.brandId) ? 1 : 0;
+                return bIn - aIn;
+            });
+            result.body = JSON.stringify(body);
+        }
+        return result;
+    }
+    
+    if (path.endsWith('/offers')) {
+        result = await discoverOffers(region, limit, cursor);
+        if (permULID && result.statusCode === 200) {
+            const body = JSON.parse(result.body);
+            body.offers.sort((a: any, b: any) => {
+                const aIn = walletBrands.includes(a.brandId) ? 1 : 0;
+                const bIn = walletBrands.includes(b.brandId) ? 1 : 0;
+                return bIn - aIn;
+            });
+            result.body = JSON.stringify(body);
+        }
+        return result;
+    }
+
     if (path.endsWith('/catalogues')) return await discoverCatalogues(region, limit, cursor);
     if (path.endsWith('/newsletters')) return await discoverNewsletters(region, limit, cursor);
     return notFound();

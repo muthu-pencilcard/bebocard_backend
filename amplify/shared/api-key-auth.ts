@@ -7,15 +7,17 @@ const ADMIN_TABLE = process.env.ADMIN_TABLE;
 const ulid = monotonicFactory();
 const KEY_ID_INDEX = process.env.KEY_ID_GSI_NAME ?? 'refDataEventsByKeyId';
 
-export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'catalogues' | 'analytics' | 'stores' | 'payment' | 'consent' | 'recurring' | 'gift_card' | 'enrollment' | 'smb';
+export type ApiKeyScope = 'scan' | 'receipt' | 'offers' | 'newsletters' | 'catalogues' | 'analytics' | 'stores' | 'payment' | 'consent' | 'recurring' | 'gift_card' | 'enrollment' | 'smb' | 'card_config';
 
 export interface ApiKeyRecord {
   brandId: string;
+  tenantId?: string;
   keyId: string;
   keyHash: string;
   scopes: ApiKeyScope[];
   rateLimit: number;        // requests per hour
   status: 'ACTIVE' | 'REVOKED' | 'GRACE';
+  isSandbox: boolean;
   createdAt: string;
   createdBy: string;        // business portal userId
   revokedAt?: string;
@@ -24,15 +26,18 @@ export interface ApiKeyRecord {
 
 export interface ValidatedKey {
   brandId: string;
+  tenantId: string;
   keyId: string;
   rateLimit: number;
   scopes: ApiKeyScope[];
+  isSandbox: boolean;
 }
 
 type ApiKeyItem = Partial<ApiKeyRecord> & {
   pK?: string;
   sK?: string;
   desc?: string;
+  tenantId?: string;
 };
 
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
@@ -146,9 +151,11 @@ export async function validateApiKey(
 
   return {
     brandId: normalized.brandId,
+    tenantId: normalized.tenantId || normalized.brandId, // Fallback to brandId as its own tenant
     keyId: normalized.keyId,
     rateLimit: normalized.rateLimit,
     scopes: normalized.scopes,
+    isSandbox: normalized.isSandbox,
   };
 }
 
@@ -361,6 +368,7 @@ function normalizeApiKeyItem(item: ApiKeyItem): ApiKeyRecord | null {
   const rateLimit = asNumber(item.rateLimit) ?? asNumber(parsedDesc.rateLimit) ?? 1000;
   const createdBy = asString(item.createdBy) ?? asString(parsedDesc.createdBy) ?? 'unknown';
   const brandId = asString(item.brandId) ?? deriveBrandId(item.pK);
+  const tenantId = asString(item.tenantId) ?? deriveTenantId(item.pK);
   const keyId = asString(item.keyId) ?? deriveKeyId(item.sK);
 
   if (!brandId || !keyId || !keyHash || !scopes) {
@@ -369,11 +377,13 @@ function normalizeApiKeyItem(item: ApiKeyItem): ApiKeyRecord | null {
 
   return {
     brandId,
+    tenantId: tenantId ?? undefined,
     keyId,
     keyHash,
     scopes,
     rateLimit,
     status: (asString(item.status) as ApiKeyRecord['status'] | null) ?? 'ACTIVE',
+    isSandbox: (item.isSandbox as boolean | undefined) ?? (parsedDesc.isSandbox as boolean | undefined) ?? false,
     createdAt: asString(item.createdAt) ?? new Date(0).toISOString(),
     createdBy,
     revokedAt: asString(item.revokedAt) ?? undefined,
@@ -405,7 +415,14 @@ function asScopeArray(value: unknown): ApiKeyScope[] | null {
 }
 
 function deriveBrandId(pK: unknown): string | null {
-  return typeof pK === 'string' && pK.startsWith('BRAND#') ? pK.slice('BRAND#'.length) : null;
+  if (typeof pK !== 'string') return null;
+  if (pK.startsWith('BRAND#')) return pK.slice('BRAND#'.length);
+  if (pK.startsWith('TENANT#')) return 'GLOBAL'; // Placeholder for tenant-wide keys
+  return null;
+}
+
+function deriveTenantId(pK: unknown): string | null {
+  return typeof pK === 'string' && pK.startsWith('TENANT#') ? pK.slice('TENANT#'.length) : null;
 }
 
 function deriveKeyId(sK: unknown): string | null {

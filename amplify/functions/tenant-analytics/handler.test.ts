@@ -100,7 +100,7 @@ function makeTenantItem(rawKey: string, overrides: Record<string, unknown> = {})
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
-    path: '/analytics/segments',
+    path: '/v1/analytics/segments',
     httpMethod: 'GET',
     headers: { 'x-api-key': RAW_KEY },
     queryStringParameters: { brandId: 'woolworths', period: '2026-03' },
@@ -230,7 +230,7 @@ describe('tenant-analytics handler', () => {
   it('returns 404 for an unknown route', async () => {
     setupMocks([]);
     const res = await handler(
-      makeEvent({ path: '/analytics/unknown' }),
+      makeEvent({ path: '/v1/analytics/unknown' }),
       {} as never,
       {} as never,
     );
@@ -435,7 +435,7 @@ describe('GET /analytics/subscriber-count', () => {
     });
 
     const res = await handler(
-      makeEvent({ path: '/analytics/subscriber-count', queryStringParameters: { brandId: 'woolworths' } }),
+      makeEvent({ path: '/v1/analytics/subscriber-count', queryStringParameters: { brandId: 'woolworths' } }),
       {} as never,
       {} as never,
     );
@@ -446,7 +446,7 @@ describe('GET /analytics/subscriber-count', () => {
   it('returns 403 when brandId is not in tenant brandIds', async () => {
     setupMocksSubscriberCount(99);
     const res = await handler(
-      makeEvent({ path: '/analytics/subscriber-count', queryStringParameters: { brandId: 'not-allowed' } }),
+      makeEvent({ path: '/v1/analytics/subscriber-count', queryStringParameters: { brandId: 'not-allowed' } }),
       {} as never,
       {} as never,
     );
@@ -457,7 +457,7 @@ describe('GET /analytics/subscriber-count', () => {
   it('returns 400 when brandId query param is absent', async () => {
     setupMocksSubscriberCount(0);
     const res = await handler(
-      makeEvent({ path: '/analytics/subscriber-count', queryStringParameters: null }),
+      makeEvent({ path: '/v1/analytics/subscriber-count', queryStringParameters: null }),
       {} as never,
       {} as never,
     );
@@ -470,7 +470,7 @@ describe('GET /analytics/subscriber-count', () => {
   it('returns 200 with subscriberCount from COUNT response', async () => {
     setupMocksSubscriberCount(42);
     const res = await handler(
-      makeEvent({ path: '/analytics/subscriber-count', queryStringParameters: { brandId: 'woolworths', period: '2026-03' } }),
+      makeEvent({ path: '/v1/analytics/subscriber-count', queryStringParameters: { brandId: 'woolworths', period: '2026-03' } }),
       {} as never,
       {} as never,
     );

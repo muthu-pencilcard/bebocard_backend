@@ -2,6 +2,10 @@ import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
 import { cardManagerFn } from '../functions/card-manager/resource';
 import { geofenceHandlerFn } from '../functions/geofence-handler/resource';
 import { subscriptionProxyFn } from '../functions/subscription-proxy/resource';
+import { exporterFn } from '../functions/user-data-exporter/resource';
+import { giftCardHandlerFn } from '../functions/gift-card-handler/resource';
+import { remoteConfigHandlerFn } from '../functions/remote-config-handler/resource';
+import { clickTrackingHandlerFn } from '../functions/click-tracking-handler/resource';
 
 const schema = a.schema({
   // ── User data: loyalty cards, receipts, invoices, gift cards, segments ───
@@ -21,9 +25,27 @@ const schema = a.schema({
     .identifier(['pK', 'sK'])
     .secondaryIndexes(index => [
       index('primaryCat').sortKeys(['createdAt']).queryField('userDataByCategory'),
+      index('subCategory').sortKeys(['createdAt']).queryField('userDataBySubCategory'),
     ])
     .authorization(allow => [
       allow.owner(),
+    ]),
+
+  // ── Analytics reporting: daily snapshots, trend metrics (P2-17) ────────────
+  ReportDataEvent: a.model({
+    pK: a.string().required(),   // REPORT#<brandId> | ANALYTICS#GLOBAL
+    sK: a.string().required(),   // DAILY#<date> | WEEKLY#<date> | MONTHLY#<date>
+    eventType: a.string(),       // SEGMENT_DAILY | REVENUE_DAILY | ...
+    status: a.string(),          // ACTIVE | SUPPRESSED
+    desc: a.json(),              // metrics: segment distribution, spend totals, visit frequency
+    createdAt: a.datetime(),
+    updatedAt: a.datetime(),
+  })
+    .identifier(['pK', 'sK'])
+    .authorization(allow => [
+      // Only readable by brand-scoped roles through the portal API, 
+      // never directly from the client.
+      allow.group('admin'),
     ]),
 
   // ── Reference data: tenants, brands, portal memberships, categories, API keys ─
@@ -93,6 +115,7 @@ const schema = a.schema({
       customBrandName: a.string(),
       customBrandColor: a.string(),
       isDefault: a.boolean(),   // defaults to true if first card for brand, else false
+      barcodeType: a.string(),
     })
     .returns(a.json())
     .handler(a.handler.function(cardManagerFn))
@@ -127,7 +150,29 @@ const schema = a.schema({
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
+  updateIdentity: a.mutation()
+    .arguments({
+      globalSnoozeStart: a.string(),
+      globalSnoozeEnd: a.string(),
+      lastActiveHour: a.integer(),
+      displayName: a.string(),
+      email: a.string(),
+      phone: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
   rotateQR: a.mutation()
+    .arguments({})
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // Idempotent token refresh: returns current secondaryULID if still valid,
+  // rotates if expired, or creates fresh if no IDENTITY record exists.
+  // Always returns serverTime so the client can correct clock skew.
+  getOrRefreshIdentity: a.mutation()
     .arguments({})
     .returns(a.json())
     .handler(a.handler.function(cardManagerFn))
@@ -362,6 +407,32 @@ const schema = a.schema({
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
+  // Gift Card Marketplace v2 (Stripe-integrated)
+  purchaseForSelf: a.mutation()
+    .arguments({
+      brandId: a.string().required(),
+      skuId: a.string().required(),
+      denomination: a.float().required(),
+      currency: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(giftCardHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  purchaseAsGift: a.mutation()
+    .arguments({
+      brandId: a.string().required(),
+      skuId: a.string().required(),
+      denomination: a.float().required(),
+      currency: a.string(),
+      recipientEmail: a.string().required(),
+      senderDisplayName: a.string(),
+      message: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(giftCardHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
   // ── SMB Loyalty-as-a-Service stamp cards (Phase 11) ──────────────────────
   // User-facing read access to their stamp card state. Mutations are performed
   // by brand backends via the SMB REST API (smb-handler Lambda).
@@ -422,6 +493,37 @@ const schema = a.schema({
     })
     .returns(a.json().array())
     .handler(a.handler.function(geofenceHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  // GDPR Data Portability & Erasure (P2-5)
+  recordBipaConsent: a.mutation()
+    .arguments({
+      textVersion: a.string().required(),
+    })
+    .returns(a.boolean())
+    .authorization(allow => [allow.authenticated()]),
+
+  startDataExport: a.mutation()
+    .arguments({})
+    .returns(a.string())
+    .handler(a.handler.function(exporterFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  deleteUserAccount: a.mutation()
+    .arguments({})
+    .returns(a.string())
+    .handler(a.handler.function(exporterFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  trackClick: a.mutation()
+    .arguments({
+      offerId: a.string().required(),
+      source: a.string(),
+      affiliateId: a.string(),
+      permULID: a.string().required(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(clickTrackingHandlerFn))
     .authorization(allow => [allow.authenticated()]),
 });
 

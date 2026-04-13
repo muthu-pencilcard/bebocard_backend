@@ -12,7 +12,10 @@ export const auth = defineAuth({
   },
   userAttributes: {
     email: { required: true, mutable: true },
+    birthdate: { required: true, mutable: true },
     'custom:permULID': { dataType: 'String', mutable: false },
+    'custom:ageBucket': { dataType: 'String', mutable: true },
+    'custom:parentEmail': { dataType: 'String', mutable: true },
   },
   triggers: {
     postConfirmation: postConfirmationFn,

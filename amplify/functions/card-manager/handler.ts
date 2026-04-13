@@ -1,6 +1,6 @@
 import type { AppSyncResolverHandler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import https from 'https';
 import { monotonicFactory } from 'ulid';
 import { withAuditLog, writeAuditLog } from '../../shared/audit-logger';
@@ -47,6 +47,7 @@ type Args = {
   customBrandName?: string;
   customBrandColor?: string;
   isDefault?: boolean;
+  barcodeType?: string;
   cardSK?: string;
   // Gift cards
   brandName?: string;
@@ -88,6 +89,17 @@ type Args = {
   // Gift card marketplace (Phase 13)
   catalogItemId?: string;
   denomination?: number;
+  textVersion?: string;
+  // Identity updates (P2-13)
+  globalSnoozeStart?: string;
+  globalSnoozeEnd?: string;
+  lastActiveHour?: number;
+  displayName?: string;
+  email?: string;
+  phone?: string;
+  // Referral tracking (P1-10)
+  storeId?: string;
+  attributionBrandId?: string;
 };
 
 const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
@@ -126,7 +138,10 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     case 'addLoyaltyCard': return addCard(permULID, owner, args);
     case 'removeLoyaltyCard': return removeCard(permULID, args.cardSK!);
     case 'setDefaultCard': return setDefaultCard(permULID, args.cardSK!, args.brandId!);
+    case 'updateIdentity':
+      return await updateIdentityHandler(permULID, args);
     case 'rotateQR': return rotateQR(permULID);
+    case 'getOrRefreshIdentity': return getOrRefreshIdentity(permULID);
     // Subscriptions (legacy single-toggle + new granular)
     case 'subscribeToOffers': return setSubscription(permULID, owner, args.brandId!, true);
     case 'unsubscribeFromOffers': return setSubscription(permULID, owner, args.brandId!, false);
@@ -146,8 +161,8 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     case 'removeReceipt': return archiveRecord(permULID, args.receiptSK!);
     // Newsletters + catalogues + offers engagement
     case 'markNewsletterRead': return markNewsletterRead(permULID, args.newsletterSK!);
-    case 'markCatalogueViewed': return markCatalogueViewed(permULID, args.catalogueSK!);
-    case 'markOfferEngaged': return markOfferEngaged(permULID, args.offerSK!);
+    case 'markCatalogueViewed': return markCatalogueViewed(permULID, (args as any).catalogueSK!);
+    case 'markOfferEngaged': return markOfferEngaged(permULID, (args as any).offerSK!);
     // Payment routing
     case 'respondToCheckout': return respondToCheckout(permULID, args.orderId!, args.approved!, args.paymentToken);
     // Consent-gated identity release
@@ -167,6 +182,7 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     case 'syncGiftCardBalance': return syncGiftCardBalance(permULID, args.cardSK!, args.brandId!);
     // GDPR — right to erasure
     case 'deleteAccount': return deleteAccount(permULID);
+    case 'recordBipaConsent': return recordBipaConsent(permULID, owner, args.textVersion!);
     default: throw new Error(`Unknown operation: ${operation}`);
   }
 };
@@ -188,7 +204,7 @@ function parseRecord(value: unknown): Record<string, unknown> {
 async function addCard(permULID: string, owner: string, args: Args) {
   const validation = AddLoyaltyCardSchema.safeParse(args);
   if (!validation.success) throw new Error(validation.error.issues[0]?.message ?? 'Invalid card input');
-  const { brandId, cardNumber, cardLabel, isCustom, customBrandName, customBrandColor } = args;
+  const { brandId, cardNumber, cardLabel, isCustom, customBrandName, customBrandColor, barcodeType, storeId, attributionBrandId } = args;
   const now = new Date().toISOString();
   const cardSK = `CARD#${isCustom ? 'custom' : brandId}#${cardNumber}`;
 
@@ -220,8 +236,11 @@ async function addCard(permULID: string, owner: string, args: Args) {
         cardNumber,
         cardLabel: cardLabel ?? (isCustom ? customBrandName : (brandProfile.name ?? brandProfile.brandName)),
         isCustom: !!isCustom,
+        barcodeType: barcodeType ?? (brandProfile.barcodeType as string) ?? 'EAN13',
         pointsBalance: 0,
         addedAt: now,
+        storeId: storeId ?? null,
+        attributionBrandId: attributionBrandId ?? null,
       }),
       createdAt: now,
       updatedAt: now,
@@ -310,13 +329,137 @@ function rotatesAtForFrequency(frequency: RotationFrequency): string {
   return new Date(Date.now() + ms).toISOString();
 }
 
+// ── Get or refresh identity (idempotent token protocol) ───────────────────────
+//
+// Decision tree:
+//   IDENTITY exists + not expired → return as-is (no write, no rotation)
+//   IDENTITY exists + expired     → delegate to rotateQR (conditional write, race-safe)
+//   IDENTITY missing              → createFreshIdentity (atomic IDENTITY + SCAN# creation)
+//
+// Always returns serverTime so the client can detect and correct clock skew.
+
+async function getOrRefreshIdentity(permULID: string) {
+  const now = new Date();
+  const serverTime = now.toISOString();
+
+  const identity = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+  }));
+
+  if (identity.Item) {
+    const expiry = new Date(identity.Item.rotatesAt ?? 0);
+
+    // Still valid — return current token, no write needed
+    if (expiry > now) {
+      return {
+        secondaryULID: identity.Item.secondaryULID,
+        rotatesAt: identity.Item.rotatesAt,
+        status: identity.Item.status,
+        serverTime,
+        generated: false,
+      };
+    }
+
+    // Expired — rotate. rotateQR uses conditional writes so concurrent calls
+    // are safe: the losing device receives the winning rotation value.
+    const rotated = await rotateQR(permULID);
+    return {
+      secondaryULID: rotated.newSecondaryULID,
+      rotatesAt: rotated.rotatesAt,
+      status: identity.Item.status,
+      serverTime,
+      generated: true,
+    };
+  }
+
+  // No IDENTITY record — post-confirmation Lambda didn't run or account was erased.
+  // Create atomically so concurrent first-opens don't produce two live SCAN# entries.
+  return createFreshIdentity(permULID, serverTime);
+}
+
+// ── Create identity from scratch (first-open / post-erasure) ──────────────────
+//
+// Atomic: both IDENTITY and SCAN# are written in one transaction.
+// Race-safe: attribute_not_exists conditions on both writes. If two devices race,
+// one wins and the other reads back the winner's values.
+
+async function createFreshIdentity(permULID: string, serverTime: string) {
+  const newSecondaryULID = ulid();
+  const rotatesAt = rotatesAtForFrequency('every_24h');
+
+  try {
+    await dynamo.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: USER_TABLE,
+            Item: {
+              pK: `USER#${permULID}`,
+              sK: 'IDENTITY',
+              eventType: 'IDENTITY',
+              status: 'ACTIVE',
+              primaryCat: 'identity',
+              subCategory: 'wallet',
+              secondaryULID: newSecondaryULID,
+              rotatesAt,
+              desc: JSON.stringify({ rotationFrequency: 'every_24h' }),
+              createdAt: serverTime,
+              updatedAt: serverTime,
+            },
+            ConditionExpression: 'attribute_not_exists(pK)',
+          },
+        },
+        {
+          Put: {
+            TableName: ADMIN_TABLE,
+            Item: {
+              pK: `SCAN#${newSecondaryULID}`,
+              sK: permULID,
+              eventType: 'SCAN_INDEX',
+              status: 'ACTIVE',
+              desc: JSON.stringify({ cards: [], createdAt: serverTime }),
+              createdAt: serverTime,
+              updatedAt: serverTime,
+            },
+            ConditionExpression: 'attribute_not_exists(pK)',
+          },
+        },
+      ],
+    }));
+
+    return { secondaryULID: newSecondaryULID, rotatesAt, status: 'ACTIVE', serverTime, generated: true };
+
+  } catch (err: unknown) {
+    const error = err as { name?: string; CancellationReasons?: Array<{ Code: string }> };
+
+    if (error.name === 'TransactionCanceledException') {
+      // Concurrent first-open won the race — read back their result
+      const fresh = await dynamo.send(new GetCommand({
+        TableName: USER_TABLE,
+        Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+      }));
+      if (fresh.Item) {
+        return {
+          secondaryULID: fresh.Item.secondaryULID,
+          rotatesAt: fresh.Item.rotatesAt,
+          status: fresh.Item.status,
+          serverTime,
+          generated: false,
+        };
+      }
+    }
+    throw err;
+  }
+}
+
 // ── Rotate QR (new secondaryULID) ─────────────────────────────────────────────
 
 async function rotateQR(permULID: string) {
   const now = new Date().toISOString();
   const newSecondaryULID = ulid();
 
-  // Read current IDENTITY to get old secondaryULID + stored frequency preference
+  // 1. Read current IDENTITY to get old secondaryULID + stored frequency preference
   const identity = await dynamo.send(new GetCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
@@ -330,70 +473,88 @@ async function rotateQR(permULID: string) {
     : 'every_24h') as RotationFrequency;
   const newRotatesAt = rotatesAtForFrequency(frequency);
 
-  // Read old scan index to copy card list
+  // 2. Read old scan index to copy card list
   const oldIndex = await dynamo.send(new GetCommand({
     TableName: ADMIN_TABLE,
     Key: { pK: `SCAN#${oldSecondaryULID}`, sK: permULID },
   }));
-  const oldIndexDesc = JSON.parse(oldIndex.Item?.desc ?? '{}');
+  const oldCards = JSON.parse(oldIndex.Item?.desc ?? '{}').cards ?? [];
 
-  // Write new scan index
-  await dynamo.send(new PutCommand({
-    TableName: ADMIN_TABLE,
-    Item: {
-      pK: `SCAN#${newSecondaryULID}`,
-      sK: permULID,
-      eventType: 'SCAN_INDEX',
-      status: 'ACTIVE',
-      desc: JSON.stringify({ cards: oldIndexDesc.cards ?? [], createdAt: now }),
-      createdAt: now,
-      updatedAt: now,
-    },
-  }));
-
-  // Revoke old scan index
-  await dynamo.send(new UpdateCommand({
-    TableName: ADMIN_TABLE,
-    Key: { pK: `SCAN#${oldSecondaryULID}`, sK: permULID },
-    UpdateExpression: 'SET #s = :revoked, updatedAt = :now',
-    ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: { ':revoked': 'REVOKED', ':now': now },
-  }));
-
-  // Update IDENTITY — conditional on secondaryULID still matching what we read.
-  // If another device already rotated, this throws ConditionalCheckFailedException.
-  // The caller catches it, re-reads AdminDataEvent, and uses the already-rotated ID.
+  // 3. Atomically update IDENTITY, create NEW Scan Index, and revoke OLD Scan Index.
+  // Using TransactWriteCommand ensures no dangling SCAN entries exist if the IDENTITY
+  // update fails due to a concurrent rotation.
   try {
-    await dynamo.send(new UpdateCommand({
-      TableName: USER_TABLE,
-      Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
-      UpdateExpression: 'SET secondaryULID = :new, rotatesAt = :ra, updatedAt = :now',
-      ConditionExpression: 'secondaryULID = :old',
-      ExpressionAttributeValues: {
-        ':new': newSecondaryULID,
-        ':ra': newRotatesAt,
-        ':old': oldSecondaryULID,
-        ':now': now,
-      },
+    await dynamo.send(new TransactWriteCommand({
+      TransactItems: [
+        // a. Create new Scan Index (Condition: must not already exist)
+        {
+          Put: {
+            TableName: ADMIN_TABLE,
+            Item: {
+              pK: `SCAN#${newSecondaryULID}`,
+              sK: permULID,
+              eventType: 'SCAN_INDEX',
+              status: 'ACTIVE',
+              desc: JSON.stringify({ cards: oldCards, createdAt: now }),
+              createdAt: now,
+              updatedAt: now,
+            },
+            ConditionExpression: 'attribute_not_exists(pK)',
+          },
+        },
+        // b. Update IDENTITY (Condition: secondaryULID must still be the old one)
+        {
+          Update: {
+            TableName: USER_TABLE,
+            Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+            UpdateExpression: 'SET secondaryULID = :new, rotatesAt = :ra, updatedAt = :now',
+            ConditionExpression: 'secondaryULID = :old',
+            ExpressionAttributeValues: {
+              ':new': newSecondaryULID,
+              ':ra': newRotatesAt,
+              ':old': oldSecondaryULID,
+              ':now': now,
+            },
+          },
+        },
+        // c. Revoke old Scan Index
+        {
+          Update: {
+            TableName: ADMIN_TABLE,
+            Key: { pK: `SCAN#${oldSecondaryULID}`, sK: permULID },
+            UpdateExpression: 'SET #s = :revoked, updatedAt = :now',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: { ':revoked': 'REVOKED', ':now': now },
+          },
+        },
+      ],
     }));
   } catch (err: unknown) {
-    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
-      // Another device already rotated — return current values from IDENTITY
-      const fresh = await dynamo.send(new GetCommand({
-        TableName: USER_TABLE,
-        Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
-      }));
-      return {
-        success: true,
-        alreadyRotated: true,
-        newSecondaryULID: fresh.Item?.secondaryULID,
-        rotatesAt: fresh.Item?.rotatesAt,
-      };
+    const error = err as { name?: string; CancellationReasons?: Array<{ Code: string }> };
+    
+    // Check if cancellation reason was a condition check failure
+    if (error.name === 'TransactionCanceledException') {
+      const reasons = error.CancellationReasons ?? [];
+      const identityConditionFailed = reasons[1]?.Code === 'ConditionalCheckFailed';
+      
+      if (identityConditionFailed) {
+        // Another device already rotated — re-read and return the current authoritative values
+        const fresh = await dynamo.send(new GetCommand({
+          TableName: USER_TABLE,
+          Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+        }));
+        return {
+          success: true,
+          alreadyRotated: true,
+          newSecondaryULID: fresh.Item?.secondaryULID,
+          rotatesAt: fresh.Item?.rotatesAt,
+        };
+      }
     }
     throw err;
   }
 
-  // Write rotation log to UserDataEvent so the app can show rotation history
+  // 4. Write rotation log to UserDataEvent (non-critical, outside transaction)
   await dynamo.send(new PutCommand({
     TableName: USER_TABLE,
     Item: {
@@ -406,7 +567,7 @@ async function rotateQR(permULID: string) {
       createdAt: now,
       updatedAt: now,
     },
-  }));
+  })).catch(err => console.error('[card-manager] Failed to write rotation log:', err));
 
   return { success: true, alreadyRotated: false, newSecondaryULID, rotatesAt: newRotatesAt, frequency };
 }
@@ -1549,8 +1710,6 @@ async function deleteAccount(permULID: string) {
   } while (lastKey);
 
   // 2. Remove SCAN# index entry (identity resolution index)
-  // The SCAN record uses secondaryULID as pK — we need to find it first via the IDENTITY record.
-  // We already deleted USER#<permULID>/IDENTITY above, but the ADMIN index is separate.
   const adminScanRes = await dynamo.send(new QueryCommand({
     TableName: ADMIN_TABLE,
     KeyConditionExpression: 'pK = :pk',
@@ -1590,9 +1749,67 @@ async function deleteAccount(permULID: string) {
   return { deleted: true, deletedAt: now };
 }
 
+async function recordBipaConsent(permULID: string, owner: string, textVersion: string) {
+  const now = new Date().toISOString();
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: 'BIPA_CONSENT#PLATFORM',
+      eventType: 'CONSENT',
+      status: 'ACTIVE',
+      primaryCat: 'bipa_disclosure',
+      owner,
+      desc: JSON.stringify({
+        textVersion,
+        consentAt: now,
+        jurisdiction: 'US-IL',
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+  return true;
+}
+
 function safeJsonParse(value: unknown): Record<string, unknown> {
   if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
   if (typeof value !== 'string' || !value) return {};
   try { return JSON.parse(value) as Record<string, unknown>; }
   catch { return {}; }
+}
+
+async function updateIdentityHandler(permULID: string, args: Args) {
+  const { globalSnoozeStart, globalSnoozeEnd, lastActiveHour, displayName, email, phone } = args;
+  const now = new Date().toISOString();
+
+  // Get current identity to merge
+  const res = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' }
+  }));
+  
+  const currentDesc = parseRecord(res.Item?.desc);
+  const updatedDesc = {
+    ...currentDesc,
+    ...(globalSnoozeStart !== undefined ? { globalSnoozeStart } : {}),
+    ...(globalSnoozeEnd !== undefined ? { globalSnoozeEnd } : {}),
+    ...(lastActiveHour !== undefined ? { lastActiveHour } : {}),
+    ...(displayName !== undefined ? { displayName } : {}),
+    ...(email !== undefined ? { email } : {}),
+    ...(phone !== undefined ? { phone } : {}),
+    updatedAt: now,
+  };
+
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    ExpressionAttributeValues: {
+      ':desc': JSON.stringify(updatedDesc),
+      ':now': now
+    }
+  }));
+
+  return { success: true, updatedFields: Object.keys(args).filter(k => (args as any)[k] !== undefined) };
 }

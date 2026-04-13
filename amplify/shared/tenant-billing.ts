@@ -115,7 +115,7 @@ export async function getTenantStateForBrand(
   dynamo: DynamoDBDocumentClient,
   refTable: string,
   brandId: string,
-): Promise<{ tenantId: string | null; tier: TenantTier; active: boolean; includedEventsPerMonth: number | null }> {
+): Promise<{ tenantId: string | null; tier: TenantTier; active: boolean; includedEventsPerMonth: number | null; notifCap: number }> {
   const brandRes = await dynamo.send(new GetCommand({
     TableName: refTable,
     Key: { pK: `BRAND#${brandId}`, sK: 'profile' },
@@ -124,7 +124,7 @@ export async function getTenantStateForBrand(
   const tenantId = typeof brandDesc.tenantId === 'string' && brandDesc.tenantId.length > 0
     ? brandDesc.tenantId
     : null;
-  if (!tenantId) return { tenantId: null, tier: 'base', active: true, includedEventsPerMonth: null };
+  if (!tenantId) return { tenantId: null, tier: 'base', active: true, includedEventsPerMonth: null, notifCap: 3 };
 
   const tenantRes = await dynamo.send(new GetCommand({
     TableName: refTable,
@@ -141,6 +141,7 @@ export async function getTenantStateForBrand(
     tier,
     active: status === 'ACTIVE' && billingStatus !== 'SUSPENDED' && !graceExpired,
     includedEventsPerMonth: parseTenantIncludedEvents(tenantDesc.includedEventsPerMonth, tier),
+    notifCap: (tenantDesc.notifCap as number | undefined) ?? 3,
   };
 }
 

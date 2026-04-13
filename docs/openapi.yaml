@@ -1,0 +1,186 @@
+openapi: 3.0.3
+info:
+  title: BeboCard Public API
+  description: |
+    BeboCard is a privacy-first loyalty wallet. This API allows brand partners to integrate with the BeboCard scan-and-receipt flow.
+    
+    ### Environments
+    - **Production**: `https://api.bebocard.com/v1`
+    - **Sandbox**: Use a Sandbox API Key and `secondaryULID: SANDBOX_USER_123`
+  version: 1.0.0
+  contact:
+    name: BeboCard Engineering
+    email: developers@bebocard.me
+
+servers:
+  - url: https://api.bebocard.com/v1
+    description: Production API
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /scan:
+    post:
+      summary: Verify Loyalty Status
+      description: Called by the brand POS system to resolve a BeboCard barcode into a loyalty card ID.
+      tags:
+        - Scan Path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Not Found (Barcode expired or invalid)
+
+  /receipt:
+    post:
+      summary: Submit Digital Receipt
+      description: Asynchronously process a receipt for a user.
+      tags:
+        - Receipt Path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiptRequest'
+      responses:
+        '202':
+          description: Accepted (Processing)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  receiptId:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /health:
+    get:
+      summary: API Health Check
+      description: Public endpoint to verify API availability (for StatusPage monitoring).
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: OPERATIONAL
+
+components:
+  schemas:
+    ScanRequest:
+      type: object
+      required:
+        - secondaryULID
+        - storeBrandLoyaltyName
+      properties:
+        secondaryULID:
+          type: string
+          description: The rotating barcode value scanned at POS.
+        storeBrandLoyaltyName:
+          type: string
+          description: The brand identifier (e.g., 'woolworths').
+        requestedFields:
+          type: array
+          items:
+            type: string
+            enum: [email_alias, first_name, last_name, phone_alias]
+          description: Permissioned attributes to release only if consent is granted.
+
+    ScanResponse:
+      type: object
+      properties:
+        hasLoyaltyCard:
+          type: boolean
+        loyaltyId:
+          type: string
+          description: The user's card number for this brand.
+        tier:
+          type: string
+          description: Pre-computed reward tier.
+        spendBucket:
+          type: string
+          enum: ["<100", "100-200", "200-500", "500+"]
+        attributes:
+          type: object
+          description: Key-value pairs of requested PII aliases.
+        consentRequired:
+          type: boolean
+          description: If true, the user must approve the attribute release via the BeboCard app.
+        requestId:
+          type: string
+          description: UUID for tracking a pending consent request.
+
+    ReceiptRequest:
+      type: object
+      required:
+        - secondaryULID
+        - merchant
+        - amount
+        - purchaseDate
+      properties:
+        secondaryULID:
+          type: string
+        merchant:
+          type: string
+        amount:
+          type: number
+        purchaseDate:
+          type: string
+          format: date-time
+        brandId:
+          type: string
+        loyaltyCardId:
+          type: string
+        pointsEarned:
+          type: number
+        items:
+          type: array
+          items:
+            type: object
+        supplierTaxId:
+          type: string
+          description: Brand tax identifier (e.g. ABN).
+        supplierTaxIdType:
+          type: string
+          enum: [ABN, VAT, TRN, GSTIN, EIN, OTHER]
+
+  responses:
+    Unauthorized:
+      description: API Key is missing or invalid.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string

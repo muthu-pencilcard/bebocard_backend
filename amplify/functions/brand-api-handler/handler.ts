@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
-  PutCommand, GetCommand, UpdateCommand, QueryCommand, ScanCommand,
+  PutCommand, GetCommand, UpdateCommand, QueryCommand, ScanCommand, DeleteCommand, BatchGetCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
@@ -32,6 +32,11 @@ import {
   type TenantTier,
   type UsageType,
 } from '../../shared/tenant-billing';
+import {
+  isNotificationCapReached,
+  incrementNotificationCounter,
+  getRelevancePriority
+} from '../shared/notification-utils';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ulid = monotonicFactory();
@@ -218,6 +223,44 @@ const _handler: APIGatewayProxyHandler = async (event) => {
     if (method === 'GET') return getSubscriptionCatalogEntry(event, auth.brandId);
   }
 
+  // ── Custom segments ──────────────────────────────────────────────────────
+  if (path.includes('/segments')) {
+    const auth = await authGuard(event, 'analytics');
+    if (!auth) return err(event, 401, 'Unauthorized');
+    if (method === 'POST') return createSegmentDef(event, auth.brandId);
+    if (method === 'GET') return listSegmentDefs(event, auth.brandId);
+    if (method === 'PUT') return updateSegmentDef(event, auth.brandId);
+    if (method === 'DELETE') return deleteSegmentDef(event, auth.brandId);
+  }
+
+  // ── Card Config (loyalty template opt-in) ───────────────────────────────
+  // Brand tenants use this to opt into an approved loyalty card template.
+  // Requires admin approval before the card config becomes discoverable to users.
+  if (path.includes('/card-config')) {
+    // Admin routes — super_admin only.
+    // Accepts: (a) ADMIN_API_KEY header, or (b) internal portal call with _internalBrandId='__admin__'
+    if (path.includes('/admin/card-configs')) {
+      const eventAny = event as unknown as Record<string, string>;
+      const isInternalAdmin =
+        eventAny._internalBrandId === '__admin__' &&
+        verifyInternalSignature('__admin__', eventAny._internalTimestamp ?? '', eventAny._internalSig ?? '');
+      if (!isInternalAdmin && !verifyAdminKey(event)) return err(event, 401, 'Unauthorized');
+      if (method === 'GET') return adminListCardConfigs(event);
+      const approveMatch = path.match(/\/admin\/card-configs\/([^/]+)\/([^/]+)\/(approve|reject|revoke)$/);
+      if (approveMatch) {
+        const [, brandId, templateId, action] = approveMatch;
+        return adminActOnCardConfig(event, brandId, templateId, action as 'approve' | 'reject' | 'revoke');
+      }
+    }
+    // Brand-scoped routes — internal call (portal, tenant_admin/brand_admin) or API key
+    const auth = await authGuard(event, 'card_config');
+    if (!auth) return err(event, 401, 'Unauthorized');
+    if (method === 'POST') return createCardConfig(event, auth.brandId);
+    if (method === 'GET') return listCardConfigs(event, auth.brandId);
+    const deleteMatch = path.match(/\/card-config\/([^/]+)$/);
+    if (method === 'DELETE' && deleteMatch) return deleteCardConfig(event, auth.brandId, deleteMatch[1]);
+  }
+
   return err(event, 404, 'Unknown route');
 };
 
@@ -291,7 +334,7 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
     title: `New offer from your loyalty brand`,
     body: body.title as string,
     data: { type: 'NEW_OFFER', offerId, brandId },
-  }).then(async count => {
+  }, undefined, undefined, tenantState.notifCap, (body as any).campaignType ?? 'untargeted').then(async count => {
     const fanoutAt = new Date().toISOString();
     await Promise.all([
       // Store delivery count on the offer record so the portal can surface it
@@ -447,7 +490,7 @@ async function sendNewsletter(event: APIGatewayProxyEvent, brandId: string) {
         updatedAt: now,
       },
     }));
-  }).then(async count => {
+  }, undefined, tenantState.notifCap, 'untargeted').then(async count => {
     const fanoutAt = new Date().toISOString();
     await Promise.all([
       dynamo.send(new UpdateCommand({
@@ -575,6 +618,8 @@ async function createCatalogue(event: APIGatewayProxyEvent, brandId: string) {
       }));
     },
     async (permULID) => matchesTargetSegments(permULID, brandId, payload.targetSegments),
+    tenantState.notifCap,
+    'untargeted'
   ).then(async count => {
     const fanoutAt = new Date().toISOString();
     await Promise.all([
@@ -970,7 +1015,7 @@ function parseRecord(value: unknown): Record<string, unknown> {
   }
 }
 
-async function getTenantStateForBrand(brandId: string): Promise<{ tenantId: string | null; tier: TenantTier; active: boolean; includedEventsPerMonth: number | null }> {
+async function getTenantStateForBrand(brandId: string): Promise<{ tenantId: string | null; tier: TenantTier; active: boolean; includedEventsPerMonth: number | null; notifCap: number }> {
   return getSharedTenantStateForBrand(dynamo, REFDATA_TABLE, brandId);
 }
 
@@ -1024,6 +1069,8 @@ async function fanOutToSubscribers(
   notification: { title: string; body: string; data?: Record<string, string> },
   perSubscriberFn?: (permULID: string) => Promise<void>,
   shouldSendToUser?: (permULID: string) => Promise<boolean>,
+  notifCap = 3,
+  campaignType: 'untargeted' | 'acquisition' | 'loyalty_reward' = 'untargeted'
 ): Promise<number> {
   let recipientCount = 0;
   let lastKey: Record<string, unknown> | undefined;
@@ -1059,6 +1106,52 @@ async function fanOutToSubscribers(
 
         const permULID = (item.pK as string).replace('USER#', '');
 
+        // 1. Notification Intelligence (P2-13)
+        const [segmentRes, identityRes] = await Promise.all([
+          dynamo.send(new GetCommand({
+            TableName: USER_TABLE,
+            Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
+          })),
+          dynamo.send(new GetCommand({
+            TableName: USER_TABLE,
+            Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+          }))
+        ]);
+
+        const segment = segmentRes.Item?.desc ? JSON.parse(segmentRes.Item.desc) : null;
+        const identity = identityRes.Item?.desc ? JSON.parse(identityRes.Item.desc) : {};
+        const priority = getRelevancePriority(segment, campaignType);
+
+        if (priority === 'SKIP') return;
+
+        // 2. Frequency Capping (P2-13)
+        // Note: Acquisition offers waive the cap to ensure first-time engagement
+        if (campaignType !== 'acquisition') {
+          const capReached = await isNotificationCapReached(dynamo, USER_TABLE, permULID, brandId, notifCap);
+          if (capReached) {
+            // Deprioritized users are strictly capped. Normal/Priority users also capped but logged differently if needed.
+            console.info(`[fanOut] CAP_REACHED for ${permULID} (brand: ${brandId}, cap: ${notifCap})`);
+            return;
+          }
+        }
+
+        // 3. Global Snooze (Quiet Hours) - P2-13
+        // Stored in IDENTITY as HH:MM UTC
+        if (identity.globalSnoozeStart && identity.globalSnoozeEnd) {
+          const now = new Date();
+          const currentTime = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+          const { globalSnoozeStart, globalSnoozeEnd } = identity;
+
+          const isSnoozed = globalSnoozeStart <= globalSnoozeEnd
+            ? (currentTime >= globalSnoozeStart && currentTime <= globalSnoozeEnd)
+            : (currentTime >= globalSnoozeStart || currentTime <= globalSnoozeEnd);
+
+          if (isSnoozed) {
+            console.info(`[fanOut] SNOOZE_ACTIVE for ${permULID} (${currentTime} is within ${globalSnoozeStart}-${globalSnoozeEnd})`);
+            return;
+          }
+        }
+
         if (preferenceKey === 'offers') {
           const prefRes = await dynamo.send(new GetCommand({
             TableName: USER_TABLE,
@@ -1083,9 +1176,17 @@ async function fanOutToSubscribers(
           await getFirebase().send({
             token,
             notification: { title: notification.title, body: notification.body },
-            data: notification.data,
+            data: { 
+              ...notification.data,
+              priority, // Pass priority to app for potential UI badges
+            },
           });
           recipientCount++;
+          
+          // Increment weekly cap counter on successful send
+          await incrementNotificationCounter(dynamo, USER_TABLE, permULID, brandId).catch(err => {
+            console.warn(`[fanOut] counter increment failed for ${permULID}:`, err);
+          });
         } catch (e) {
           console.error(`[fanOut] FCM failed for ${permULID}:`, e);
         }
@@ -1109,11 +1210,16 @@ async function getBrandProfile(brandId: string): Promise<{ brandName: string; br
   };
 }
 
-function normalizeTargetSegments(targetSegments?: { spendBuckets?: string[]; visitFrequencies?: string[] }) {
+function normalizeTargetSegments(targetSegments?: {
+  spendBuckets?: string[];
+  visitFrequencies?: string[];
+  customSegmentIds?: string[];
+}) {
   const spendBuckets = (targetSegments?.spendBuckets ?? []).filter(Boolean);
   const visitFrequencies = (targetSegments?.visitFrequencies ?? []).filter(Boolean);
-  if (spendBuckets.length === 0 && visitFrequencies.length === 0) return undefined;
-  return { spendBuckets, visitFrequencies };
+  const customSegmentIds = (targetSegments?.customSegmentIds ?? []).filter(Boolean);
+  if (spendBuckets.length === 0 && visitFrequencies.length === 0 && customSegmentIds.length === 0) return undefined;
+  return { spendBuckets, visitFrequencies, customSegmentIds };
 }
 
 function deriveCampaignStatus(validFrom?: string, validTo?: string, storedStatus?: string) {
@@ -1129,20 +1235,477 @@ function deriveCampaignStatus(validFrom?: string, validTo?: string, storedStatus
 async function matchesTargetSegments(
   permULID: string,
   brandId: string,
-  targetSegments?: { spendBuckets?: string[]; visitFrequencies?: string[] },
+  targetSegments?: { spendBuckets?: string[]; visitFrequencies?: string[]; customSegmentIds?: string[] },
 ): Promise<boolean> {
   if (!targetSegments) return true;
 
-  const segmentRes = await dynamo.send(new GetCommand({
-    TableName: USER_TABLE,
-    Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
+  // ── Standard pre-computed segment (spendBucket / visitFrequency) ──────────
+  const hasStandardFilters =
+    (targetSegments.spendBuckets?.length ?? 0) > 0 ||
+    (targetSegments.visitFrequencies?.length ?? 0) > 0;
+
+  if (hasStandardFilters) {
+    const segmentRes = await dynamo.send(new GetCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}` },
+    }));
+
+    if (!segmentRes.Item?.desc) return true; // No segment record yet → inclusive default
+    const desc = JSON.parse(segmentRes.Item.desc);
+    const spendBucket = desc.spendBucket as string | undefined;
+    const visitFrequency = desc.visitFrequency as string | undefined;
+    const spendOk = !targetSegments.spendBuckets?.length || (spendBucket != null && targetSegments.spendBuckets.includes(spendBucket));
+    const visitOk = !targetSegments.visitFrequencies?.length || (visitFrequency != null && targetSegments.visitFrequencies.includes(visitFrequency));
+    if (!spendOk || !visitOk) return false;
+  }
+
+  // ── Custom segment membership check ──────────────────────────────────────
+  const customIds = targetSegments.customSegmentIds ?? [];
+  if (customIds.length === 0) return true;
+
+  // BatchGet all custom segment membership records for this user
+  const keys = [
+    ...customIds.map(id => ({ pK: `USER#${permULID}`, sK: `SEGMENT#${brandId}#CUSTOM#${id}` })),
+    // Also check global (bebocard-level) membership for each custom ID
+    ...customIds.map(id => ({ pK: `USER#${permULID}`, sK: `SEGMENT#bebocard#CUSTOM#${id}` })),
+  ];
+
+  const batchRes = await dynamo.send(new BatchGetCommand({
+    RequestItems: { [USER_TABLE]: { Keys: keys, ProjectionExpression: 'sK, #st', ExpressionAttributeNames: { '#st': 'status' } } },
   }));
 
-  if (!segmentRes.Item?.desc) return true; // No segment record yet → user not yet in cohort → include (inclusive default)
-  const desc = JSON.parse(segmentRes.Item.desc);
-  const spendBucket = desc.spendBucket as string | undefined;
-  const visitFrequency = desc.visitFrequency as string | undefined;
-  const spendOk = !targetSegments.spendBuckets?.length || (spendBucket != null && targetSegments.spendBuckets.includes(spendBucket));
-  const visitOk = !targetSegments.visitFrequencies?.length || (visitFrequency != null && targetSegments.visitFrequencies.includes(visitFrequency));
-  return spendOk && visitOk;
+  const memberItems = batchRes.Responses?.[USER_TABLE] ?? [];
+  const activeSKs = new Set(memberItems.filter(i => i.status === 'ACTIVE').map(i => i.sK as string));
+
+  // User must be ACTIVE in ALL specified custom segments (brand-level OR global counts)
+  return customIds.every(id =>
+    activeSKs.has(`SEGMENT#${brandId}#CUSTOM#${id}`) ||
+    activeSKs.has(`SEGMENT#bebocard#CUSTOM#${id}`),
+  );
+}
+
+// ─── Custom segment CRUD ──────────────────────────────────────────────────────
+
+const SEGMENT_RULE_METRICS = ['visit_count', 'total_spend', 'avg_order_value', 'days_since_last_visit'] as const;
+const SEGMENT_RULE_OPERATORS = ['gte', 'lte', 'between', 'eq'] as const;
+const SEGMENT_RULE_PERIODS = ['day', 'week', 'month', 'quarter'] as const;
+
+function validateSegmentRules(rules: unknown[]): string | null {
+  if (!Array.isArray(rules) || rules.length === 0) return 'rules must be a non-empty array';
+  for (const r of rules) {
+    if (typeof r !== 'object' || r === null) return 'each rule must be an object';
+    const rule = r as Record<string, unknown>;
+    if (!SEGMENT_RULE_METRICS.includes(rule.metric as never)) return `invalid metric: ${rule.metric}`;
+    if (!SEGMENT_RULE_OPERATORS.includes(rule.operator as never)) return `invalid operator: ${rule.operator}`;
+    if (!SEGMENT_RULE_PERIODS.includes(rule.period as never)) return `invalid period: ${rule.period}`;
+    if (typeof rule.value !== 'number') return 'rule.value must be a number';
+    if (rule.operator === 'between' && typeof rule.value2 !== 'number') return 'rule.value2 required for between';
+  }
+  return null;
+}
+
+async function getTenantIdForBrand(brandId: string): Promise<string | null> {
+  const res = await dynamo.send(new QueryCommand({
+    TableName: REFDATA_TABLE,
+    IndexName: 'sK-pK-index',
+    KeyConditionExpression: 'sK = :profile',
+    FilterExpression: 'contains(#brandIds, :brandId)',
+    ExpressionAttributeNames: { '#brandIds': 'brandIds' },
+    ExpressionAttributeValues: { ':profile': 'profile', ':brandId': brandId },
+    Limit: 1,
+  }));
+  if (!res.Items?.[0]) return null;
+  return (res.Items[0].pK as string).replace('TENANT#', '');
+}
+
+async function createSegmentDef(event: APIGatewayProxyEvent, brandId: string) {
+  const body = JSON.parse(event.body ?? '{}') as Record<string, unknown>;
+  const { name, rules, logicalOperator = 'AND', scope = 'brand' } = body;
+
+  if (!name || typeof name !== 'string') return err(event, 400, 'name is required');
+  if (!Array.isArray(rules)) return err(event, 400, 'rules is required');
+
+  const ruleError = validateSegmentRules(rules);
+  if (ruleError) return err(event, 400, ruleError);
+  if (!['AND', 'OR'].includes(logicalOperator as string)) return err(event, 400, 'logicalOperator must be AND or OR');
+  if (!['brand', 'global'].includes(scope as string)) return err(event, 400, 'scope must be brand or global');
+
+  const tenantId = await getTenantIdForBrand(brandId);
+  if (!tenantId) return err(event, 403, 'Brand is not associated with a tenant');
+
+  const segmentId = ulid();
+  const now = new Date().toISOString();
+
+  await dynamo.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: {
+      pK: `TENANT#${tenantId}`,
+      sK: `SEGMENT_DEF#${segmentId}`,
+      brandId,
+      desc: JSON.stringify({
+        name,
+        rules,
+        logicalOperator,
+        scope,
+        brandId,
+        active: true,
+        memberCount: 0,
+        lastEvaluatedAt: null,
+      }),
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+
+  return ok(event, { segmentId, tenantId, name, rules, logicalOperator, scope, active: true, createdAt: now });
+}
+
+async function listSegmentDefs(event: APIGatewayProxyEvent, brandId: string) {
+  const tenantId = await getTenantIdForBrand(brandId);
+  if (!tenantId) return err(event, 403, 'Brand is not associated with a tenant');
+
+  const res = await dynamo.send(new QueryCommand({
+    TableName: REFDATA_TABLE,
+    KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
+    ExpressionAttributeValues: {
+      ':pk': `TENANT#${tenantId}`,
+      ':prefix': 'SEGMENT_DEF#',
+    },
+  }));
+
+  const segments = (res.Items ?? []).map(item => {
+    const segmentId = (item.sK as string).replace('SEGMENT_DEF#', '');
+    let desc: Record<string, unknown> = {};
+    try { desc = JSON.parse(item.desc ?? '{}'); } catch { /* ignore */ }
+    return {
+      segmentId,
+      name: desc.name,
+      rules: desc.rules,
+      logicalOperator: desc.logicalOperator,
+      scope: desc.scope,
+      active: desc.active,
+      memberCount: desc.memberCount ?? 0,
+      lastEvaluatedAt: desc.lastEvaluatedAt ?? null,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    };
+  });
+
+  return ok(event, { segments });
+}
+
+async function updateSegmentDef(event: APIGatewayProxyEvent, brandId: string) {
+  const segmentId = event.pathParameters?.segmentId ?? event.path.split('/segments/')[1]?.split('/')[0];
+  if (!segmentId) return err(event, 400, 'segmentId is required');
+
+  const body = JSON.parse(event.body ?? '{}') as Record<string, unknown>;
+
+  const tenantId = await getTenantIdForBrand(brandId);
+  if (!tenantId) return err(event, 403, 'Brand is not associated with a tenant');
+
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: `SEGMENT_DEF#${segmentId}` },
+  }));
+  if (!existing.Item) return err(event, 404, 'Segment not found');
+
+  let existingDesc: Record<string, unknown> = {};
+  try { existingDesc = JSON.parse(existing.Item.desc ?? '{}'); } catch { /* ignore */ }
+
+  const rules = body.rules !== undefined ? body.rules as unknown[] : existingDesc.rules;
+  if (body.rules !== undefined) {
+    const ruleError = validateSegmentRules(rules as unknown[]);
+    if (ruleError) return err(event, 400, ruleError);
+  }
+
+  const updatedDesc = {
+    ...existingDesc,
+    ...(body.name !== undefined && { name: body.name }),
+    ...(body.rules !== undefined && { rules }),
+    ...(body.logicalOperator !== undefined && { logicalOperator: body.logicalOperator }),
+    ...(body.scope !== undefined && { scope: body.scope }),
+    ...(body.active !== undefined && { active: body.active }),
+  };
+
+  const now = new Date().toISOString();
+  await dynamo.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: `SEGMENT_DEF#${segmentId}` },
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    ExpressionAttributeValues: { ':desc': JSON.stringify(updatedDesc), ':now': now },
+  }));
+
+  return ok(event, { segmentId, ...updatedDesc, updatedAt: now });
+}
+
+async function deleteSegmentDef(event: APIGatewayProxyEvent, brandId: string) {
+  const segmentId = event.pathParameters?.segmentId ?? event.path.split('/segments/')[1]?.split('/')[0];
+  if (!segmentId) return err(event, 400, 'segmentId is required');
+
+  const tenantId = await getTenantIdForBrand(brandId);
+  if (!tenantId) return err(event, 403, 'Brand is not associated with a tenant');
+
+  await dynamo.send(new DeleteCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: `SEGMENT_DEF#${segmentId}` },
+    ConditionExpression: 'attribute_exists(pK)',
+  })).catch(e => {
+    if (e.name === 'ConditionalCheckFailedException') return null; // already gone — idempotent
+    throw e;
+  });
+
+  return ok(event, { segmentId, deleted: true });
+}
+
+// ─── Card Config (loyalty template opt-in) ────────────────────────────────────
+//
+// DynamoDB key patterns (RefDataEvent):
+//   pK: BRAND#<brandId>            sK: CARD_CONFIG#<templateId>   — brand's opt-in record
+//   pK: CARDCONFIG#PENDING         sK: BRAND#<brandId>#<templateId>  — admin approval queue
+
+type CardConfigStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'REVOKED';
+
+async function createCardConfig(event: APIGatewayProxyEvent, brandId: string) {
+  const body = JSON.parse(event.body ?? '{}') as {
+    templateId?: string;
+    loyaltyProgramName?: string;  // brand's own name for the program, e.g. "Everyday Rewards"
+    loyaltyProgramUrl?: string;   // optional: link to brand's loyalty T&Cs
+    notes?: string;               // optional context for BeboCard admin reviewer
+  };
+
+  const templateId = (body.templateId ?? '').trim();
+  const loyaltyProgramName = (body.loyaltyProgramName ?? '').trim();
+
+  if (!templateId) return err(event, 400, 'templateId is required');
+  if (!loyaltyProgramName) return err(event, 400, 'loyaltyProgramName is required');
+  if (loyaltyProgramName.length > 100) return err(event, 400, 'loyaltyProgramName must be ≤ 100 characters');
+
+  // Verify the template exists and is APPROVED
+  const templateResult = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TEMPLATE#${templateId}`, sK: 'PROFILE' },
+  }));
+
+  if (!templateResult.Item) return err(event, 404, 'Template not found');
+  if (templateResult.Item.status !== 'APPROVED') {
+    return err(event, 409, 'Template is not approved for brand opt-in');
+  }
+
+  // Check for existing config (idempotency)
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: `CARD_CONFIG#${templateId}` },
+  }));
+
+  if (existing.Item && existing.Item.status !== 'REJECTED' && existing.Item.status !== 'REVOKED') {
+    return err(event, 409, `Card config already exists with status: ${existing.Item.status}`);
+  }
+
+  const now = new Date().toISOString();
+
+  const configItem = {
+    pK: `BRAND#${brandId}`,
+    sK: `CARD_CONFIG#${templateId}`,
+    brandId,
+    templateId,
+    templateName: templateResult.Item.name,
+    loyaltyProgramName,
+    loyaltyProgramUrl: body.loyaltyProgramUrl?.trim() ?? null,
+    notes: body.notes?.trim() ?? null,
+    status: 'PENDING' as CardConfigStatus,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await dynamo.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: configItem,
+  }));
+
+  // Write to the admin approval queue index
+  await dynamo.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: {
+      pK: 'CARDCONFIG#PENDING',
+      sK: `BRAND#${brandId}#${templateId}`,
+      brandId,
+      templateId,
+      templateName: templateResult.Item.name,
+      loyaltyProgramName,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
+
+  const { pK, sK, ...config } = configItem;
+  console.info('[brand-api-handler] card config created', { brandId, templateId });
+  return ok(event, config);
+}
+
+async function listCardConfigs(event: APIGatewayProxyEvent, brandId: string) {
+  const result = await dynamo.send(new QueryCommand({
+    TableName: REFDATA_TABLE,
+    KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
+    ExpressionAttributeValues: {
+      ':pk': `BRAND#${brandId}`,
+      ':prefix': 'CARD_CONFIG#',
+    },
+  }));
+
+  const configs = (result.Items ?? []).map(({ pK: _pK, sK: _sK, ...rest }) => rest);
+  return ok(event, { configs, count: configs.length });
+}
+
+async function deleteCardConfig(event: APIGatewayProxyEvent, brandId: string, templateId: string) {
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: `CARD_CONFIG#${templateId}` },
+  }));
+
+  if (!existing.Item) return err(event, 404, 'Card config not found');
+  if (existing.Item.status === 'APPROVED') {
+    return err(event, 409, 'Cannot delete an approved card config. Request admin to revoke it instead.');
+  }
+
+  const now = new Date().toISOString();
+
+  // Soft-delete: set status to REVOKED
+  await dynamo.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: `CARD_CONFIG#${templateId}` },
+    UpdateExpression: 'SET #status = :status, updatedAt = :now',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':status': 'REVOKED', ':now': now },
+  }));
+
+  // Remove from pending queue if still there
+  await dynamo.send(new DeleteCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: 'CARDCONFIG#PENDING', sK: `BRAND#${brandId}#${templateId}` },
+  })).catch(() => null); // not in queue — ok
+
+  return ok(event, { brandId, templateId, status: 'REVOKED', updatedAt: now });
+}
+
+// ─── Admin: Card Config Approval Queue ───────────────────────────────────────
+
+async function adminListCardConfigs(event: APIGatewayProxyEvent) {
+  const qp = (event.queryStringParameters ?? {}) as Record<string, string>;
+  const filterStatus = (qp.status ?? 'PENDING').toUpperCase() as CardConfigStatus | 'ALL';
+
+  if (filterStatus === 'PENDING') {
+    // Fast path: read from the pending index
+    const result = await dynamo.send(new QueryCommand({
+      TableName: REFDATA_TABLE,
+      KeyConditionExpression: 'pK = :pk',
+      ExpressionAttributeValues: { ':pk': 'CARDCONFIG#PENDING' },
+    }));
+    const configs = (result.Items ?? []).map(({ pK: _pK, sK: _sK, ...rest }) => rest);
+    return ok(event, { configs, count: configs.length });
+  }
+
+  // All statuses: scan BRAND# records for CARD_CONFIG# sort keys
+  // At platform scale (< 1,000 brands initially) this is acceptable.
+  const result = await dynamo.send(new ScanCommand({
+    TableName: REFDATA_TABLE,
+    FilterExpression: 'begins_with(sK, :prefix) AND (pK BETWEEN :lo AND :hi)',
+    ExpressionAttributeValues: {
+      ':prefix': 'CARD_CONFIG#',
+      ':lo': 'BRAND#',
+      ':hi': 'BRAND#\uFFFF',
+    },
+  }));
+
+  let configs = (result.Items ?? []).map(({ pK: _pK, sK: _sK, ...rest }) => rest);
+  if (filterStatus !== 'ALL') {
+    configs = configs.filter(c => c.status === filterStatus);
+  }
+
+  return ok(event, { configs, count: configs.length });
+}
+
+async function adminActOnCardConfig(
+  event: APIGatewayProxyEvent,
+  brandId: string,
+  templateId: string,
+  action: 'approve' | 'reject' | 'revoke',
+) {
+  const existing = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: `CARD_CONFIG#${templateId}` },
+  }));
+
+  if (!existing.Item) return err(event, 404, 'Card config not found');
+
+  const current = existing.Item as { status: CardConfigStatus; loyaltyProgramName: string };
+  const now = new Date().toISOString();
+
+  const validTransitions: Record<string, CardConfigStatus[]> = {
+    approve: ['PENDING'],
+    reject:  ['PENDING'],
+    revoke:  ['APPROVED'],
+  };
+
+  if (!validTransitions[action].includes(current.status)) {
+    return err(event, 409, `Cannot ${action} a config with status ${current.status}`);
+  }
+
+  const newStatus: CardConfigStatus =
+    action === 'approve' ? 'APPROVED' :
+    action === 'reject'  ? 'REJECTED' :
+    'REVOKED';
+
+  await dynamo.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: `CARD_CONFIG#${templateId}` },
+    UpdateExpression: 'SET #status = :status, updatedAt = :now',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':status': newStatus, ':now': now },
+  }));
+
+  // If approving: write to the DISCOVERY index so the Flutter app can find it.
+  // If rejecting/revoking: remove from DISCOVERY.
+  if (action === 'approve') {
+    // Fetch template details for the discovery record
+    const templateResult = await dynamo.send(new GetCommand({
+      TableName: REFDATA_TABLE,
+      Key: { pK: `TEMPLATE#${templateId}`, sK: 'PROFILE' },
+    }));
+    const template = templateResult.Item ?? {};
+
+    await dynamo.send(new PutCommand({
+      TableName: REFDATA_TABLE,
+      Item: {
+        pK: `DISCOVERY#CARD_CONFIGS`,
+        sK: `BRAND#${brandId}#TEMPLATE#${templateId}`,
+        brandId,
+        templateId,
+        templateName: template.name ?? '',
+        loyaltyProgramName: current.loyaltyProgramName,
+        barcodeFormat: template.barcodeFormat ?? 'QR_CODE',
+        primaryColor: template.primaryColor ?? '#1A1A2E',
+        accentColor: template.accentColor ?? '#16213E',
+        logoUrl: template.logoUrl ?? null,
+        fieldLabels: template.fieldLabels ?? {},
+        status: 'APPROVED',
+        approvedAt: now,
+        updatedAt: now,
+      },
+    }));
+  } else {
+    await dynamo.send(new DeleteCommand({
+      TableName: REFDATA_TABLE,
+      Key: { pK: 'DISCOVERY#CARD_CONFIGS', sK: `BRAND#${brandId}#TEMPLATE#${templateId}` },
+    })).catch(() => null);
+  }
+
+  // Remove from pending queue regardless of action
+  await dynamo.send(new DeleteCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: 'CARDCONFIG#PENDING', sK: `BRAND#${brandId}#${templateId}` },
+  })).catch(() => null);
+
+  console.info('[brand-api-handler] admin card config action', { brandId, templateId, action, newStatus });
+  return ok(event, { brandId, templateId, status: newStatus, updatedAt: now });
 }

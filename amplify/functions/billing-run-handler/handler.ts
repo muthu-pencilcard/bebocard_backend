@@ -2,6 +2,7 @@ import type { Handler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, ScanCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   ALL_USAGE_TYPES,
   getUsageMonthKey,
@@ -15,13 +16,28 @@ import {
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ses = new SESClient({});
+const ssm = new SSMClient({});
 
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 const FROM_EMAIL = process.env.FROM_EMAIL ?? 'billing@bebocard.com.au';
 
 // ── Stripe helpers (inline — avoid importing the portal's Stripe module) ──────
 
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? '';
+let cachedStripeKey: string | null = null;
+async function getStripeKey(): Promise<string> {
+  if (cachedStripeKey) return cachedStripeKey;
+  try {
+    const res = await ssm.send(new GetParameterCommand({
+      Name: '/amplify/shared/STRIPE_SECRET_KEY',
+      WithDecryption: true,
+    }));
+    cachedStripeKey = res.Parameter?.Value ?? '';
+    return cachedStripeKey;
+  } catch (err) {
+    console.warn('[billing-run] Failed to fetch key from SSM, falling back to env');
+    return process.env.STRIPE_SECRET_KEY ?? '';
+  }
+}
 
 async function createStripeInvoiceItem(input: {
   customerId: string;
@@ -30,7 +46,8 @@ async function createStripeInvoiceItem(input: {
   tenantId: string;
   month: string;
 }): Promise<{ id: string; invoice?: string | null }> {
-  if (!STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY not configured');
+  const stripeKey = await getStripeKey();
+  if (!stripeKey) throw new Error('STRIPE_SECRET_KEY not configured');
 
   const params = new URLSearchParams({
     customer: input.customerId,
@@ -45,7 +62,7 @@ async function createStripeInvoiceItem(input: {
   const response = await fetch('https://api.stripe.com/v1/invoiceitems', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+      Authorization: `Bearer ${stripeKey}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: params.toString(),
@@ -84,6 +101,9 @@ interface TenantProfile {
   includedEventsPerMonth: number | null;
   billingStatus: string | null;
   status: string;
+  createdAt?: string;
+  scheduledTier?: TenantTier;
+  scheduledTierEffectiveMonth?: string;
 }
 
 function parseRecord(value: unknown): Record<string, unknown> {
@@ -125,6 +145,9 @@ async function listActiveTenants(): Promise<TenantProfile[]> {
       includedEventsPerMonth: parseTenantIncludedEvents(desc.includedEventsPerMonth, tier),
       billingStatus: typeof desc.billingStatus === 'string' ? desc.billingStatus : 'ACTIVE',
       status: String(item.status ?? 'ACTIVE'),
+      createdAt: item.createdAt,
+      scheduledTier: desc.scheduledTier as TenantTier | undefined,
+      scheduledTierEffectiveMonth: desc.scheduledTierEffectiveMonth as string | undefined,
     };
   });
 }
@@ -162,7 +185,33 @@ async function saveBillingRun(tenantId: string, month: string, data: {
   }));
 }
 
-// ── SES email helper ──────────────────────────────────────────────────────────
+// ── SES email helpers ─────────────────────────────────────────────────────────
+
+async function sendTrialWarningEmail(tenant: TenantProfile, expiryStr: string) {
+  const email = tenant.billingEmail ?? tenant.contactEmail;
+  if (!email) return;
+
+  const body = [
+    `Hi ${tenant.tenantName},`,
+    '',
+    `Your BeboCard trial is ending soon.`,
+    '',
+    `Your trial is scheduled to expire on ${expiryStr} (AEDT).`,
+    `To avoid interruption to your brand engagement features, please link a payment method in the BeboCard Business Portal.`,
+    '',
+    'Best regards,',
+    'BeboCard Billing',
+  ].join('\n');
+
+  await ses.send(new SendEmailCommand({
+    Source: FROM_EMAIL,
+    Destination: { ToAddresses: [email] },
+    Message: {
+      Subject: { Data: 'Action Required: Your BeboCard trial is ending soon' },
+      Body: { Text: { Data: body } },
+    },
+  }));
+}
 
 async function sendBillingSummaryEmail(tenant: TenantProfile, month: string, summary: {
   overageCount: number;
@@ -230,120 +279,203 @@ async function sendBillingSummaryEmail(tenant: TenantProfile, month: string, sum
   }
 }
 
+// ── Logic Helpers ─────────────────────────────────────────────────────────────
+
+async function monitorQuota(tenant: TenantProfile, month: string) {
+  const included = tenant.includedEventsPerMonth;
+  if (included == null || included <= 0) return;
+
+  const usageRecords = await Promise.all(
+    ALL_USAGE_TYPES.map(async (type) => {
+      const usage = await getTenantUsageCounter(dynamo, REFDATA_TABLE, tenant.tenantId, type, month);
+      return { type, count: usage.usageCount };
+    }),
+  );
+
+  const billableTotal = usageRecords
+    .filter(r => isBillableTypeForTier(tenant.tier, r.type))
+    .reduce((sum, r) => sum + r.count, 0);
+
+  const ratio = billableTotal / included;
+  const email = tenant.billingEmail ?? tenant.contactEmail;
+  if (!email) return;
+
+  if (ratio >= 1.0) {
+     console.warn(`[billing-run] Quota EXCEEDED for ${tenant.tenantId} (${billableTotal}/${included})`);
+  } else if (ratio >= 0.8) {
+     console.info(`[billing-run] Quota warning (80%+) for ${tenant.tenantId} (${billableTotal}/${included})`);
+  }
+}
+
+async function processOverage(tenant: TenantProfile, month: string) {
+  const existingRun = await getBillingRun(tenant.tenantId, month);
+  if (existingRun?.status === 'INVOICED') {
+    console.info(`[billing-run] skip ${tenant.tenantId}: already invoiced`);
+    return;
+  }
+
+  const usageRecords = await Promise.all(
+    ALL_USAGE_TYPES.map(async (type) => {
+      const usage = await getTenantUsageCounter(dynamo, REFDATA_TABLE, tenant.tenantId, type, month);
+      return { type, count: usage.usageCount };
+    }),
+  );
+
+  const billableRecords = usageRecords.filter((r) => isBillableTypeForTier(tenant.tier, r.type));
+  const totalBillable = billableRecords.reduce((s, r) => s + r.count, 0);
+  const included = tenant.includedEventsPerMonth ?? 0;
+  const overageCount = Math.max(0, totalBillable - included);
+
+  if (overageCount <= 0 || !tenant.stripeCustomerId) {
+    await saveBillingRun(tenant.tenantId, month, {
+      overageCount: 0,
+      overageAud: 0,
+      stripeInvoiceId: null,
+      stripeInvoiceItemId: null,
+      status: 'SKIPPED',
+    });
+
+    await sendBillingSummaryEmail(tenant, month, {
+      overageCount: 0,
+      overageAud: 0,
+      status: 'SKIPPED',
+      categoryBreakdown: [],
+    });
+    return;
+  }
+
+  let overageAudTotal = 0;
+  let lastStripeItemId: string | null = null;
+  let lastStripeInvoiceId: string | null = null;
+  const categoryBreakdown: Array<{ type: string; count: number; overageShare: number; aud: number }> = [];
+
+  for (const cat of billableRecords) {
+    if (cat.count <= 0) continue;
+    const catOverage = Math.round((cat.count / totalBillable) * overageCount);
+    if (catOverage <= 0) continue;
+
+    const rate = getCategoryOverageRate(tenant.tier, cat.type as UsageType);
+    const catAud = Number((catOverage * rate).toFixed(2));
+    categoryBreakdown.push({ type: cat.type, count: cat.count, overageShare: catOverage, aud: catAud });
+
+    if (catAud <= 0) continue;
+
+    overageAudTotal += catAud;
+    const stripeKey = await getStripeKey();
+    if (stripeKey) {
+      const invoiceItem = await createStripeInvoiceItem({
+        customerId: tenant.stripeCustomerId,
+        amountAud: catAud,
+        description: `${capitalize(cat.type)} overage: ${catOverage} deliveries @ $${rate.toFixed(2)}/ea (${month})`,
+        tenantId: tenant.tenantId,
+        month,
+      });
+      lastStripeItemId = invoiceItem.id;
+      lastStripeInvoiceId = invoiceItem.invoice ?? lastStripeInvoiceId;
+    }
+  }
+
+  await saveBillingRun(tenant.tenantId, month, {
+    overageCount,
+    overageAud: Number(overageAudTotal.toFixed(2)),
+    stripeInvoiceId: lastStripeInvoiceId,
+    stripeInvoiceItemId: lastStripeItemId,
+    status: overageAudTotal > 0 ? 'INVOICED' : 'SKIPPED',
+  });
+
+  await sendBillingSummaryEmail(tenant, month, {
+    overageCount,
+    overageAud: overageAudTotal,
+    status: overageAudTotal > 0 ? 'INVOICED' : 'SKIPPED',
+    categoryBreakdown,
+  });
+}
+
+async function applyTierChange(tenantId: string, newTier: TenantTier) {
+  const now = new Date().toISOString();
+  
+  const getRes = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: 'PROFILE' },
+  }));
+  if (!getRes.Item) return;
+
+  const desc = parseRecord(getRes.Item.desc);
+  const updatedDesc = {
+    ...desc,
+    tier: newTier,
+    tierStartDate: now,
+    scheduledTier: null,
+    scheduledTierEffectiveMonth: null,
+    updatedAt: now,
+  };
+
+  await dynamo.send(new PutCommand({
+    TableName: REFDATA_TABLE,
+    Item: {
+      ...getRes.Item,
+      desc: JSON.stringify(updatedDesc),
+      updatedAt: now,
+    },
+  }));
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler: Handler = async () => {
-  // Run for the *previous* month (the cron fires on the 1st of the new month)
   const now = new Date();
-  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const month = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}`;
+  const today = now.toISOString().split('T')[0];
+  const isFirstOfMonth = now.getDate() === 1;
+  const currentMonth = now.toISOString().slice(0, 7);
 
-  console.info(`[billing-run] Starting billing run for month: ${month}`);
+  const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevMonth = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+
+  console.info(`[billing-run] Day: ${today}, Month: ${currentMonth}, FirstOfMonth: ${isFirstOfMonth}`);
 
   const tenants = await listActiveTenants();
   console.info(`[billing-run] ${tenants.length} active tenants`);
 
-  let invoiced = 0;
-  let skipped = 0;
+  let processedCount = 0;
 
   for (const tenant of tenants) {
     try {
-      // Skip if already invoiced for this month
-      const existingRun = await getBillingRun(tenant.tenantId, month);
-      if (existingRun?.status === 'INVOICED') {
-        console.info(`[billing-run] skip ${tenant.tenantId}: already invoiced`);
-        skipped++;
-        continue;
-      }
-
-      // Collect usage
-      const usageRecords = await Promise.all(
-        ALL_USAGE_TYPES.map(async (type) => {
-          const usage = await getTenantUsageCounter(dynamo, REFDATA_TABLE, tenant.tenantId, type, month);
-          return { type, count: usage.usageCount };
-        }),
-      );
-
-      const billableRecords = usageRecords.filter((r) => isBillableTypeForTier(tenant.tier, r.type));
-      const totalBillable = billableRecords.reduce((s, r) => s + r.count, 0);
-      const included = tenant.includedEventsPerMonth ?? 0;
-      const overageCount = Math.max(0, totalBillable - included);
-
-      if (overageCount <= 0 || !tenant.stripeCustomerId) {
-        await saveBillingRun(tenant.tenantId, month, {
-          overageCount: 0,
-          overageAud: 0,
-          stripeInvoiceId: null,
-          stripeInvoiceItemId: null,
-          status: 'SKIPPED',
-        });
-
-        await sendBillingSummaryEmail(tenant, month, {
-          overageCount: 0,
-          overageAud: 0,
-          status: 'SKIPPED',
-          categoryBreakdown: [],
-        });
-
-        skipped++;
-        continue;
-      }
-
-      // Per-category overage line items
-      let overageAudTotal = 0;
-      let lastStripeItemId: string | null = null;
-      let lastStripeInvoiceId: string | null = null;
-      const categoryBreakdown: Array<{ type: string; count: number; overageShare: number; aud: number }> = [];
-
-      for (const cat of billableRecords) {
-        if (cat.count <= 0) continue;
-        const catOverage = Math.round((cat.count / totalBillable) * overageCount);
-        if (catOverage <= 0) continue;
-
-        const rate = getCategoryOverageRate(tenant.tier, cat.type as UsageType);
-        const catAud = Number((catOverage * rate).toFixed(2));
-        categoryBreakdown.push({ type: cat.type, count: cat.count, overageShare: catOverage, aud: catAud });
-
-        if (catAud <= 0) continue;
-
-        overageAudTotal += catAud;
-        if (STRIPE_SECRET_KEY) {
-          const invoiceItem = await createStripeInvoiceItem({
-            customerId: tenant.stripeCustomerId,
-            amountAud: catAud,
-            description: `${capitalize(cat.type)} overage: ${catOverage} deliveries @ $${rate.toFixed(2)}/ea (${month})`,
-            tenantId: tenant.tenantId,
-            month,
-          });
-          lastStripeItemId = invoiceItem.id;
-          lastStripeInvoiceId = invoiceItem.invoice ?? lastStripeInvoiceId;
+      // ── 1. Trial Expiry Check (Daily) ──
+      const hasStripeSetup = !!tenant.stripeCustomerId && !!tenant.stripeSubscriptionId;
+      if (!hasStripeSetup && tenant.createdAt) {
+        const trialLengthDays = 30;
+        const warningLeadDays = 7;
+        const start = new Date(tenant.createdAt);
+        const expiry = new Date(start.getTime() + trialLengthDays * 24 * 3600 * 1000);
+        const warningDate = new Date(expiry.getTime() - warningLeadDays * 24 * 3600 * 1000);
+        
+        const warningStr = warningDate.toISOString().split('T')[0];
+        if (today === warningStr) {
+          console.info(`[billing-run] Sending trial warning to ${tenant.tenantId} (Expires: ${expiry.toISOString().split('T')[0]})`);
+          await sendTrialWarningEmail(tenant, expiry.toISOString().split('T')[0]);
         }
       }
 
-      await saveBillingRun(tenant.tenantId, month, {
-        overageCount,
-        overageAud: Number(overageAudTotal.toFixed(2)),
-        stripeInvoiceId: lastStripeInvoiceId,
-        stripeInvoiceItemId: lastStripeItemId,
-        status: overageAudTotal > 0 ? 'INVOICED' : 'SKIPPED',
-      });
+      // ── 2. Scheduled Tier Changes (1st of month) ──
+      if (isFirstOfMonth && tenant.scheduledTier && tenant.scheduledTierEffectiveMonth === currentMonth) {
+        console.info(`[billing-run] Applying scheduled tier change for ${tenant.tenantId}: ${tenant.tier} -> ${tenant.scheduledTier}`);
+        await applyTierChange(tenant.tenantId, tenant.scheduledTier);
+      }
 
-      await sendBillingSummaryEmail(tenant, month, {
-        overageCount,
-        overageAud: overageAudTotal,
-        status: overageAudTotal > 0 ? 'INVOICED' : 'SKIPPED',
-        categoryBreakdown,
-      });
+      // ── 3. Quota Monitoring (Daily) ──
+      await monitorQuota(tenant, currentMonth);
 
-      if (overageAudTotal > 0) invoiced++;
-      else skipped++;
+      // ── 4. Overage Invoicing (1st of month for previous month) ──
+      if (isFirstOfMonth) {
+        await processOverage(tenant, prevMonth);
+      }
 
-      console.info(`[billing-run] ${tenant.tenantId}: overage=${overageCount} aud=${overageAudTotal.toFixed(2)}`);
+      processedCount++;
     } catch (err) {
       console.error(`[billing-run] Error processing ${tenant.tenantId}:`, err);
     }
   }
 
-  console.info(`[billing-run] Complete: invoiced=${invoiced} skipped=${skipped}`);
-  return { month, invoiced, skipped, total: tenants.length };
+  console.info(`[billing-run] Complete: processedCount=${processedCount} total=${tenants.length}`);
+  return { today, processedCount, total: tenants.length };
 };

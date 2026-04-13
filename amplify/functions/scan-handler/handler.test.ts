@@ -26,6 +26,13 @@ vi.mock('@aws-sdk/lib-dynamodb', () => ({
   }),
 }));
 
+vi.mock('@aws-sdk/client-sqs', () => ({
+  SQSClient: vi.fn(function () {
+    return { send: vi.fn().mockResolvedValue({}) };
+  }),
+  SendMessageCommand: vi.fn(),
+}));
+
 vi.mock('../../shared/api-key-auth.js', () => ({
   validateApiKey: mockValidateApiKey,
   extractApiKey: mockExtractApiKey,
@@ -104,7 +111,7 @@ describe('POST /scan', () => {
     mockExtractApiKey.mockReturnValue(null);
     mockValidateApiKey.mockResolvedValue(null);
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(401);
     expect(JSON.parse(res!.body)).toMatchObject({ error: expect.any(String) });
@@ -114,7 +121,7 @@ describe('POST /scan', () => {
     mockExtractApiKey.mockReturnValue('bebo_bad.key');
     mockValidateApiKey.mockResolvedValue(null);
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(401);
   });
@@ -123,7 +130,7 @@ describe('POST /scan', () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['scan'] });
 
-    const event = makeEvent('/scan', { storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(400);
   });
@@ -132,7 +139,7 @@ describe('POST /scan', () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['scan'] });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(400);
   });
@@ -141,7 +148,7 @@ describe('POST /scan', () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['scan'] });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'coles' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'coles' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(403);
     expect(JSON.parse(res!.body)).toMatchObject({ error: 'Unauthorized' });
@@ -156,7 +163,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-MISSING', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-MISSING', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(404);
   });
@@ -174,7 +181,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(404);
   });
@@ -195,7 +202,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(200);
     expect(JSON.parse(res!.body)).toEqual({ hasLoyaltyCard: false });
@@ -227,7 +234,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(200);
     expect(JSON.parse(res!.body)).toEqual({ hasLoyaltyCard: false });
@@ -247,7 +254,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(200);
     const body = JSON.parse(res!.body);
@@ -280,7 +287,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(200);
     const body = JSON.parse(res!.body);
@@ -288,40 +295,7 @@ describe('POST /scan', () => {
     expect(body.spendBucket).toBe('100-200');
   });
 
-  it('returns the authoritative receiptSK when a concurrent retry already created the sentinel', async () => {
-    mockExtractApiKey.mockReturnValue('bebo_valid.key');
-    mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['receipt'] });
 
-    let sentinelGetCount = 0;
-    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: { sK?: string; pK?: string }; Item?: { eventType?: string } } }) => {
-      if (cmd.__type === 'QueryCommand') {
-        return Promise.resolve({ Items: [SCAN_ITEM] });
-      }
-      if (cmd.__type === 'GetCommand' && cmd.input?.Key?.sK?.startsWith('RECEIPT_IDEM#')) {
-        sentinelGetCount += 1;
-        if (sentinelGetCount === 1) return Promise.resolve({ Item: undefined });
-        return Promise.resolve({ Item: { receiptSK: 'RECEIPT#2026-04-08#OTHER' } });
-      }
-      if (cmd.__type === 'PutCommand' && cmd.input?.Key == null && cmd.input?.Item?.eventType === 'RECEIPT_IDEM') {
-        return Promise.reject(new Error('ConditionalCheckFailedException'));
-      }
-      return Promise.resolve({});
-    });
-
-    const event = makeEvent('/receipt', {
-      secondaryULID: 'SEC-001',
-      merchant: 'Woolworths Metro',
-      amount: 42.5,
-      purchaseDate: '2026-04-08T10:00:00.000Z',
-    });
-    const res = await handler(event, {} as never, () => {});
-    expect(res!.statusCode).toBe(200);
-    expect(JSON.parse(res!.body)).toEqual({ success: true, receiptSK: 'RECEIPT#2026-04-08#OTHER' });
-    expect(mockSend.mock.calls.some(([cmd]: unknown[]) =>
-      (cmd as { __type?: string; input?: { Item?: { eventType?: string } } }).__type === 'PutCommand'
-      && (cmd as { input?: { Item?: { eventType?: string } } }).input?.Item?.eventType === 'RECEIPT'
-    )).toBe(false);
-  });
 
   it('omits tier and spendBucket when no subscription exists', async () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
@@ -333,7 +307,7 @@ describe('POST /scan', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
+    const event = makeEvent('/v1/scan', { secondaryULID: 'SEC-001', storeBrandLoyaltyName: 'woolworths' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(200);
     const body = JSON.parse(res!.body);
@@ -364,7 +338,7 @@ describe('POST /receipt', () => {
     mockExtractApiKey.mockReturnValue(null);
     mockValidateApiKey.mockResolvedValue(null);
 
-    const event = makeEvent('/receipt', validReceiptBody);
+    const event = makeEvent('/v1/receipt', validReceiptBody);
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(401);
   });
@@ -373,7 +347,7 @@ describe('POST /receipt', () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['receipt'] });
 
-    const event = makeEvent('/receipt', { secondaryULID: 'SEC-001', amount: 42.5, purchaseDate: '2026-03-20' });
+    const event = makeEvent('/v1/receipt', { secondaryULID: 'SEC-001', amount: 42.5, purchaseDate: '2026-03-20' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(400);
   });
@@ -382,7 +356,7 @@ describe('POST /receipt', () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['receipt'] });
 
-    const event = makeEvent('/receipt', {
+    const event = makeEvent('/v1/receipt', {
       secondaryULID: 'SEC-001',
       merchant: 'Woolworths',
       purchaseDate: '2026-03-20',
@@ -400,65 +374,31 @@ describe('POST /receipt', () => {
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/receipt', { ...validReceiptBody, brandId: 'coles' });
+    const event = makeEvent('/v1/receipt', { ...validReceiptBody, brandId: 'coles' });
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(403);
   });
 
-  it('returns 200 idempotent response if RECEIPT_IDEM# already exists', async () => {
-    mockExtractApiKey.mockReturnValue('bebo_valid.key');
-    mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['receipt'] });
 
-    mockSend.mockImplementation((cmd: { __type: string; input?: { Key?: { sK?: string } } }) => {
-      if (cmd.__type === 'QueryCommand') return Promise.resolve({ Items: [SCAN_ITEM] });
-      if (cmd.__type === 'GetCommand') {
-        const sk = cmd.input?.Key?.sK ?? '';
-        if (sk.startsWith('RECEIPT_IDEM#')) {
-          return Promise.resolve({ Item: { receiptSK: 'RECEIPT#2026-03-20#EXISTING' } });
-        }
-        return Promise.resolve({ Item: null });
-      }
-      return Promise.resolve({});
-    });
 
-    const event = makeEvent('/receipt', validReceiptBody);
-    const res = await handler(event, {} as never, () => {});
-    expect(res!.statusCode).toBe(200);
-    const body = JSON.parse(res!.body);
-    expect(body.receiptSK).toBe('RECEIPT#2026-03-20#EXISTING');
-  });
-
-  it('saves receipt with correct schema to UserDataEvent', async () => {
+  it('pushes receipt to SQS', async () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue({ brandId: 'woolworths', keyId: 'k1', rateLimit: 1000, scopes: ['receipt'] });
 
     mockSend.mockImplementation((cmd: { __type: string }) => {
       if (cmd.__type === 'QueryCommand') return Promise.resolve({ Items: [SCAN_ITEM] });
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
-      if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
 
-    const event = makeEvent('/receipt', { ...validReceiptBody, currency: 'AUD', category: 'grocery' });
+    const event = makeEvent('/v1/receipt', { ...validReceiptBody, currency: 'AUD', category: 'grocery' });
     const res = await handler(event, {} as never, () => {});
-    expect(res!.statusCode).toBe(200);
+    expect(res!.statusCode).toBe(202);
 
-    const putCalls = mockSend.mock.calls.filter(
-      ([cmd]) => cmd.__type === 'PutCommand',
-    );
-    const receiptPut = putCalls.find(([cmd]) => cmd.input?.Item?.eventType === 'RECEIPT');
-    expect(receiptPut).toBeDefined();
-    const item = receiptPut![0].input.Item;
-    expect(item.pK).toBe('USER#PERM-001');
-    expect(item.sK).toMatch(/^RECEIPT#2026-03-20#/);
-    expect(item.eventType).toBe('RECEIPT');
-    expect(item.primaryCat).toBe('receipt');
-    const desc = JSON.parse(item.desc);
-    expect(desc.merchant).toBe('Woolworths Bondi');
-    expect(desc.amount).toBe(42.5);
-    expect(desc.brandId).toBe('woolworths');
-    expect(desc.currency).toBe('AUD');
-    expect(desc.source).toBe('brand_push');
+    expect(JSON.parse(res!.body)).toEqual(expect.objectContaining({
+      success: true,
+      message: 'Receipt received for processing',
+      receiptId: expect.any(String),
+    }));
   });
 
   it('FCM failure does not fail the receipt save', async () => {
@@ -479,9 +419,9 @@ describe('POST /receipt', () => {
     });
     mockFcmSend.mockRejectedValue(new Error('FCM unavailable'));
 
-    const event = makeEvent('/receipt', validReceiptBody);
+    const event = makeEvent('/v1/receipt', validReceiptBody);
     const res = await handler(event, {} as never, () => {});
-    expect(res!.statusCode).toBe(200);
+    expect(res!.statusCode).toBe(202);
     const body = JSON.parse(res!.body);
     expect(body.success).toBe(true);
   });
@@ -500,7 +440,7 @@ describe('unknown route', () => {
     mockExtractApiKey.mockReturnValue(null);
     mockValidateApiKey.mockResolvedValue(null);
 
-    const event = makeEvent('/unknown-path', {});
+    const event = makeEvent('/v1/unknown-path', {});
     const res = await handler(event, {} as never, () => {});
     expect(res!.statusCode).toBe(404);
     expect(JSON.parse(res!.body)).toMatchObject({ error: 'Unknown route' });

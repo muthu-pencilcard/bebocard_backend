@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "features": {
+    "loyalty_routing_v2": false,
+    "receipt_ocr_enhanced": true,
+    "gift_card_marketplace": true,
+    "analytics_dashboard_v2": false,
+    "consent_gate_attribute_release": true
+  },
+  "ui_config": {
+    "primary_color": "#6366F1",
+    "background_mode": "glass",
+    "scanner_timeout_seconds": 30,
+    "show_discover_tab": true
+  },
+  "api_config": {
+    "base_url": "https://api.bebocard.com/v1",
+    "timeout_ms": 5000,
+    "retry_count": 3
+  },
+  "messages": {
+    "onboarding_welcome": "Welcome to BeboCard! Your privacy-first loyalty wallet is ready.",
+    "emergency_banner": null
+  }
+}

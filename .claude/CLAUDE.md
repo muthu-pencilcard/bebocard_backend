@@ -24,6 +24,7 @@ Amplify Gen 2 + AppSync + DynamoDB + API Gateway. All functions live under `ampl
 | `subscription-negotiator` | EventBridge cron | Compares user subscription costs against benchmark; creates `SAVING_OPPORTUNITY` record + FCM when >15% above |
 | `subscription-proxy` | REST | Register/deregister recurring charges; amount-change detection |
 | `gift-card-router` | REST | Federated gift card delivery via brand scan channel using opaque delegation token |
+| `template-manager` | Direct Lambda invoke (IAM, portal only) | CRUD for loyalty card templates; super_admin only via HMAC internal auth (`actorEmail:timestamp`). Routes: POST/GET `/templates`, GET/PUT/DELETE `/templates/:id`, POST `/templates/:id/approve`, POST `/templates/:id/withdraw`. Approve: TransactWrite (status → APPROVED + write `DISCOVERY#TEMPLATES` entry). Withdraw: TransactWrite (status → WITHDRAWN + delete `DISCOVERY#TEMPLATES`). **No DLQ** — synchronous portal invoke. |
 
 ### Shared utilities (`amplify/functions/shared/`)
 - `api-key-auth.ts` — hash validation, scope enforcement, brand binding
@@ -311,7 +312,7 @@ YOUGOTAGIFT_API_KEY             # UAE/GCC distributor
 
 ## Tests
 
-213/213 passing. All functions have `handler.test.ts` using Vitest + `vi.hoisted()` for mocks.
+213/213 passing (excludes `template-manager` — no tests written yet). All other functions have `handler.test.ts` using Vitest + `vi.hoisted()` for mocks.
 Key pattern: env vars read at module level (e.g. `USER_HASH_SALT`) must be set inside `vi.hoisted()`, not `beforeEach`.
 
 ---

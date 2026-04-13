@@ -10,6 +10,10 @@ import { contentValidatorFn } from './functions/content-validator/resource';
 import { brandApiHandlerFn } from './functions/brand-api-handler/resource';
 import { reminderHandlerFn } from './functions/reminder-handler/resource';
 import { tenantAnalyticsFn } from './functions/tenant-analytics/resource';
+import { billingRunHandlerFn } from './functions/billing-run-handler/resource';
+import { billingWebhookHandlerFn } from './functions/billing-webhook-handler/resource';
+import { qrRouterHandlerFn } from './functions/qr-router-handler/resource';
+import { remoteConfigHandlerFn } from './functions/remote-config-handler/resource';
 import { segmentProcessorFn } from './functions/segment-processor/resource';
 import { receiptIcebergWriterFn } from './functions/receipt-iceberg-writer/resource';
 import { paymentRouterFn } from './functions/payment-router/resource';
@@ -24,8 +28,22 @@ import { catalogSubscriptionSyncFn } from './functions/catalog-subscription-sync
 import { giftCardRefundFn } from './functions/gift-card-refund/resource';
 import { subscriptionNegotiator } from './functions/subscription-negotiator/resource';
 import { widgetActionHandlerFn } from './functions/widget-action-handler/resource';
-import { billingRunHandlerFn } from './functions/billing-run-handler/resource';
 import { discoveryHandlerFn } from './functions/discovery-handler/resource';
+import { receiptProcessorFn } from './functions/receipt-processor/resource';
+import { tenantProvisionerFn } from './functions/tenant-provisioner/resource';
+import { exporterFn } from './functions/user-data-exporter/resource';
+import { analyticsCompactorFn } from './functions/analytics-compactor/resource';
+import { analyticsBackfillerFn } from './functions/analytics-backfiller/resource';
+import { webhookDispatcherFn } from './functions/webhook-dispatcher/resource';
+import { analyticsAggregatorFn } from './functions/analytics-aggregator/resource';
+import { receiptClaimHandlerFn } from './functions/receipt-claim-handler/resource';
+import { customSegmentEvaluatorFn } from './functions/custom-segment-evaluator/resource';
+import { affiliateFeedSyncFn } from './functions/affiliate-feed-sync/resource';
+import { parentalConsentHandlerFn } from './functions/parental-consent-handler/resource';
+import { cognitoExportFn } from './functions/cognito-export/resource';
+import { brandHealthMonitorFn } from './functions/brand-health-monitor/resource';
+import { clickTrackingHandlerFn } from './functions/click-tracking-handler/resource';
+import { templateManagerFn } from './functions/template-manager/resource';
 import { Stack, Duration, RemovalPolicy, Tags, CfnOutput } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
@@ -41,6 +59,10 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cfOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { DynamoEventSource, SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 
@@ -70,933 +92,954 @@ const backend = defineBackend({
   giftCardRefundFn,
   subscriptionNegotiator,
   widgetActionHandlerFn,
-  billingRunHandlerFn,
   discoveryHandlerFn,
+  receiptProcessorFn,
+  tenantProvisionerFn,
+  exporterFn,
+  analyticsCompactorFn,
+  analyticsBackfillerFn,
+  webhookDispatcherFn,
+  receiptClaimHandlerFn,
+  analyticsAggregatorFn,
+  customSegmentEvaluatorFn,
+  affiliateFeedSyncFn,
+  parentalConsentHandlerFn,
+  cognitoExportFn,
+  brandHealthMonitorFn,
+  billingRunHandlerFn,
+  billingWebhookHandlerFn,
+  qrRouterHandlerFn,
+  remoteConfigHandlerFn,
+  clickTrackingHandlerFn,
+  templateManagerFn,
 });
 
-// ── Grant DynamoDB access ────────────────────────────────────────────────────
+// ── Shared Infrastructure ────────────────────────────────────────────────────
 const userTable = backend.data.resources.tables['UserDataEvent'];
-const refTable = backend.data.resources.tables['RefDataEvent'];
+const refDataTable = backend.data.resources.tables['RefDataEvent'];
 const adminTable = backend.data.resources.tables['AdminDataEvent'];
 
 const tableNames = {
   USER_TABLE: userTable.tableName,
-  REFDATA_TABLE: refTable.tableName,
+  REFDATA_TABLE: refDataTable.tableName,
   ADMIN_TABLE: adminTable.tableName,
+  REPORT_TABLE: backend.data.resources.tables['ReportDataEvent'].tableName,
 };
 
-const cfnUserTable = (backend.data.resources as {
-  cfnResources?: { cfnTables?: Record<string, dynamodb.CfnTable> };
-}).cfnResources?.cfnTables?.['UserDataEvent'];
+const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
 
-const cfnRefTable = (backend.data.resources as {
-  cfnResources?: { cfnTables?: Record<string, dynamodb.CfnTable> };
-}).cfnResources?.cfnTables?.['RefDataEvent'];
-
-const cfnAdminTable = (backend.data.resources as {
-  cfnResources?: { cfnTables?: Record<string, dynamodb.CfnTable> };
-}).cfnResources?.cfnTables?.['AdminDataEvent'];
-
-// ── Production Hardening: PITR ──
-[cfnUserTable, cfnRefTable, cfnAdminTable].forEach(cfnTable => {
-  if (cfnTable) {
-    cfnTable.pointInTimeRecoverySpecification = { pointInTimeRecoveryEnabled: true };
-  }
-});
-
-// ── sK-pK-index GSI on UserDataEvent ─────────────────────────────────────────
-if (cfnUserTable) {
-  const existingGSIs = (cfnUserTable.globalSecondaryIndexes ?? []) as dynamodb.CfnTable.GlobalSecondaryIndexProperty[];
-  cfnUserTable.globalSecondaryIndexes = [
-    ...existingGSIs,
-    {
-      indexName: 'sK-pK-index',
-      keySchema: [
-        { attributeName: 'sK', keyType: 'HASH' },
-        { attributeName: 'pK', keyType: 'RANGE' },
-      ],
-      projection: {
-        projectionType: 'INCLUDE',
-        nonKeyAttributes: ['desc', 'status'],
-      },
-    },
-  ];
-}
-
-// ── Post-confirmation: SSM-based table lookup (breaks circular dep) ──────────
 const dataStack = Stack.of(userTable);
+const stack = Stack.of(backend.postConfirmationFn.resources.lambda);
+const stage = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'dev';
 const branchName = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'sandbox';
-// Use AWS_APP_ID + AWS_BRANCH (concrete strings at CodeBuild synthesis) to build a unique SSM
-// path per Amplify deployment. dataStack.stackName is a CDK token for nested stacks and cannot
-// be used in SSM parameter names (CDK cannot determine the ARN separator for unresolved tokens).
 const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
 const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
+
+const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
+
+// ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
 const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABLE`;
 const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
 
-new ssm.StringParameter(dataStack, 'UserTableNameParam', {
-  parameterName: userTableParamName,
-  stringValue: userTable.tableName,
-});
-new ssm.StringParameter(dataStack, 'AdminTableNameParam', {
-  parameterName: adminTableParamName,
-  stringValue: adminTable.tableName,
-});
+new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
+new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
 
-const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.Function;
-postConfirmLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
-postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
-
-postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['ssm:GetParameter'],
-  // Wildcard covers all bebocard SSM params regardless of appId/branch resolution at synthesis.
-  // Prevents IAM denials if AWS_APP_ID/AWS_BRANCH env vars differ between deploy runs.
-  resources: [
-    `arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/*`,
-  ],
-}));
-
-postConfirmLambda.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonCognitoPowerUser'));
-
-// Wildcard user pool ARN — avoids UserPool → Lambda → LambdaRolePolicy → UserPool cycle
-// within the auth stack (UserPool lists Lambda as trigger; Lambda policy must not ref UserPool resource).
-postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['cognito-idp:AdminUpdateUserAttributes'],
-  resources: [`arn:aws:cognito-idp:${dataStack.region}:${dataStack.account}:userpool/*`],
-}));
-
-// Use wildcard ARN patterns (not cross-stack token exports) to avoid auth → data circular dep.
-// Tables follow the Amplify Gen 2 naming convention: <ModelName>-<appId>-<branch>-<env>
-postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
-  resources: [
-    `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/UserDataEvent-*`,
-    `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/AdminDataEvent-*`,
-  ],
-}));
-
-// ── Card manager: read/write all three tables ────────────────────────────────
-const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(cardManagerLambda);
-refTable.grantReadData(cardManagerLambda);
-adminTable.grantReadWriteData(cardManagerLambda);
-
-// Scan handler
-const scanLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
-scanLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-scanLambda.addEnvironment('USER_TABLE', userTable.tableName);
-scanLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-adminTable.grantReadData(scanLambda);
-userTable.grantReadWriteData(scanLambda);
-refTable.grantReadData(scanLambda);
-
-// ── Tenant linker ──
-const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
-Object.entries({ USER_TABLE: userTable.tableName, ADMIN_TABLE: adminTable.tableName })
-  .forEach(([k, v]) => tenantLinkerLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(tenantLinkerLambda);
-adminTable.grantReadWriteData(tenantLinkerLambda);
-
-const tenantLinkerUrl = tenantLinkerLambda.addFunctionUrl({
-  authType: lambda.FunctionUrlAuthType.NONE,
-  cors: {
-    allowedOrigins: ['*'],
-    allowedMethods: [lambda.HttpMethod.GET],
-    allowedHeaders: ['Content-Type'],
-  },
-});
-new CfnOutput(Stack.of(tenantLinkerLambda), 'TenantLinkerFunctionUrl', {
-  value: tenantLinkerUrl.url,
-});
-
-// ── Geofence handler ──
-const geofenceLambda = backend.geofenceHandlerFn.resources.lambda as lambda.Function;
-geofenceLambda.addEnvironment('USER_TABLE', userTable.tableName);
-geofenceLambda.addEnvironment('REF_TABLE', refTable.tableName);
-geofenceLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-userTable.grantReadWriteData(geofenceLambda);
-refTable.grantReadData(geofenceLambda);
-adminTable.grantReadData(geofenceLambda);
-
-// ── Content pipeline ──
-const stack = Stack.of(backend.contentValidatorFn.resources.lambda);
-const stage = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'dev';
-
-const tenantUploadsBucket = new s3.Bucket(stack, 'TenantUploads', {
+// ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
+const analyticsBucket = new s3.Bucket(stack, 'AnalyticsLake', {
   removalPolicy: RemovalPolicy.RETAIN,
+  versioned: true, // Required for CRR (P3-12)
+  intelligentTieringConfigurations: [
+    { name: 'DefaultTiering', archiveAccessTierTime: Duration.days(90), deepArchiveAccessTierTime: Duration.days(180) }
+  ],
+  lifecycleRules: [
+    { expiration: Duration.days(7), prefix: 'athena-results/' },
+    { transitions: [{ storageClass: s3.StorageClass.GLACIER, transitionAfter: Duration.days(365) }], prefix: 'receipts/' }
+  ],
+});
+
+// ── Remote Configuration (P2-2) ──
+// Allows instant UI/Feature updates without App Store reviews
+const remoteConfigBucket = new s3.Bucket(stack, 'RemoteConfig', {
+  versioned: true,
+  publicReadAccess: true, // Safe for non-sensitive public app configuration
+  blockPublicAccess: {
+    blockPublicAcls: false,
+    blockPublicPolicy: false,
+    ignorePublicAcls: false,
+    restrictPublicBuckets: false,
+  },
   cors: [{
-    allowedMethods: [s3.HttpMethods.PUT],
-    allowedOrigins: ['https://business.bebocard.com.au', 'http://localhost:3000'],
+    allowedMethods: [s3.HttpMethods.GET],
+    allowedOrigins: ['*'],
     allowedHeaders: ['*'],
   }],
 });
 
-const appReferenceBucket = new s3.Bucket(stack, 'AppReference', {
+new ssm.StringParameter(stack, 'RemoteConfigBucketParam', {
+  parameterName: `/bebocard/${amplifyAppId}/${amplifyBranch}/REMOTE_CONFIG_BUCKET`,
+  stringValue: remoteConfigBucket.bucketName,
+});
+
+const exportsBucket = new s3.Bucket(stack, 'UserDataExports', {
+  removalPolicy: RemovalPolicy.DESTROY, // Exports are temporary
+  lifecycleRules: [{ expiration: Duration.days(1) }], // Auto-delete after 24 hours
+});
+
+const glueDatabase = new (backend.data.resources as any).cfnResources.cfnTables['UserDataEvent']
+  .stack.node.defaultChild.parent.parent.parent.node.findAll()
+  .find((n: any) => n.cfnResourceType === 'AWS::Glue::Database') 
+  ?? new (require('aws-cdk-lib/aws-glue').CfnDatabase)(stack, 'AnalyticsDatabase', {
+    catalogId: stack.account,
+    databaseInput: { name: `bebo_analytics_${stage}`, description: 'BeboCard Intelligence Data Lake' },
+  });
+
+const athenaWorkgroup = new (require('aws-cdk-lib/aws-athena').CfnWorkGroup)(stack, 'AnalyticsWorkgroup', {
+  name: `bebo-intel-${stage}`,
+  description: 'Intelligence tier analytics queries',
+  workGroupConfiguration: {
+    resultConfiguration: { outputLocation: `s3://${analyticsBucket.bucketName}/athena-results/` },
+  },
+});
+
+const icebergDLQ = new sqs.Queue(stack, 'ReceiptIcebergDLQ', { retentionPeriod: Duration.days(14) });
+Tags.of(icebergDLQ).add('CostCenter', 'tenant-side');
+
+// ── Monitoring & Alarming (P0-1) ─────────────────────────────────────────────
+const alertsTopic = new sns.Topic(stack, 'InfrastructureAlerts', {
+  displayName: `BeboCard [${stage}] Infrastructure Alerts`,
+});
+
+// Default engineer contact — in prod this would be an OpsGenie/PagerDuty endpoint
+alertsTopic.addSubscription(new snsSubscriptions.EmailSubscription('farahgalaria@gmail.com'));
+
+const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
+  const alarm = new cloudwatch.Alarm(stack, `${name}Alarm`, {
+    metric: queue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
+    threshold,
+    evaluationPeriods: 1,
+    alarmDescription: `Messages detected in ${name}. Critical failure in data pipeline.`,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  alarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+  return alarm;
+};
+
+const icebergDlqAlarm = createDlqAlarm(icebergDLQ, 'ReceiptIcebergDLQ');
+
+// ── Receipt Signing (P3-4) ──
+const receiptSigningKey = new kms.Key(stack, 'ReceiptSigningKey', {
+  alias: 'bebocard/receipt-signing',
+  keySpec: kms.KeySpec.RSA_2048,
+  keyUsage: kms.KeyUsage.SIGN_VERIFY,
   removalPolicy: RemovalPolicy.RETAIN,
-  publicReadAccess: true,
-  blockPublicAccess: new s3.BlockPublicAccess({
-    blockPublicAcls: false,
-    ignorePublicAcls: false,
-    blockPublicPolicy: false,
-    restrictPublicBuckets: false,
-  }),
 });
 
-const validatorLambda = backend.contentValidatorFn.resources.lambda as lambda.Function;
-tenantUploadsBucket.grantRead(validatorLambda);
-tenantUploadsBucket.grantPut(validatorLambda);
-appReferenceBucket.grantPut(validatorLambda);
-validatorLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['rekognition:DetectModerationLabels'],
-  resources: ['*'],
+// ── Post-confirmation ──
+const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.Function;
+// ── P0-5: Concurrency Reservation ──
+(postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
+
+const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
+  const alarm = new cloudwatch.Alarm(stack, `${name}UtilizationAlarm`, {
+    metric: fn.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
+    threshold: 7.5, // 75% of 10
+    evaluationPeriods: 2,
+    alarmDescription: `Concurrency utilization for ${name} exceeded 75%. Consider increasing reservation.`,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+  });
+  alarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+};
+createUtilizationAlarm(postConfirmLambda, 'PostConfirmation');
+
+const createHighTrafficUtilizationAlarm = (fn: lambda.Function, name: string) => {
+  const alarm = new cloudwatch.Alarm(stack, `${name}UtilizationAlarm`, {
+    metric: fn.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
+    threshold: 37.5, // 75% of 50
+    evaluationPeriods: 2,
+    alarmDescription: `Concurrency utilization for ${name} exceeded 75%. Scale check required.`,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+  });
+  alarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+};
+
+postConfirmLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
+postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/*`],
 }));
-refTable.grantReadWriteData(validatorLambda);
-adminTable.grantWriteData(validatorLambda);
+postConfirmLambda.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonCognitoPowerUser'));
+postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['cognito-idp:AdminUpdateUserAttributes'],
+  resources: [`arn:aws:cognito-idp:${dataStack.region}:${dataStack.account}:userpool/*`],
+}));
+postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+  resources: [`arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/UserDataEvent-*`, `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/AdminDataEvent-*`],
+}));
+postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+  resources: ['*'], // In production, scope this to the verified domain
+}));
+postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
+}));
 
-validatorLambda.addEnvironment('TENANT_UPLOADS_BUCKET', tenantUploadsBucket.bucketName);
-validatorLambda.addEnvironment('APP_REFERENCE_BUCKET', appReferenceBucket.bucketName);
-validatorLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-validatorLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+// ── Card manager ──
+const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Function;
+// ── P0-5: Concurrency Reservation ──
+(cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
+createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
+Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
+userTable.grantReadWriteData(cardManagerLambda);
+refDataTable.grantReadData(cardManagerLambda);
+adminTable.grantReadWriteData(cardManagerLambda);
+// Reserved concurrency — card-manager (handles rotateQR): rotation must not be throttled (P0-5)
+const cfnCardManager = cardManagerLambda.node.defaultChild as lambda.CfnFunction;
+cfnCardManager.reservedConcurrentExecutions = 50;
 
-tenantUploadsBucket.addEventNotification(
-  s3.EventType.OBJECT_CREATED_PUT,
-  new s3n.LambdaDestination(validatorLambda),
-  { prefix: 'brands/' },
-);
+// ── Scan handler ──
+const scanLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
+Object.entries(tableNames).forEach(([k, v]) => scanLambda.addEnvironment(k, v));
+const cfnScanLambda = scanLambda.node.defaultChild as lambda.CfnFunction;
+cfnScanLambda.reservedConcurrentExecutions = 50;
+userTable.grantReadWriteData(scanLambda);
+refDataTable.grantReadData(scanLambda);
+adminTable.grantReadData(scanLambda);
+receiptSigningKey.grant(scanLambda, 'kms:GetPublicKey');
 
-// ── Brand API handler ──
-const brandApiLambda = backend.brandApiHandlerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => brandApiLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(brandApiLambda);
-refTable.grantReadWriteData(brandApiLambda);
-adminTable.grantReadWriteData(brandApiLambda);
-
-// ── Reminder handler ──
-const reminderLambda = backend.reminderHandlerFn.resources.lambda as lambda.Function;
-reminderLambda.addEnvironment('USER_TABLE', userTable.tableName);
-reminderLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-userTable.grantReadData(reminderLambda);
-adminTable.grantReadWriteData(reminderLambda);
-
-new events.Rule(Stack.of(reminderLambda), 'DailyReminderRule', {
-  schedule: events.Schedule.cron({ hour: '21', minute: '0' }),
-  targets: [new eventsTargets.LambdaFunction(reminderLambda)],
+// Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
+const scanAlias = scanLambda.addAlias('prod', {
+  provisionedConcurrentExecutions: 10,
 });
+
+// Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
+const scanThrottleAlarm = new cloudwatch.Alarm(stack, 'ScanHandlerThrottlesAlarm', {
+  metric: scanLambda.metricThrottles({ period: Duration.minutes(1) }),
+  threshold: 1,
+  evaluationPeriods: 1,
+  alarmDescription: 'Scan handler is being throttled! Concurrency ceiling reached.',
+  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+});
+scanThrottleAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+ 
+// Utilization Alarm — scan-handler: fires when concurrent executions exceed 75% of reservation (37/50)
+const scanUtilizationAlarm = new cloudwatch.Alarm(stack, 'ScanHandlerUtilizationAlarm', {
+  metric: scanLambda.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
+  threshold: 37,
+  evaluationPeriods: 2,
+  alarmDescription: 'Scan handler concurrency is exceeding 75% of reserved capacity. Scaling ceiling approached.',
+  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+});
+scanUtilizationAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+
+const receiptProcessingDLQ = new sqs.Queue(stack, 'ReceiptProcessingDLQ', { retentionPeriod: Duration.days(14) });
+const receiptProcessingQueue = new sqs.Queue(stack, 'ReceiptProcessingQueue', {
+  visibilityTimeout: Duration.seconds(30),
+  deadLetterQueue: {
+    queue: receiptProcessingDLQ,
+    maxReceiveCount: 3,
+  },
+});
+createDlqAlarm(receiptProcessingDLQ, 'ReceiptProcessingDLQ'); // Zero tolerance for checkout failures
+
+receiptProcessingQueue.grantSendMessages(scanLambda);
+scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
+
+const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
+receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
+receiptProcessorLambda.addEventSource(new SqsEventSource(receiptProcessingQueue, { batchSize: 10 }));
+userTable.grantReadWriteData(receiptProcessorLambda);
+// Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
+const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
+cfnReceiptProcessor.reservedConcurrentExecutions = 100;
+
+receiptSigningKey.grant(receiptProcessorLambda, 'kms:Sign');
+receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
+
+// ── Tenant linker ──
+const scanHandlerLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
+// ── P0-5: Concurrency Reservation ──
+(scanHandlerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
+createHighTrafficUtilizationAlarm(scanHandlerLambda, 'ScanHandler');
+
+scanHandlerLambda.addEnvironment('USER_TABLE', userTable.tableName);
+const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
+tenantLinkerLambda.addEnvironment('USER_TABLE', userTable.tableName);
+tenantLinkerLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+userTable.grantReadWriteData(tenantLinkerLambda);
+adminTable.grantReadWriteData(tenantLinkerLambda);
+
+// ── Geofence handler ──
+const geofenceLambda = backend.geofenceHandlerFn.resources.lambda as lambda.Function;
+Object.entries(tableNames).forEach(([k, v]) => geofenceLambda.addEnvironment(k, v));
+userTable.grantReadWriteData(geofenceLambda);
+refDataTable.grantReadData(geofenceLambda);
+adminTable.grantReadData(geofenceLambda);
 
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
 segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+segmentLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 userTable.grantReadWriteData(segmentLambda);
-if (cfnUserTable) {
-  cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
-}
+if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
 
-const segmentDLQ = new sqs.Queue(stack, 'SegmentProcessorDLQ', {
-  retentionPeriod: Duration.days(14),
-});
-Tags.of(segmentDLQ).add('CostCenter', 'tenant-side');
-
-segmentLambda.addEventSource(new DynamoEventSource(userTable, {
-  startingPosition: lambda.StartingPosition.TRIM_HORIZON,
-  filters: [
-    lambda.FilterCriteria.filter({
-      eventName: lambda.FilterRule.or('INSERT', 'MODIFY', 'REMOVE'),
-      dynamodb: {
-        Keys: {
-          sK: {
-            S: [{ prefix: 'RECEIPT#' }, { prefix: 'INVOICE#' }, { prefix: 'SUBSCRIPTION#' }],
-          },
-        },
-      },
-    }),
-  ],
-  retryAttempts: 3,
-}));
-
-// Attach DLQ to segment-processor for unprocessable stream events
+const segmentDLQ = new sqs.Queue(stack, 'SegmentProcessorDLQ', { retentionPeriod: Duration.days(14) });
+createDlqAlarm(segmentDLQ, 'SegmentProcessorDLQ', 5); // Allow small batch jitter before alerting
 segmentLambda.addEnvironment('SEGMENT_DLQ_URL', segmentDLQ.queueUrl);
 segmentDLQ.grantSendMessages(segmentLambda);
 
-// ── Tenant analytics ──
-const tenantAnalyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
-tenantAnalyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
-tenantAnalyticsLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-userTable.grantReadData(tenantAnalyticsLambda);
-refTable.grantReadData(tenantAnalyticsLambda);
+segmentLambda.addEventSource(new DynamoEventSource(userTable, {
+  startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+  filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.or('INSERT', 'MODIFY', 'REMOVE'), dynamodb: { Keys: { sK: { S: [{ prefix: 'RECEIPT#' }, { prefix: 'INVOICE#' }, { prefix: 'SUBSCRIPTION#' }] } } } })],
+  retryAttempts: 1,
+}));
 
-const analyticsApi = new apigw.RestApi(stack, 'TenantAnalyticsApi', {
-  restApiName: `bebo-tenant-analytics-${stage}`,
-});
-const analyticsIntegration = new apigw.LambdaIntegration(tenantAnalyticsLambda);
-analyticsApi.root.addResource('analytics').addResource('segments').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
+// ── Billing Run Schedule (P1-8) ──
+const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
+billingRunLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+refDataTable.grantReadWriteData(billingRunLambda);
+billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ses:SendEmail'],
+  resources: ['*'], // In production, scope to the verified identity
+}));
 
-// ── Scan API ──
-const scanApi = new apigw.RestApi(stack, 'ScanApi', {
-  restApiName: `bebo-scan-api-${stage}`,
-});
-const scanIntegration = new apigw.LambdaIntegration(scanLambda);
-scanApi.root.addResource('scan').addMethod('POST', scanIntegration, { apiKeyRequired: true });
-scanApi.root.addResource('receipt').addMethod('POST', scanIntegration, { apiKeyRequired: true });
+billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/STRIPE_SECRET_KEY`],
+}));
 
-// ── Brand portal API ──
-const brandPortalApi = new apigw.RestApi(stack, 'BrandPortalApi', {
-  restApiName: `bebo-brand-api-${stage}`,
+// Run daily at 02:00 UTC (processes monthly overages on the 1st)
+const billingRunRule = new events.Rule(stack, 'MonthlyBillingRunRule', {
+  schedule: events.Schedule.expression('cron(0 2 * * ? *)'),
 });
-const brandPortalIntegration = new apigw.LambdaIntegration(brandApiLambda);
-brandPortalApi.root.addMethod('ANY', brandPortalIntegration, { apiKeyRequired: true });
-brandPortalApi.root.addProxy({
-  defaultIntegration: brandPortalIntegration,
-  anyMethod: true,
-  defaultMethodOptions: { apiKeyRequired: true },
+billingRunRule.addTarget(new eventsTargets.LambdaFunction(billingRunLambda));
+
+// ── Billing Webhook Handler (P1-8) ──
+const billingWebhookLambda = backend.billingWebhookHandlerFn.resources.lambda as lambda.Function;
+billingWebhookLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+refDataTable.grantReadWriteData(billingWebhookLambda);
+billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [
+    `arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/STRIPE_SECRET_KEY`,
+    `arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/STRIPE_WEBHOOK_SECRET`,
+  ],
+}));
+
+// ── QR Router (P1-10) ──
+const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Function;
+qrRouterLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+refDataTable.grantReadData(qrRouterLambda);
+
+const qrApi = new apigw.RestApi(stack, 'QrRouterApi', { 
+  restApiName: `bebo-qr-router-${stage}`,
+  // CloudFront will sit in front of this, but we keep the API for routing
 });
+const qrIntegration = new apigw.LambdaIntegration(qrRouterLambda);
+const brandRes = qrApi.root.addResource('{brandId}');
+brandRes.addMethod('GET', qrIntegration);
+brandRes.addResource('{storeId}').addMethod('GET', qrIntegration);
+// Add /.well-known for Universal/App Links in future
+const wellKnown = qrApi.root.addResource('.well-known');
+wellKnown.addResource('apple-app-site-association').addMethod('GET', qrIntegration);
+wellKnown.addResource('assetlinks.json').addMethod('GET', qrIntegration);
 
 // ── Receipt Iceberg writer ──
 const receiptIcebergLambda = backend.receiptIcebergWriterFn.resources.lambda as lambda.Function;
-receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', `bebocard-receipt-analytics-${stage}`);
-receiptIcebergLambda.addEnvironment('GLUE_DATABASE', 'bebo_analytics');
+receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
+receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
+receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
-const icebergDLQ = new sqs.Queue(stack, 'ReceiptIcebergDLQ', {
-  retentionPeriod: Duration.days(14),
-});
-Tags.of(icebergDLQ).add('CostCenter', 'tenant-side');
-
+analyticsBucket.grantReadWrite(receiptIcebergLambda);
+icebergDLQ.grantSendMessages(receiptIcebergLambda);
+receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
+  resources: [`arn:aws:athena:${stack.region}:${stack.account}:workgroup/${athenaWorkgroup.name}`],
+}));
+receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['glue:GetDatabase', 'glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
+  resources: [
+    `arn:aws:glue:${stack.region}:${stack.account}:catalog`,
+    `arn:aws:glue:${stack.region}:${stack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:${stack.region}:${stack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+  ],
+}));
+refDataTable.grantReadData(receiptIcebergLambda);
 receiptIcebergLambda.addEventSource(new DynamoEventSource(userTable, {
   startingPosition: lambda.StartingPosition.LATEST,
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') })],
-  retryAttempts: 3,
+  retryAttempts: 1,
+}));
+receiptIcebergLambda.addEventSource(new DynamoEventSource(refDataTable, {
+  startingPosition: lambda.StartingPosition.LATEST,
+  filters: [lambda.FilterCriteria.filter({ 
+    eventName: lambda.FilterRule.isEqual('INSERT'),
+    dynamodb: { Keys: { pK: { S: [{ prefix: 'ANON#' }] } } }
+  })],
+  retryAttempts: 1,
 }));
 
-receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
-icebergDLQ.grantSendMessages(receiptIcebergLambda);
+// ── Tenant provisioner (P1-2) ──
+const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
+tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
+tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
-// ── Payment Router ──
-const paymentRouterLambda = backend.paymentRouterFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => paymentRouterLambda.addEnvironment(k, v));
-adminTable.grantReadWriteData(paymentRouterLambda);
-userTable.grantReadData(paymentRouterLambda);
-refTable.grantReadData(paymentRouterLambda);
+refDataTable.grantReadWriteData(tenantProvisionerLambda);
 
-const checkoutTimeoutQueue = new sqs.Queue(stack, 'CheckoutTimeoutQueue', {
-  visibilityTimeout: Duration.seconds(60),
+tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
+  resources: [
+    `arn:aws:glue:${stack.region}:${stack.account}:catalog`,
+    `arn:aws:glue:${stack.region}:${stack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:${stack.region}:${stack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+  ],
+}));
+
+tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['s3:CreateBucket', 's3:GetBucketPolicy', 's3:PutBucketPolicy', 's3:ListBucket', 's3:HeadBucket'],
+  resources: ['arn:aws:s3:::bebocard-enterprise-*', 'arn:aws:s3:::bebocard-*'],
+}));
+
+tenantProvisionerLambda.addEventSource(new DynamoEventSource(refDataTable, {
+  startingPosition: lambda.StartingPosition.LATEST,
+  filters: [lambda.FilterCriteria.filter({ 
+    eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
+    dynamodb: { 
+      NewImage: { 
+        pK: { S: [{ prefix: 'TENANT#' }] },
+        sK: { S: ['profile'] }
+      } 
+    } 
+  })],
+  retryAttempts: 1,
+}));
+
+// ── Tenant analytics ──
+const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
+analyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
+analyticsLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
+analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+analyticsLambda.addEnvironment('REPORT_TABLE', backend.data.resources.tables['ReportDataEvent'].tableName);
+
+userTable.grantReadData(analyticsLambda);
+refDataTable.grantReadData(analyticsLambda);
+backend.data.resources.tables['ReportDataEvent'].grantReadData(analyticsLambda);
+analyticsBucket.grantReadWrite(analyticsLambda);
+analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
+  resources: [`arn:aws:athena:${stack.region}:${stack.account}:workgroup/${athenaWorkgroup.name}`],
+}));
+analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['glue:GetDatabase', 'glue:GetTable'],
+  resources: [
+    `arn:aws:glue:${stack.region}:${stack.account}:catalog`,
+    `arn:aws:glue:${stack.region}:${stack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:${stack.region}:${stack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts`,
+  ],
+}));
+
+// ── Scan API (v1 & Legacy) ──
+const scanApi = new apigw.RestApi(stack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
+const scanIntegration = new apigw.LambdaIntegration(scanLambda);
+
+// v1 routes
+const scanV1 = scanApi.root.addResource('v1');
+scanV1.addResource('scan').addMethod('POST', scanIntegration, { apiKeyRequired: true });
+scanV1.addResource('receipt').addMethod('POST', scanIntegration, { apiKeyRequired: true });
+scanV1.addResource('invoice').addMethod('POST', scanIntegration, { apiKeyRequired: true });
+scanV1.addResource('health').addMethod('GET', scanIntegration, { apiKeyRequired: false });
+
+// Parental consent approval endpoint (Public, signed token auth)
+const consentRes = scanV1.addResource('consent');
+const parentalRes = consentRes.addResource('parental');
+const approveRes = parentalRes.addResource('approve');
+const parentalConsentLambda = backend.parentalConsentHandlerFn.resources.lambda as lambda.Function;
+approveRes.addMethod('GET', new apigw.LambdaIntegration(parentalConsentLambda), { apiKeyRequired: false });
+parentalConsentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+userTable.grantReadWriteData(parentalConsentLambda);
+parentalConsentLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
+}));
+
+// Billing Webhook Route
+const billingRes = scanV1.addResource('billing');
+const stripeWebhookRes = billingRes.addResource('stripe-webhook');
+stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLambda), { apiKeyRequired: false });
+
+// Wire scanApi URL into post-confirmation (P2-6)
+postConfirmLambda.addEnvironment('SCAN_API_URL', scanApi.url);
+
+// Legacy routes — 301 permanent redirect to /v1/ equivalents (P2-7)
+// Brands that haven't updated their integration receive a redirect, not an error.
+// No API key required on the redirect itself — the brand's key is used on the /v1/ destination.
+const make301 = (v1Path: string) => ({
+  integration: new apigw.MockIntegration({
+    requestTemplates: { 'application/json': '{"statusCode": 301}' },
+    integrationResponses: [{
+      statusCode: '301',
+      responseParameters: {
+        'method.response.header.Location': `'${scanApi.urlForPath(v1Path)}'`,
+        'method.response.header.Deprecation': "'true'",
+        'method.response.header.Sunset': "'Wed, 01 Jul 2026 00:00:00 GMT'",
+      },
+    }],
+  }),
+  options: {
+    apiKeyRequired: false,
+    methodResponses: [{
+      statusCode: '301',
+      responseParameters: { 
+        'method.response.header.Location': true,
+        'method.response.header.Deprecation': true,
+        'method.response.header.Sunset': true,
+      },
+    }],
+  } satisfies apigw.MethodOptions,
 });
-checkoutTimeoutQueue.grantSendMessages(paymentRouterLambda);
-checkoutTimeoutQueue.grantConsumeMessages(paymentRouterLambda);
-paymentRouterLambda.addEnvironment('TIMEOUT_QUEUE_URL', checkoutTimeoutQueue.queueUrl);
-paymentRouterLambda.addEventSource(new SqsEventSource(checkoutTimeoutQueue, { batchSize: 1 }));
 
-const paymentApi = new apigw.RestApi(stack, 'PaymentApi', {
-  restApiName: `bebo-payment-api-${stage}`,
+const { integration: scan301, options: scan301Opts } = make301('/v1/scan');
+scanApi.root.addResource('scan').addMethod('POST', scan301, scan301Opts);
+
+const { integration: receipt301, options: receipt301Opts } = make301('/v1/receipt');
+scanApi.root.addResource('receipt').addMethod('POST', receipt301, receipt301Opts);
+
+const { integration: invoice301, options: invoice301Opts } = make301('/v1/invoice');
+scanApi.root.addResource('invoice').addMethod('POST', invoice301, invoice301Opts);
+
+// ── Tenant Analytics API (v1 & Legacy) ──
+const analyticsApi = new apigw.RestApi(stack, 'TenantAnalyticsApi', {
+  restApiName: `bebo-tenant-analytics-${stage}`,
+  deployOptions: { stageName: stage },
+  defaultMethodOptions: { apiKeyRequired: true },
 });
-const paymentIntegration = new apigw.LambdaIntegration(paymentRouterLambda);
-paymentApi.root.addResource('checkout').addMethod('POST', paymentIntegration, { apiKeyRequired: true });
+const analyticsIntegration = new apigw.LambdaIntegration(analyticsLambda);
 
-// ── Widget Action Handler (Phase 17 — Tenant-Embedded Wallet Actions) ───────
-const widgetActionLambda = backend.widgetActionHandlerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => widgetActionLambda.addEnvironment(k, v));
-widgetActionLambda.addEnvironment('COGNITO_REGION', dataStack.region);
-widgetActionLambda.addEnvironment('COGNITO_USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
-userTable.grantReadWriteData(widgetActionLambda);
-refTable.grantReadData(widgetActionLambda);
-adminTable.grantReadWriteData(widgetActionLambda);
+// v1 routes
+const analyticsV1 = analyticsApi.root.addResource('v1');
+const analyticsV1Res = analyticsV1.addResource('analytics');
+analyticsV1Res.addResource('segments').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
+analyticsV1Res.addResource('intelligence').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
+analyticsV1Res.addResource('subscriber-count').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
 
-const widgetApi = new apigw.RestApi(stack, 'WidgetActionApi', {
-  restApiName: `bebo-widget-api-${stage}`,
-  description: 'Embedded wallet widget API — auth, invoice to wallet, gift card selection',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization'],
+// Legacy routes (Redirected in handler)
+const analyticsLegacy = analyticsApi.root.addResource('analytics');
+analyticsLegacy.addResource('segments').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
+analyticsLegacy.addResource('intelligence').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
+analyticsLegacy.addResource('subscriber-count').addMethod('GET', analyticsIntegration, { apiKeyRequired: true });
+
+// ── User Data Exporter (P2-5) ──
+const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
+exporterLambda.addEnvironment('USER_TABLE', userTable.tableName);
+exporterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucket.bucketName);
+exporterLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
+backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride('AdminCreateUserConfig.AllowAdminCreateUserOnly', true);
+
+userTable.grantReadWriteData(exporterLambda);
+adminTable.grantReadWriteData(exporterLambda);
+exportsBucket.grantReadWrite(exporterLambda);
+
+exporterLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['cognito-idp:AdminDisableUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:AdminDeleteUser'],
+  resources: [backend.auth.resources.userPool.userPoolArn],
+}));
+
+// ── Webhook Reliability Queue (P2-12) ──
+const webhookDLQ = new sqs.Queue(stack, 'WebhookReliabilityDLQ', { retentionPeriod: Duration.days(14) });
+const webhookQueue = new sqs.Queue(stack, 'WebhookReliabilityQueue', {
+  visibilityTimeout: Duration.seconds(60), // Match Lambda timeout + headroom
+  deadLetterQueue: {
+    queue: webhookDLQ,
+    maxReceiveCount: 5,
   },
 });
-const widgetIntegration = new apigw.LambdaIntegration(widgetActionLambda);
-const widgetResource = widgetApi.root.addResource('widget');
-widgetResource.addResource('auth').addMethod('POST', widgetIntegration);
-widgetResource.addResource('invoice').addMethod('POST', widgetIntegration);
-widgetResource.addResource('giftcards').addMethod('GET', widgetIntegration);
-widgetResource.addResource('giftcard').addResource('select').addMethod('POST', widgetIntegration);
+createDlqAlarm(webhookDLQ, 'WebhookReliabilityDLQ');
 
-const widgetPlan = widgetApi.addUsagePlan('WidgetPlan', {
-  name: 'widget-standard',
-  throttle: { rateLimit: 50, burstLimit: 100 },
-  quota: { limit: 5_000, period: apigw.Period.DAY },
+webhookQueue.grantSendMessages(exporterLambda);
+exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
+
+const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
+webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+webhookDispatcherLambda.addEventSource(new SqsEventSource(webhookQueue, { batchSize: 5 }));
+refDataTable.grantReadData(webhookDispatcherLambda);
+// Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
+webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: [`arn:aws:secretsmanager:${stack.region}:${stack.account}:secret:bebocard/webhook-signing/*`],
+}));
+
+// Secrets for FCM
+const firebaseSecret = ssm.StringParameter.fromSecureStringParameterAttributes(stack, 'FirebaseSecretExporter', {
+  parameterName: '/amplify/shared/FIREBASE_SERVICE_ACCOUNT_JSON',
 });
-widgetPlan.addApiStage({ api: widgetApi, stage: widgetApi.deploymentStage });
+exporterLambda.addEnvironment('FIREBASE_SERVICE_ACCOUNT_JSON', firebaseSecret.stringValue);
 
-// ── Web Application Firewall (WAF) ──
+// ── WAF ──
 const publicWebAcl = new wafv2.CfnWebACL(stack, 'PublicApiWebAcl', {
   defaultAction: { allow: {} },
   scope: 'REGIONAL',
-  visibilityConfig: {
-    cloudWatchMetricsEnabled: true,
-    metricName: 'PublicApiWebAcl',
-    sampledRequestsEnabled: true,
-  },
+  visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: 'PublicApiWebAcl', sampledRequestsEnabled: true },
   rules: [
-    {
-      name: 'AWS-AWSManagedRulesCommonRuleSet',
-      priority: 0,
-      statement: {
-        managedRuleGroupStatement: {
-          vendorName: 'AWS',
-          name: 'AWSManagedRulesCommonRuleSet',
-        },
-      },
-      overrideAction: { none: {} },
-      visibilityConfig: {
-        cloudWatchMetricsEnabled: true,
-        metricName: 'AWSManagedRulesCommonRuleSet',
-        sampledRequestsEnabled: true,
-      },
-    },
-    {
-      name: 'LimitRequests1000Per5Min',
-      priority: 1,
-      statement: {
-        rateBasedStatement: {
-          limit: 1000,
-          aggregateKeyType: 'IP',
-        },
-      },
-      action: { block: {} },
-      visibilityConfig: {
-        cloudWatchMetricsEnabled: true,
-        metricName: 'LimitRequests1000Per5Min',
-        sampledRequestsEnabled: true,
-      },
-    },
+    { name: 'AWS-AWSManagedRulesCommonRuleSet', priority: 0, statement: { managedRuleGroupStatement: { vendorName: 'AWS', name: 'AWSManagedRulesCommonRuleSet' } }, overrideAction: { none: {} }, visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: 'AWSManagedRulesCommonRuleSet', sampledRequestsEnabled: true } },
+    { name: 'LimitRequests1000Per5Min', priority: 1, statement: { rateBasedStatement: { limit: 1000, aggregateKeyType: 'IP' } }, action: { block: {} }, visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: 'LimitRequests1000Per5Min', sampledRequestsEnabled: true } },
   ],
 });
 
-// Associate WAF with APIs
-[scanApi, widgetApi, paymentApi, analyticsApi, brandPortalApi].forEach((api, idx) => {
-  new wafv2.CfnWebACLAssociation(stack, `WafAssociation${idx}`, {
+[scanApi, analyticsApi].forEach((api, idx) => {
+  new wafv2.CfnWebACLAssociation(stack, `WafAssoc${idx}`, {
     resourceArn: `arn:aws:apigateway:${stack.region}::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
     webAclArn: publicWebAcl.attrArn,
   });
 });
 
-new CfnOutput(stack, 'WidgetApiUrl', {
-  value: widgetApi.url,
-  description: 'Widget API base URL — hosted iframe app calls /widget/*',
-});
+// ── Analytics Compactor (P1-5) ──
+const compactorLambda = backend.analyticsCompactorFn.resources.lambda as lambda.Function;
+compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
+compactorLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+compactorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 
-backend.addOutput({
-  custom: {
-    WidgetActionApi: {
-      url: widgetApi.url,
-    },
-  },
+analyticsBucket.grantReadWrite(compactorLambda);
+compactorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
+  resources: [
+    analyticsBucket.bucketArn,
+    `${analyticsBucket.bucketArn}/*`,
+    'arn:aws:s3:::bebocard-enterprise-*',
+    'arn:aws:s3:::bebocard-enterprise-*/*',
+  ],
+}));
+
+compactorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
+  resources: [`arn:aws:athena:${stack.region}:${stack.account}:workgroup/${athenaWorkgroup.name}`],
+}));
+
+compactorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['glue:GetDatabase', 'glue:GetTables', 'glue:GetTable', 'glue:UpdateTable'],
+  resources: [
+    `arn:aws:glue:${stack.region}:${stack.account}:catalog`,
+    `arn:aws:glue:${stack.region}:${stack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:${stack.region}:${stack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+  ],
+}));
+
+// ── Analytics Backfiller (P1-4) ──
+const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambda.Function;
+backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
+backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
+backfillerLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
+
+analyticsBucket.grantReadWrite(backfillerLambda);
+backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
+  resources: [
+    analyticsBucket.bucketArn,
+    `${analyticsBucket.bucketArn}/*`,
+    'arn:aws:s3:::bebocard-enterprise-*',
+    'arn:aws:s3:::bebocard-enterprise-*/*',
+  ],
+}));
+
+backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
+  resources: [`arn:aws:athena:${stack.region}:${stack.account}:workgroup/${athenaWorkgroup.name}`],
+}));
+
+backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['glue:GetDatabase', 'glue:GetTables', 'glue:GetTable', 'glue:UpdateTable', 'glue:CreateTable'],
+  resources: [
+    `arn:aws:glue:${stack.region}:${stack.account}:catalog`,
+    `arn:aws:glue:${stack.region}:${stack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:${stack.region}:${stack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+  ],
+}));
+
+refDataTable.grantReadData(backfillerLambda);
+userTable.grantReadData(backfillerLambda);
+ 
+// Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
+const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
+cfnBackfiller.reservedConcurrentExecutions = 10;
+
+// Schedule: Nightly at 2:00 AM UTC
+const cronRule = new events.Rule(stack, 'NightlyCompactionRule', {
+  schedule: events.Schedule.cron({ hour: '2', minute: '0' }),
 });
+cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
+
+// Analytics Aggregator Schedule: Nightly at 1:00 AM UTC (before compaction)
+const aggregatorLambda = backend.analyticsAggregatorFn.resources.lambda as lambda.Function;
+Object.entries(tableNames).forEach(([k, v]) => aggregatorLambda.addEnvironment(k, v));
+userTable.grantReadData(aggregatorLambda);
+refDataTable.grantReadData(aggregatorLambda);
+backend.data.resources.tables['ReportDataEvent'].grantReadWriteData(aggregatorLambda);
+
+const aggregatorRule = new events.Rule(stack, 'NightlyAggregationRule', {
+  schedule: events.Schedule.cron({ hour: '1', minute: '0' }),
+});
+aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
+
+// ── Custom Segment Evaluator (EOD batch) ──
+// Nightly at 00:30 UTC — after segment-processor stream has caught up, before analytics compaction at 02:00.
+const customSegmentLambda = backend.customSegmentEvaluatorFn.resources.lambda as lambda.Function;
+customSegmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+customSegmentLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+
+// Read segment defs from RefDataEvent; write membership records to UserDataEvent
+refDataTable.grantReadData(customSegmentLambda);
+userTable.grantReadWriteData(customSegmentLambda);
+
+// Update SEGMENT_DEF# stats (memberCount, lastEvaluatedAt) — needs UpdateItem on RefDataEvent
+refDataTable.grantWriteData(customSegmentLambda);
+
+const customSegmentDLQ = new sqs.Queue(stack, 'CustomSegmentEvaluatorDLQ', {
+  retentionPeriod: Duration.days(14),
+});
+createDlqAlarm(customSegmentDLQ, 'CustomSegmentEvaluatorDLQ');
+customSegmentLambda.addEnvironment('CUSTOM_SEGMENT_DLQ_URL', customSegmentDLQ.queueUrl);
+customSegmentDLQ.grantSendMessages(customSegmentLambda);
+
+const customSegmentRule = new events.Rule(stack, 'NightlyCustomSegmentRule', {
+  schedule: events.Schedule.cron({ hour: '0', minute: '30' }),
+  description: 'Nightly end-of-day custom segment evaluation at 00:30 UTC',
+});
+customSegmentRule.addTarget(new eventsTargets.LambdaFunction(customSegmentLambda));
+
+Tags.of(customSegmentLambda).add('Function', 'custom-segment-evaluator');
+Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
+
+// ── Affiliate Feed Sync (Nightly at 05:00 UTC) ──
+const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
+affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+refDataTable.grantReadWriteData(affiliateSyncLambda);
+
+const affiliateSyncRule = new events.Rule(stack, 'NightlyAffiliateSyncRule', {
+  schedule: events.Schedule.cron({ hour: '5', minute: '0' }),
+  description: 'Nightly sync of affiliate offers from Commission Factory / Impact',
+});
+affiliateSyncRule.addTarget(new eventsTargets.LambdaFunction(affiliateSyncLambda));
+
+Tags.of(affiliateSyncLambda).add('Function', 'affiliate-feed-sync');
+Tags.of(affiliateSyncLambda).add('CostCenter', 'marketing');
 
 // ── Tags ──
-const tenantId = process.env.BEBO_TENANT_ID || 'core';
-const tagEntries: Array<[string, string]> = [
-  ['Project', 'bebocard'],
-  ['Environment', branchName],
-  ['TenantId', tenantId],
-  ['ManagedBy', 'amplify-gen2'],
-];
-const identifiedStacks = new Set<Stack>([dataStack, stack]);
 const functionTags: Array<[lambda.Function, string, string]> = [
   [postConfirmLambda, 'post-confirmation', 'user-side'],
   [cardManagerLambda, 'card-manager', 'user-side'],
   [scanLambda, 'scan-handler', 'tenant-side'],
   [tenantLinkerLambda, 'tenant-linker', 'user-side'],
   [geofenceLambda, 'geofence-handler', 'user-side'],
-  [validatorLambda, 'content-validator', 'tenant-side'],
-  [brandApiLambda, 'brand-api-handler', 'tenant-side'],
-  [reminderLambda, 'reminder-handler', 'user-side'],
-  [tenantAnalyticsLambda, 'tenant-analytics', 'tenant-side'],
   [segmentLambda, 'segment-processor', 'tenant-side'],
   [receiptIcebergLambda, 'receipt-iceberg', 'tenant-side'],
-  [paymentRouterLambda, 'payment-router', 'tenant-side'],
-  [widgetActionLambda, 'widget-action-handler', 'tenant-side'],
+  [analyticsLambda, 'tenant-analytics', 'tenant-side'],
+  [tenantProvisionerLambda, 'tenant-provisioner', 'tenant-side'],
+  [exporterLambda, 'user-data-exporter', 'user-side'],
+  [backend.analyticsCompactorFn.resources.lambda as lambda.Function, 'analytics-compactor', 'ops'],
+  [backfillerLambda, 'analytics-backfiller', 'ops'],
+  [webhookDispatcherLambda, 'webhook-dispatcher', 'tenant-side'],
+  [backend.receiptClaimHandlerFn.resources.lambda as lambda.Function, 'receipt-claim-handler', 'user-side'],
 ];
 
-for (const fn of functionTags.map(t => t[0])) identifiedStacks.add(Stack.of(fn));
-for (const s of identifiedStacks) {
-  for (const [key, value] of tagEntries) Tags.of(s).add(key, value);
-}
-for (const [fn, functionName, costCenter] of functionTags) {
-  Tags.of(fn).add('Function', functionName);
-  Tags.of(fn).add('CostCenter', costCenter);
+for (const [fn, name, cost] of functionTags) {
+  Tags.of(fn).add('Function', name);
+  Tags.of(fn).add('CostCenter', cost);
 }
 
-// ── Consent Handler (Phase 6 — Consent-Gated Identity Release) ───────────────
-// SQS queue for 60-second consent timeout checks.
-// Lambda handles REST (POST /consent-request) and SQS timeout events.
+// ── Receipt Claim Handler Setup ──
+const receiptClaimLambda = backend.receiptClaimHandlerFn.resources.lambda as lambda.Function;
+receiptClaimLambda.addEnvironment('USER_TABLE', userTable.tableName);
+receiptClaimLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+userTable.grantReadWriteData(receiptClaimLambda);
+refDataTable.grantReadWriteData(receiptClaimLambda);
 
-const consentLambda = backend.consentHandlerFn.resources.lambda as lambda.Function;
-consentLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-consentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-consentLambda.addEnvironment('REF_TABLE', refTable.tableName);
-adminTable.grantReadWriteData(consentLambda);
-userTable.grantReadData(consentLambda);
-refTable.grantReadData(consentLambda);
+// ── Remote Config Wiring (P2-21) ──
+const remoteConfigLambda = backend.remoteConfigHandlerFn.resources.lambda as lambda.Function;
+remoteConfigLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+refDataTable.grantReadData(remoteConfigLambda);
 
-const consentTimeoutQueue = new sqs.Queue(stack, 'ConsentTimeoutQueue', {
-  visibilityTimeout: Duration.seconds(60),
-  deadLetterQueue: {
-    queue: new sqs.Queue(stack, 'ConsentTimeoutDLQ', {
-      retentionPeriod: Duration.days(7),
-    }),
-    maxReceiveCount: 3,
-  },
-});
-consentTimeoutQueue.grantSendMessages(consentLambda);
-consentTimeoutQueue.grantConsumeMessages(consentLambda);
-consentLambda.addEnvironment('CONSENT_TIMEOUT_QUEUE_URL', consentTimeoutQueue.queueUrl);
-consentLambda.addEventSource(new SqsEventSource(consentTimeoutQueue, { batchSize: 1 }));
+// ── Click Tracking (P2-19) ──
+const clickTrackingLambda = backend.clickTrackingHandlerFn.resources.lambda as lambda.Function;
+clickTrackingLambda.addEnvironment('REPORT_TABLE', tableNames.REPORT_TABLE);
+clickTrackingLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+backend.data.resources.tables['ReportDataEvent'].grantReadWriteData(clickTrackingLambda);
+refDataTable.grantReadData(clickTrackingLambda);
 
-const consentApi = new apigw.RestApi(stack, 'ConsentApi', {
-  restApiName: `bebo-consent-api-${stage}`,
-  description: 'Consent-Gated Identity Release API — brand POS backends request user identity fields',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['x-api-key', 'Content-Type'],
-  },
+// ── P1-2 Glue IAM Refinement ──
+[tenantProvisionerLambda, receiptIcebergLambda].forEach(fn => {
+  fn.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['glue:GetDatabase'],
+    resources: [
+      `arn:aws:glue:${stack.region}:${stack.account}:catalog`,
+      `arn:aws:glue:${stack.region}:${stack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    ],
+  }));
 });
 
-const consentIntegration = new apigw.LambdaIntegration(consentLambda);
-const consentRequestResource = consentApi.root.addResource('consent-request');
-consentRequestResource.addMethod('POST', consentIntegration, { apiKeyRequired: true });
-const consentIdResource = consentRequestResource.addResource('{requestId}');
-consentIdResource.addResource('status').addMethod('GET', consentIntegration, { apiKeyRequired: true });
-
-const consentPlan = consentApi.addUsagePlan('ConsentPlan', {
-  name: 'consent-standard',
-  throttle: { rateLimit: 100, burstLimit: 200 },
-  quota: { limit: 10_000, period: apigw.Period.DAY },
-});
-consentPlan.addApiStage({ api: consentApi, stage: consentApi.deploymentStage });
-
-new CfnOutput(stack, 'ConsentApiUrl', {
-  value: consentApi.url,
-  description: 'Consent API base URL — brand POS backends call POST /consent-request',
-});
-
-Tags.of(consentApi).add('CostCenter', 'tenant-side');
-Tags.of(consentApi).add('Function', 'consent-api');
-Tags.of(consentTimeoutQueue).add('CostCenter', 'tenant-side');
-
-// ── Subscription Proxy (Phase 7 — Subscription Revocation Proxy) ─────────────
-// REST API for brand-initiated recurring charge registration and user-initiated
-// cancellation proxy. No SQS queue needed — cancellations are synchronous.
-
-const subscriptionLambda = backend.subscriptionProxyFn.resources.lambda as lambda.Function;
-subscriptionLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-subscriptionLambda.addEnvironment('USER_TABLE', userTable.tableName);
-subscriptionLambda.addEnvironment('REF_TABLE', refTable.tableName);
-adminTable.grantReadData(subscriptionLambda);
-userTable.grantReadWriteData(subscriptionLambda);
-refTable.grantReadData(subscriptionLambda);
-
-const recurringApi = new apigw.RestApi(stack, 'RecurringApi', {
-  restApiName: `bebo-recurring-api-${stage}`,
-  description: 'Subscription Revocation Proxy API — brand registers recurring charges, user cancels via app',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['x-api-key', 'Content-Type'],
-  },
-});
-
-const recurringIntegration = new apigw.LambdaIntegration(subscriptionLambda);
-const recurringResource = recurringApi.root.addResource('recurring');
-recurringResource.addResource('register').addMethod('POST', recurringIntegration, { apiKeyRequired: true });
-const subIdResource = recurringResource.addResource('{subId}');
-subIdResource.addMethod('DELETE', recurringIntegration, { apiKeyRequired: true });
-subIdResource.addResource('status').addMethod('GET', recurringIntegration, { apiKeyRequired: true });
-
-const recurringPlan = recurringApi.addUsagePlan('RecurringPlan', {
-  name: 'recurring-standard',
-  throttle: { rateLimit: 100, burstLimit: 200 },
-  quota: { limit: 10_000, period: apigw.Period.DAY },
-});
-recurringPlan.addApiStage({ api: recurringApi, stage: recurringApi.deploymentStage });
-
-new CfnOutput(stack, 'RecurringApiUrl', {
-  value: recurringApi.url,
-  description: 'Recurring Subscription API base URL — brand backends call POST /recurring/register',
-});
-
-Tags.of(recurringApi).add('CostCenter', 'tenant-side');
-Tags.of(recurringApi).add('Function', 'recurring-api');
-
-// ── Gift Card Router (Phase 8 — Federated Gift Card Delivery) ─────────────────
-// REST API for brand-initiated gift card delivery via the scan channel.
-// Brands deliver gift cards to users using secondaryULID — no PII exposed.
-
-const giftCardLambda = backend.giftCardRouterFn.resources.lambda as lambda.Function;
-giftCardLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-giftCardLambda.addEnvironment('USER_TABLE', userTable.tableName);
-giftCardLambda.addEnvironment('REF_TABLE', refTable.tableName);
-adminTable.grantReadData(giftCardLambda);
-userTable.grantReadWriteData(giftCardLambda);
-refTable.grantReadData(giftCardLambda);
-
-const giftCardApi = new apigw.RestApi(stack, 'GiftCardApi', {
-  restApiName: `bebo-gift-card-api-${stage}`,
-  description: 'Federated Gift Card Delivery API — brand delivers gift cards to users via secondaryULID',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['x-api-key', 'Content-Type'],
-  },
-});
-
-const giftCardIntegration = new apigw.LambdaIntegration(giftCardLambda);
-const giftCardResource = giftCardApi.root.addResource('gift-card');
-giftCardResource.addResource('deliver').addMethod('POST', giftCardIntegration, { apiKeyRequired: true });
-const deliveryIdResource = giftCardResource.addResource('{deliveryId}');
-deliveryIdResource.addResource('status').addMethod('GET', giftCardIntegration, { apiKeyRequired: true });
-
-const giftCardPlan = giftCardApi.addUsagePlan('GiftCardPlan', {
-  name: 'gift-card-standard',
-  throttle: { rateLimit: 50, burstLimit: 100 },
-  quota: { limit: 5_000, period: apigw.Period.DAY },
-});
-giftCardPlan.addApiStage({ api: giftCardApi, stage: giftCardApi.deploymentStage });
-
-new CfnOutput(stack, 'GiftCardApiUrl', {
-  value: giftCardApi.url,
-  description: 'Gift Card Delivery API base URL — brand backends call POST /gift-card/deliver',
-});
-
-Tags.of(giftCardApi).add('CostCenter', 'tenant-side');
-Tags.of(giftCardApi).add('Function', 'gift-card-api');
-
-// ── Enrollment Handler (Phase 9 — Enrollment Marketplace) ────────────────────
-// Brand-initiated: brand pushes enrollment offer via REST; user accepts/declines in app.
-// User-initiated: user taps "Join" in app; alias generated and delivered to brand webhook.
-
-const enrollmentLambda = backend.enrollmentHandlerFn.resources.lambda as lambda.Function;
-enrollmentLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-enrollmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-enrollmentLambda.addEnvironment('REF_TABLE', refTable.tableName);
-adminTable.grantReadWriteData(enrollmentLambda);
-userTable.grantReadWriteData(enrollmentLambda);
-refTable.grantReadData(enrollmentLambda);
-
-const enrollmentApi = new apigw.RestApi(stack, 'EnrollmentApi', {
-  restApiName: `bebo-enrollment-api-${stage}`,
-  description: 'Enrollment Marketplace API — brand sends enrollment offers, user accepts via app',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['x-api-key', 'Content-Type'],
-  },
-});
-
-const enrollmentIntegration = new apigw.LambdaIntegration(enrollmentLambda);
-const enrollResource = enrollmentApi.root.addResource('enroll');
-enrollResource.addMethod('POST', enrollmentIntegration, { apiKeyRequired: true });
-const enrollIdResource = enrollResource.addResource('{enrollmentId}');
-enrollIdResource.addResource('status').addMethod('GET', enrollmentIntegration, { apiKeyRequired: true });
-
-const enrollmentPlan = enrollmentApi.addUsagePlan('EnrollmentPlan', {
-  name: 'enrollment-standard',
-  throttle: { rateLimit: 100, burstLimit: 200 },
-  quota: { limit: 10_000, period: apigw.Period.DAY },
-});
-enrollmentPlan.addApiStage({ api: enrollmentApi, stage: enrollmentApi.deploymentStage });
-
-new CfnOutput(stack, 'EnrollmentApiUrl', {
-  value: enrollmentApi.url,
-  description: 'Enrollment API base URL — brand backends call POST /enroll',
-});
-
-Tags.of(enrollmentApi).add('CostCenter', 'tenant-side');
-Tags.of(enrollmentApi).add('Function', 'enrollment-api');
-
-// ── SMB Handler (Phase 11 — SMB Loyalty-as-a-Service) ─────────────────────────
-// Stamp card loyalty program for small brands.
-// Routes: POST /smb/stamp, POST /smb/redeem, GET /smb/card, GET /smb/analytics
-
-const smbLambda = backend.smbHandlerFn.resources.lambda as lambda.Function;
-smbLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-smbLambda.addEnvironment('USER_TABLE', userTable.tableName);
-smbLambda.addEnvironment('REF_TABLE', refTable.tableName);
-adminTable.grantReadWriteData(smbLambda);
-userTable.grantReadWriteData(smbLambda);
-refTable.grantReadWriteData(smbLambda);
-
-const smbApi = new apigw.RestApi(stack, 'SmbApi', {
-  restApiName: `bebo-smb-api-${stage}`,
-  description: 'SMB Loyalty-as-a-Service API — stamp cards, redemptions, SMB lite analytics',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['x-api-key', 'Content-Type'],
-  },
-});
-
-const smbIntegration = new apigw.LambdaIntegration(smbLambda);
-const smbResource = smbApi.root.addResource('smb');
-smbResource.addResource('stamp').addMethod('POST', smbIntegration, { apiKeyRequired: true });
-smbResource.addResource('redeem').addMethod('POST', smbIntegration, { apiKeyRequired: true });
-smbResource.addResource('card').addMethod('GET', smbIntegration, { apiKeyRequired: true });
-smbResource.addResource('analytics').addMethod('GET', smbIntegration, { apiKeyRequired: true });
-
-// Three-tier usage plans matching SMB pricing tiers
-const smbStarterPlan = smbApi.addUsagePlan('SmbStarterPlan', {
-  name: 'smb-starter',
-  throttle: { rateLimit: 10, burstLimit: 20 },
-  quota: { limit: 500, period: apigw.Period.MONTH },
-});
-smbStarterPlan.addApiStage({ api: smbApi, stage: smbApi.deploymentStage });
-
-const smbGrowthPlan = smbApi.addUsagePlan('SmbGrowthPlan', {
-  name: 'smb-growth',
-  throttle: { rateLimit: 30, burstLimit: 60 },
-  quota: { limit: 2000, period: apigw.Period.MONTH },
-});
-smbGrowthPlan.addApiStage({ api: smbApi, stage: smbApi.deploymentStage });
-
-const smbBusinessPlan = smbApi.addUsagePlan('SmbBusinessPlan', {
-  name: 'smb-business',
-  throttle: { rateLimit: 100, burstLimit: 200 },
-  // No hard monthly cap for business tier
-});
-smbBusinessPlan.addApiStage({ api: smbApi, stage: smbApi.deploymentStage });
-
-new CfnOutput(stack, 'SmbApiUrl', {
-  value: smbApi.url,
-  description: 'SMB Loyalty API base URL — POST /smb/stamp to stamp a user card at checkout',
-});
-
-Tags.of(smbApi).add('CostCenter', 'tenant-side');
-Tags.of(smbApi).add('Function', 'smb-api');
-Tags.of(smbLambda).add('Function', 'smb-handler');
-Tags.of(smbLambda).add('CostCenter', 'tenant-side');
-
-// ── Gift Card Handler (Phase 13 — Gift Card Marketplace) ─────────────────────
-// AppSync resolver (purchaseForSelf, purchaseAsGift, syncGiftCardBalance) +
-// REST (POST /webhook for Stripe, GET /gift/:token for claim resolution).
-
-const giftCardHandlerLambda = backend.giftCardHandlerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => giftCardHandlerLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(giftCardHandlerLambda);
-refTable.grantReadData(giftCardHandlerLambda);
-adminTable.grantReadWriteData(giftCardHandlerLambda);
-
-// KMS key for gift card PIN transit encryption
-const giftCardKmsKey = new kms.Key(stack, 'GiftCardKmsKey', {
-  description: 'Encrypts gift card cardNumber + PIN in transit (GIFT# AdminDataEvent records)',
-  enableKeyRotation: true,
-  removalPolicy: RemovalPolicy.RETAIN,
-});
-giftCardKmsKey.grantEncryptDecrypt(giftCardHandlerLambda);
-giftCardHandlerLambda.addEnvironment('GIFT_CARD_KMS_KEY_ARN', giftCardKmsKey.keyArn);
-
-// SES send permission
-giftCardHandlerLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['ses:SendEmail', 'ses:SendRawEmail'],
-  resources: ['*'],
-}));
-
-const giftCardMarketplaceApi = new apigw.RestApi(stack, 'GiftCardMarketplaceApi', {
-  restApiName: `bebo-gift-card-marketplace-${stage}`,
-  description: 'Gift Card Marketplace public REST endpoints — Stripe webhook + gift claim',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'stripe-signature'],
-  },
-});
-
-const giftMarketIntegration = new apigw.LambdaIntegration(giftCardHandlerLambda);
-giftCardMarketplaceApi.root
-  .addResource('webhook')
-  .addMethod('POST', giftMarketIntegration);
-
-const giftResource = giftCardMarketplaceApi.root.addResource('gift');
-giftResource
-  .addResource('{token}')
-  .addMethod('GET', giftMarketIntegration);
-
-new CfnOutput(stack, 'GiftCardMarketplaceApiUrl', {
-  value: giftCardMarketplaceApi.url,
-  description: 'Gift Card Marketplace REST API — POST /webhook (Stripe), GET /gift/{token}',
-});
-
-Tags.of(giftCardHandlerLambda).add('Function', 'gift-card-handler');
-Tags.of(giftCardHandlerLambda).add('CostCenter', 'marketplace');
-
-// ── Catalog Sync (Phase 13 — Gift Card Catalog) ───────────────────────────────
-// Weekly EventBridge cron pulls distributor catalogs and upserts GIFTCARD#
-// records into RefDataEvent.
-
-const catalogSyncLambda = backend.catalogSyncFn.resources.lambda as lambda.Function;
-catalogSyncLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-refTable.grantReadWriteData(catalogSyncLambda);
-
-new events.Rule(Stack.of(catalogSyncLambda), 'WeeklyCatalogSyncRule', {
-  schedule: events.Schedule.cron({ weekDay: 'SUN', hour: '2', minute: '0' }),
-  targets: [new eventsTargets.LambdaFunction(catalogSyncLambda)],
-});
-
-Tags.of(catalogSyncLambda).add('Function', 'catalog-sync');
-Tags.of(catalogSyncLambda).add('CostCenter', 'marketplace');
-
-// ── Subscription Catalog Sync ─────────────────────────────────────────────────
-// Weekly cron (Sunday 03:00 UTC) — upserts subscription provider catalog and
-// BENCHMARK# records into RefDataEvent for the marketplace page and negotiator.
-
-const catalogSubscriptionSyncLambda = backend.catalogSubscriptionSyncFn.resources.lambda as lambda.Function;
-catalogSubscriptionSyncLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-refTable.grantReadWriteData(catalogSubscriptionSyncLambda);
-
-new events.Rule(Stack.of(catalogSubscriptionSyncLambda), 'WeeklySubscriptionCatalogSyncRule', {
-  schedule: events.Schedule.cron({ weekDay: 'SUN', hour: '3', minute: '0' }),
-  targets: [new eventsTargets.LambdaFunction(catalogSubscriptionSyncLambda)],
-});
-
-Tags.of(catalogSubscriptionSyncLambda).add('Function', 'catalog-subscription-sync');
-Tags.of(catalogSubscriptionSyncLambda).add('CostCenter', 'marketplace');
-
-// ── Gift Claim Web Fallback (Phase 13 — web claim page for non-app recipients) ─
-// S3 bucket + CloudFront distribution serving the static claim page at
-// app.bebocard.com/gift/* for recipients who don't have the app installed.
-// iOS Universal Links / Android App Links intercepts the same URL for app users.
-
-const giftClaimBucket = new s3.Bucket(stack, 'GiftClaimWebBucket', {
-  removalPolicy: RemovalPolicy.RETAIN,
-  // No public access — served exclusively via CloudFront OAC
-  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-});
-
-const giftClaimDistribution = new cloudfront.Distribution(stack, 'GiftClaimDistribution', {
-  comment: 'BeboCard gift claim web fallback — app.bebocard.com/gift/*',
-  defaultBehavior: {
-    origin: cfOrigins.S3BucketOrigin.withOriginAccessControl(giftClaimBucket),
-    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-    cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-  },
-  defaultRootObject: 'index.html',
-  errorResponses: [
-    // Route all paths (including /gift/<token>) to index.html — JS extracts the token
-    {
-      httpStatus: 403,
-      responseHttpStatus: 200,
-      responsePagePath: '/index.html',
-    },
-    {
-      httpStatus: 404,
-      responseHttpStatus: 200,
-      responsePagePath: '/index.html',
-    },
+// ── BeboCard Operational Dashboard (P2-11) ──
+new cloudwatch.Dashboard(stack, 'BeboCardOpsDashboard', {
+  dashboardName: `BeboCard-Core-Ops-${stage}`,
+  widgets: [
+    [
+      new cloudwatch.TextWidget({
+        markdown: '# BeboCard Core Ops\nPrimary health metrics for scan resolution and retail delivery.',
+        width: 24,
+      }),
+    ],
+    [
+      new cloudwatch.GraphWidget({
+        title: 'Scan API Latency (p95)',
+        left: [scanLambda.metricDuration({ statistic: 'p95', label: 'Scan Handler' })],
+        width: 12,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Lambda Concurrent Executions',
+        left: [
+          scanLambda.metric('ConcurrentExecutions', { label: 'Scan API' }),
+          cardManagerLambda.metric('ConcurrentExecutions', { label: 'Card Manager' }),
+        ],
+        width: 12,
+      }),
+    ],
+    [
+      new cloudwatch.GraphWidget({
+        title: 'Webhook DLQ Depth (Retries Exhausted)',
+        left: [webhookDLQ.metricApproximateNumberOfMessagesVisible()],
+        width: 24,
+      }),
+    ],
   ],
 });
 
-new s3deploy.BucketDeployment(stack, 'GiftClaimWebDeploy', {
-  sources: [s3deploy.Source.asset('./gift-claim-web')],
-  destinationBucket: giftClaimBucket,
-  distribution: giftClaimDistribution,
-  distributionPaths: ['/*'],
+// ── P0-6: Cognito Export Lambda (weekly DR backup) ───────────────────────────
+const cognitoExportBucket = new s3.Bucket(stack, 'CognitoExportBucket', {
+  bucketName: `bebocard-cognito-exports-${stack.account}`,
+  encryption: s3.BucketEncryption.KMS_MANAGED,
+  versioned: true,
+  lifecycleRules: [{ expiration: Duration.days(90), id: 'expire-old-exports' }],
+  removalPolicy: RemovalPolicy.RETAIN,
+  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
 });
 
-new CfnOutput(stack, 'GiftClaimWebUrl', {
-  value: `https://${giftClaimDistribution.distributionDomainName}`,
-  description: 'Gift claim web fallback — map app.bebocard.com/gift/* to this CloudFront distribution',
-});
+const cognitoExportLambda = backend.cognitoExportFn.resources.lambda as lambda.Function;
+cognitoExportLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
+cognitoExportLambda.addEnvironment('EXPORT_BUCKET', cognitoExportBucket.bucketName);
+cognitoExportBucket.grantPut(cognitoExportLambda);
 
-Tags.of(giftClaimBucket).add('CostCenter', 'marketplace');
-Tags.of(giftClaimDistribution).add('CostCenter', 'marketplace');
-
-// ── Discovery Handler (public brand/offer/catalogue/newsletter feeds) ─────────
-// No API key required — public read-only catalog data for the app discovery tab.
-// Rate-limited by WAF (shared rule group). Returns region-filtered paginated results.
-
-const discoveryLambda = backend.discoveryHandlerFn.resources.lambda as lambda.Function;
-discoveryLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-refTable.grantReadData(discoveryLambda);
-
-const discoveryApi = new apigw.RestApi(stack, 'DiscoveryApi', {
-  restApiName: 'bebo-discovery-api',
-  defaultCorsPreflightOptions: {
-    allowOrigins: apigw.Cors.ALL_ORIGINS,
-    allowMethods: ['GET', 'OPTIONS'],
-    allowHeaders: ['Authorization', 'Content-Type'],
-  },
-});
-
-const discoveryIntegration = new apigw.LambdaIntegration(discoveryLambda);
-const discoverResource = discoveryApi.root.addResource('discover');
-discoverResource.addResource('brands').addMethod('GET', discoveryIntegration);
-discoverResource.addResource('offers').addMethod('GET', discoveryIntegration);
-discoverResource.addResource('catalogues').addMethod('GET', discoveryIntegration);
-discoverResource.addResource('newsletters').addMethod('GET', discoveryIntegration);
-
-new CfnOutput(stack, 'DiscoveryApiUrl', {
-  value: discoveryApi.url,
-  description: 'Discovery REST API — GET /discover/{brands|offers|catalogues|newsletters}',
-});
-
-Tags.of(discoveryLambda).add('Function', 'discovery-handler');
-Tags.of(discoveryLambda).add('CostCenter', 'platform');
-
-// ── Gift Card Refund (Phase 13 — Auto-refund unredeemed gifts) ───────────────
-// Daily EventBridge cron queries AdminTable for expired unclaimed gifts, decrypts
-// PIN via KMS, writes back to sender's UserTable wallet.
-
-const giftCardRefundLambda = backend.giftCardRefundFn.resources.lambda as lambda.Function;
-giftCardRefundLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-giftCardRefundLambda.addEnvironment('USER_TABLE', userTable.tableName);
-giftCardRefundLambda.addEnvironment('GIFT_CARD_KMS_KEY_ARN', giftCardKmsKey.keyArn);
-// Firebase is sent from the existing environment var
-
-adminTable.grantReadWriteData(giftCardRefundLambda);
-userTable.grantReadWriteData(giftCardRefundLambda);
-giftCardKmsKey.grantEncryptDecrypt(giftCardRefundLambda);
-
-new events.Rule(Stack.of(giftCardRefundLambda), 'DailyGiftCardRefundRule', {
-  schedule: events.Schedule.cron({ hour: '3', minute: '0' }), // Nightly 3 AM UTC
-  targets: [new eventsTargets.LambdaFunction(giftCardRefundLambda)],
-});
-
-Tags.of(giftCardRefundLambda).add('Function', 'gift-card-refund');
-Tags.of(giftCardRefundLambda).add('CostCenter', 'marketplace');
-
-// ── Subscription Negotiator (Phase 14 — Subscription Intelligence) ───────────
-
-const subscriptionNegotiatorLambda = backend.subscriptionNegotiator.resources.lambda as lambda.Function;
-subscriptionNegotiatorLambda.addEnvironment('USER_TABLE', userTable.tableName);
-subscriptionNegotiatorLambda.addEnvironment('REF_TABLE', refTable.tableName);
-
-userTable.grantReadWriteData(subscriptionNegotiatorLambda);
-refTable.grantReadData(subscriptionNegotiatorLambda);
-
-new events.Rule(Stack.of(subscriptionNegotiatorLambda), 'DailySubscriptionNegotiatorRule', {
-  schedule: events.Schedule.cron({ hour: '2', minute: '0' }), // Nightly 2 AM UTC
-  targets: [new eventsTargets.LambdaFunction(subscriptionNegotiatorLambda)],
-});
-
-Tags.of(subscriptionNegotiatorLambda).add('Function', 'subscription-negotiator');
-
-// ── Billing Run Handler (Monthly Overage Invoicing) ──────────────────────────
-// EventBridge cron on the 1st of each month at 3 AM UTC — iterates all active
-// tenants, calculates per-category overage, creates Stripe invoice items, and
-// sends billing summary emails via SES.
-
-const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
-billingRunLambda.addEnvironment('REFDATA_TABLE', refTable.tableName);
-refTable.grantReadWriteData(billingRunLambda);
-
-// SES for billing summary emails
-billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['ses:SendEmail', 'ses:SendRawEmail'],
-  resources: ['*'],
+cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['cognito-idp:ListUsers'],
+  resources: [backend.auth.resources.userPool.userPoolArn],
 }));
 
-new events.Rule(Stack.of(billingRunLambda), 'MonthlyBillingRunRule', {
-  schedule: events.Schedule.cron({ day: '1', hour: '3', minute: '0' }),
-  targets: [new eventsTargets.LambdaFunction(billingRunLambda)],
+const cognitoExportRule = new events.Rule(stack, 'WeeklyCognitoExportRule', {
+  schedule: events.Schedule.cron({ weekDay: 'SUN', hour: '2', minute: '0' }),
+  description: 'Weekly Cognito user pool export for DR (P0-6)',
+});
+cognitoExportRule.addTarget(new eventsTargets.LambdaFunction(cognitoExportLambda));
+Tags.of(cognitoExportLambda).add('Function', 'cognito-export');
+Tags.of(cognitoExportLambda).add('CostCenter', 'ops');
+
+new CfnOutput(stack, 'CognitoExportBucketName', {
+  value: cognitoExportBucket.bucketName,
+  description: 'Cognito DR export bucket — restore from here if pool is lost',
 });
 
-Tags.of(billingRunLambda).add('Function', 'billing-run-handler');
-Tags.of(billingRunLambda).add('CostCenter', 'tenant-side');
+// ── P0-6: Composite DR Alarm (3+ tables in error = infrastructure incident) ──
+const userTableErrorAlarm = new cloudwatch.Alarm(stack, 'UserTableSystemErrors', {
+  metric: userTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
+  threshold: 5,
+  evaluationPeriods: 2,
+  alarmDescription: 'UserDataEvent DynamoDB system errors elevated',
+});
+const refTableErrorAlarm = new cloudwatch.Alarm(stack, 'RefTableSystemErrors', {
+  metric: refDataTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
+  threshold: 5,
+  evaluationPeriods: 2,
+  alarmDescription: 'RefDataEvent DynamoDB system errors elevated',
+});
+const adminTableErrorAlarm = new cloudwatch.Alarm(stack, 'AdminTableSystemErrors', {
+  metric: adminTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
+  threshold: 5,
+  evaluationPeriods: 2,
+  alarmDescription: 'AdminDataEvent DynamoDB system errors elevated',
+});
 
-export default backend;
+// "Any table in error" composite — DR-level signal; if even one table is failing, page on-call
+new cloudwatch.CompositeAlarm(stack, 'BebocardDRCompositeAlarm', {
+  alarmDescription: 'P0-6: One or more DynamoDB tables in error state — potential infrastructure incident. Initiate DR runbook.',
+  alarmRule: cloudwatch.AlarmRule.anyOf(
+    cloudwatch.AlarmRule.fromAlarm(userTableErrorAlarm, cloudwatch.AlarmState.ALARM),
+    cloudwatch.AlarmRule.fromAlarm(refTableErrorAlarm, cloudwatch.AlarmState.ALARM),
+    cloudwatch.AlarmRule.fromAlarm(adminTableErrorAlarm, cloudwatch.AlarmState.ALARM),
+  ),
+});
+
+// ── P3-16: Brand Health Monitor Lambda (weekly, 50%-drop CSM alert) ───────────
+const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
+brandHealthLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+brandHealthLambda.addEnvironment('USER_TABLE', userTable.tableName);
+refDataTable.grantReadData(brandHealthLambda);
+userTable.grantReadData(brandHealthLambda);
+
+const brandHealthRule = new events.Rule(stack, 'WeeklyBrandHealthRule', {
+  schedule: events.Schedule.cron({ weekDay: 'MON', hour: '8', minute: '0' }),
+  description: 'Weekly brand health check — alerts CSM when scan volume drops >50% (P3-16)',
+});
+brandHealthRule.addTarget(new eventsTargets.LambdaFunction(brandHealthLambda));
+Tags.of(brandHealthLambda).add('Function', 'brand-health-monitor');
+Tags.of(brandHealthLambda).add('CostCenter', 'ops');
+
+// ── Template Manager (loyalty card templates — super_admin CRUD) ──────────────
+const templateManagerLambda = backend.templateManagerFn.resources.lambda as lambda.Function;
+templateManagerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+templateManagerLambda.addEnvironment('PORTAL_ORIGIN', process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com.au');
+templateManagerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/INTERNAL_SIGNING_SECRET`],
+}));
+refDataTable.grantReadWriteData(templateManagerLambda);
+Tags.of(templateManagerLambda).add('Function', 'template-manager');
+Tags.of(templateManagerLambda).add('CostCenter', 'ops');
+
+// ── P3-12: Zero-Downtime Blue/Green Deployments (Lambda Aliases + CodeDeploy) ─
+import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
+
+const blueGreenTargets: Array<{ lambda: lambda.Function; name: string }> = [
+  { lambda: scanLambda, name: 'ScanHandler' },
+  { lambda: receiptProcessorLambda, name: 'ReceiptProcessor' },
+  { lambda: cardManagerLambda, name: 'CardManager' },
+];
+
+for (const { lambda: fn, name } of blueGreenTargets) {
+  const version = fn.currentVersion;
+
+  const liveAlias = new lambda.Alias(stack, `${name}LiveAlias`, {
+    aliasName: 'live',
+    version,
+  });
+
+  const errorAlarm = new cloudwatch.Alarm(stack, `${name}CanaryErrorAlarm`, {
+    metric: liveAlias.metricErrors({ period: Duration.minutes(1) }),
+    threshold: 1,
+    evaluationPeriods: 3,
+    alarmDescription: `P3-12: ${name} canary error rate elevated — auto-rollback triggered`,
+  });
+
+  new codedeploy.LambdaDeploymentGroup(stack, `${name}DeploymentGroup`, {
+    alias: liveAlias,
+    deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
+    alarms: [errorAlarm],
+    autoRollback: { failedDeployment: true, deploymentInAlarm: true },
+  });
+}
