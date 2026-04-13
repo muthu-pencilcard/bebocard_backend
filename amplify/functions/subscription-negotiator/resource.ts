@@ -3,7 +3,6 @@ import { defineFunction } from '@aws-amplify/backend';
 export const subscriptionNegotiator = defineFunction({
     name: 'subscription-negotiator',
     entry: './handler.ts',
-    resourceGroupName: 'data',
     timeoutSeconds: 300,
     environment: {
         USER_TABLE: process.env.USER_TABLE ?? '',

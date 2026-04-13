@@ -3,7 +3,6 @@ import { defineFunction } from '@aws-amplify/backend';
 export const receiptIcebergWriterFn = defineFunction({
   name: 'bebo-receipt-iceberg-writer',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   timeoutSeconds: 60,
   environment: {
     ANALYTICS_BUCKET:  process.env.ANALYTICS_BUCKET  ?? '',

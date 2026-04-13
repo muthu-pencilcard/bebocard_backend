@@ -3,7 +3,6 @@ import { defineFunction } from '@aws-amplify/backend';
 export const consentHandlerFn = defineFunction({
   name: 'bebo-consent-handler',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   timeoutSeconds: 30,
   environment: {
     ADMIN_TABLE: process.env.ADMIN_TABLE ?? '',

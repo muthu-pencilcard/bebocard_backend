@@ -3,7 +3,6 @@ import { defineFunction } from '@aws-amplify/backend';
 export const geofenceHandlerFn = defineFunction({
   name: 'bebo-geofence-handler',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   // Needs more memory for Firebase Admin SDK initialisation
   memoryMB: 512,
   timeoutSeconds: 15,

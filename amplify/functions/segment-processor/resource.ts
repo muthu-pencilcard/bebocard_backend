@@ -3,7 +3,6 @@ import { defineFunction } from '@aws-amplify/backend';
 export const segmentProcessorFn = defineFunction({
   name: 'bebo-segment-processor',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   environment: {
     USER_TABLE: process.env.USER_TABLE ?? '',
   },

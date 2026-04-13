@@ -297,21 +297,26 @@ const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Funct
 // (cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(cardManagerLambda);
-refDataTable.grantReadData(cardManagerLambda);
-adminTable.grantReadWriteData(cardManagerLambda);
-// Reserved concurrency — card-manager (handles rotateQR): rotation must not be throttled (P0-5)
-const cfnCardManager = cardManagerLambda.node.defaultChild as lambda.CfnFunction;
-// cfnCardManager.reservedConcurrentExecutions = 50;
+const grantTableAccess = (fn: lambda.Function, table: any, write: boolean = false) => {
+  fn.addToRolePolicy(new iam.PolicyStatement({
+    actions: write ? ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem'] : ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchGetItem'],
+    resources: [
+      `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/${table.tableName}`,
+      `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/${table.tableName}/index/*`
+    ],
+  }));
+};
+
+grantTableAccess(cardManagerLambda, userTable, true);
+grantTableAccess(cardManagerLambda, refDataTable, false);
+grantTableAccess(cardManagerLambda, adminTable, true);
 
 // ── Scan handler ──
 const scanLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => scanLambda.addEnvironment(k, v));
-const cfnScanLambda = scanLambda.node.defaultChild as lambda.CfnFunction;
-// cfnScanLambda.reservedConcurrentExecutions = 50;
-userTable.grantReadWriteData(scanLambda);
-refDataTable.grantReadData(scanLambda);
-adminTable.grantReadData(scanLambda);
+grantTableAccess(scanLambda, userTable, true);
+grantTableAccess(scanLambda, refDataTable, false);
+grantTableAccess(scanLambda, adminTable, false);
 receiptSigningKey.grant(scanLambda, 'kms:GetPublicKey');
 
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
@@ -355,7 +360,7 @@ scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
 receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
 receiptProcessorLambda.addEventSource(new SqsEventSource(receiptProcessingQueue, { batchSize: 10 }));
-userTable.grantReadWriteData(receiptProcessorLambda);
+grantTableAccess(receiptProcessorLambda, userTable, true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
 // cfnReceiptProcessor.reservedConcurrentExecutions = 100;
@@ -372,28 +377,28 @@ scanHandlerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
 tenantLinkerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 tenantLinkerLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-userTable.grantReadWriteData(tenantLinkerLambda);
-adminTable.grantReadWriteData(tenantLinkerLambda);
+grantTableAccess(tenantLinkerLambda, userTable, true);
+grantTableAccess(tenantLinkerLambda, adminTable, true);
 
 // ── Geofence handler ──
 const geofenceLambda = backend.geofenceHandlerFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => geofenceLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(geofenceLambda);
-refDataTable.grantReadData(geofenceLambda);
-adminTable.grantReadData(geofenceLambda);
+grantTableAccess(geofenceLambda, userTable, true);
+grantTableAccess(geofenceLambda, refDataTable, false);
+grantTableAccess(geofenceLambda, adminTable, false);
 
 // ── Consent handler ──
 const consentLambda = backend.consentHandlerFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => consentLambda.addEnvironment(k, v));
-userTable.grantReadWriteData(consentLambda);
-refDataTable.grantReadData(consentLambda);
-adminTable.grantReadWriteData(consentLambda);
+grantTableAccess(consentLambda, userTable, true);
+grantTableAccess(consentLambda, refDataTable, false);
+grantTableAccess(consentLambda, adminTable, true);
 
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
 segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
 segmentLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
-userTable.grantReadWriteData(segmentLambda);
+grantTableAccess(segmentLambda, userTable, true);
 if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
 
 const segmentDLQ = new sqs.Queue(stack, 'SegmentProcessorDLQ', { retentionPeriod: Duration.days(14) });
@@ -410,7 +415,7 @@ segmentLambda.addEventSource(new DynamoEventSource(userTable, {
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
 billingRunLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-refDataTable.grantReadWriteData(billingRunLambda);
+grantTableAccess(billingRunLambda, refDataTable, true);
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail'],
   resources: ['*'], // In production, scope to the verified identity
@@ -430,7 +435,7 @@ billingRunRule.addTarget(new eventsTargets.LambdaFunction(billingRunLambda));
 // ── Billing Webhook Handler (P1-8) ──
 const billingWebhookLambda = backend.billingWebhookHandlerFn.resources.lambda as lambda.Function;
 billingWebhookLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-refDataTable.grantReadWriteData(billingWebhookLambda);
+grantTableAccess(billingWebhookLambda, refDataTable, true);
 billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [
@@ -442,7 +447,7 @@ billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
 // ── QR Router (P1-10) ──
 const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Function;
 qrRouterLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-refDataTable.grantReadData(qrRouterLambda);
+grantTableAccess(qrRouterLambda, refDataTable, false);
 
 const qrApi = new apigw.RestApi(stack, 'QrRouterApi', { 
   restApiName: `bebo-qr-router-${stage}`,
@@ -480,7 +485,7 @@ receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
     `arn:aws:glue:${stack.region}:${stack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
   ],
 }));
-refDataTable.grantReadData(receiptIcebergLambda);
+grantTableAccess(receiptIcebergLambda, refDataTable, false);
 receiptIcebergLambda.addEventSource(new DynamoEventSource(userTable, {
   startingPosition: lambda.StartingPosition.LATEST,
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') })],
@@ -501,7 +506,7 @@ tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `beb
 tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
-refDataTable.grantReadWriteData(tenantProvisionerLambda);
+grantTableAccess(tenantProvisionerLambda, refDataTable, true);
 
 tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
@@ -540,9 +545,9 @@ analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analyt
 analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 analyticsLambda.addEnvironment('REPORT_TABLE', backend.data.resources.tables['ReportDataEvent'].tableName);
 
-userTable.grantReadData(analyticsLambda);
-refDataTable.grantReadData(analyticsLambda);
-backend.data.resources.tables['ReportDataEvent'].grantReadData(analyticsLambda);
+grantTableAccess(analyticsLambda, userTable, false);
+grantTableAccess(analyticsLambda, refDataTable, false);
+grantTableAccess(analyticsLambda, backend.data.resources.tables['ReportDataEvent'], false);
 analyticsBucket.grantReadWrite(analyticsLambda);
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
@@ -575,7 +580,7 @@ const approveRes = parentalRes.addResource('approve');
 const parentalConsentLambda = backend.parentalConsentHandlerFn.resources.lambda as lambda.Function;
 approveRes.addMethod('GET', new apigw.LambdaIntegration(parentalConsentLambda), { apiKeyRequired: false });
 parentalConsentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-userTable.grantReadWriteData(parentalConsentLambda);
+grantTableAccess(parentalConsentLambda, userTable, true);
 parentalConsentLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
@@ -660,8 +665,8 @@ exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucket.bucketName);
 exporterLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
 backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride('AdminCreateUserConfig.AllowAdminCreateUserOnly', true);
 
-userTable.grantReadWriteData(exporterLambda);
-adminTable.grantReadWriteData(exporterLambda);
+grantTableAccess(exporterLambda, userTable, true);
+grantTableAccess(exporterLambda, adminTable, true);
 exportsBucket.grantReadWrite(exporterLambda);
 
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -686,7 +691,7 @@ exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
 webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 webhookDispatcherLambda.addEventSource(new SqsEventSource(webhookQueue, { batchSize: 5 }));
-refDataTable.grantReadData(webhookDispatcherLambda);
+grantTableAccess(webhookDispatcherLambda, refDataTable, false);
 // Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
 webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
@@ -782,8 +787,8 @@ backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   ],
 }));
 
-refDataTable.grantReadData(backfillerLambda);
-userTable.grantReadData(backfillerLambda);
+grantTableAccess(backfillerLambda, refDataTable, false);
+grantTableAccess(backfillerLambda, userTable, false);
  
 // Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
 const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
@@ -798,9 +803,9 @@ cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
 // Analytics Aggregator Schedule: Nightly at 1:00 AM UTC (before compaction)
 const aggregatorLambda = backend.analyticsAggregatorFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => aggregatorLambda.addEnvironment(k, v));
-userTable.grantReadData(aggregatorLambda);
-refDataTable.grantReadData(aggregatorLambda);
-backend.data.resources.tables['ReportDataEvent'].grantReadWriteData(aggregatorLambda);
+grantTableAccess(aggregatorLambda, userTable, false);
+grantTableAccess(aggregatorLambda, refDataTable, false);
+grantTableAccess(aggregatorLambda, backend.data.resources.tables['ReportDataEvent'], true);
 
 const aggregatorRule = new events.Rule(stack, 'NightlyAggregationRule', {
   schedule: events.Schedule.cron({ hour: '1', minute: '0' }),
@@ -814,11 +819,11 @@ customSegmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
 customSegmentLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
 // Read segment defs from RefDataEvent; write membership records to UserDataEvent
-refDataTable.grantReadData(customSegmentLambda);
-userTable.grantReadWriteData(customSegmentLambda);
+grantTableAccess(customSegmentLambda, refDataTable, false);
+grantTableAccess(customSegmentLambda, userTable, true);
 
 // Update SEGMENT_DEF# stats (memberCount, lastEvaluatedAt) — needs UpdateItem on RefDataEvent
-refDataTable.grantWriteData(customSegmentLambda);
+grantTableAccess(customSegmentLambda, refDataTable, true);
 
 const customSegmentDLQ = new sqs.Queue(stack, 'CustomSegmentEvaluatorDLQ', {
   retentionPeriod: Duration.days(14),
@@ -839,7 +844,7 @@ Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
 // ── Affiliate Feed Sync (Nightly at 05:00 UTC) ──
 const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
 affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-refDataTable.grantReadWriteData(affiliateSyncLambda);
+grantTableAccess(affiliateSyncLambda, refDataTable, true);
 
 const affiliateSyncRule = new events.Rule(stack, 'NightlyAffiliateSyncRule', {
   schedule: events.Schedule.cron({ hour: '5', minute: '0' }),
@@ -877,20 +882,20 @@ for (const [fn, name, cost] of functionTags) {
 const receiptClaimLambda = backend.receiptClaimHandlerFn.resources.lambda as lambda.Function;
 receiptClaimLambda.addEnvironment('USER_TABLE', userTable.tableName);
 receiptClaimLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-userTable.grantReadWriteData(receiptClaimLambda);
-refDataTable.grantReadWriteData(receiptClaimLambda);
+grantTableAccess(receiptClaimLambda, userTable, true);
+grantTableAccess(receiptClaimLambda, refDataTable, true);
 
 // ── Remote Config Wiring (P2-21) ──
 const remoteConfigLambda = backend.remoteConfigHandlerFn.resources.lambda as lambda.Function;
 remoteConfigLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-refDataTable.grantReadData(remoteConfigLambda);
+grantTableAccess(remoteConfigLambda, refDataTable, false);
 
 // ── Click Tracking (P2-19) ──
 const clickTrackingLambda = backend.clickTrackingHandlerFn.resources.lambda as lambda.Function;
 clickTrackingLambda.addEnvironment('REPORT_TABLE', tableNames.REPORT_TABLE);
 clickTrackingLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-backend.data.resources.tables['ReportDataEvent'].grantReadWriteData(clickTrackingLambda);
-refDataTable.grantReadData(clickTrackingLambda);
+grantTableAccess(clickTrackingLambda, backend.data.resources.tables['ReportDataEvent'], true);
+grantTableAccess(clickTrackingLambda, refDataTable, false);
 
 // ── P1-2 Glue IAM Refinement ──
 [tenantProvisionerLambda, receiptIcebergLambda].forEach(fn => {
@@ -1005,8 +1010,8 @@ new cloudwatch.CompositeAlarm(stack, 'BebocardDRCompositeAlarm', {
 const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
 brandHealthLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 brandHealthLambda.addEnvironment('USER_TABLE', userTable.tableName);
-refDataTable.grantReadData(brandHealthLambda);
-userTable.grantReadData(brandHealthLambda);
+grantTableAccess(brandHealthLambda, refDataTable, false);
+grantTableAccess(brandHealthLambda, userTable, false);
 
 const brandHealthRule = new events.Rule(stack, 'WeeklyBrandHealthRule', {
   schedule: events.Schedule.cron({ weekDay: 'MON', hour: '8', minute: '0' }),
@@ -1024,7 +1029,7 @@ templateManagerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/amplify/shared/INTERNAL_SIGNING_SECRET`],
 }));
-refDataTable.grantReadWriteData(templateManagerLambda);
+grantTableAccess(templateManagerLambda, refDataTable, true);
 Tags.of(templateManagerLambda).add('Function', 'template-manager');
 Tags.of(templateManagerLambda).add('CostCenter', 'ops');
 

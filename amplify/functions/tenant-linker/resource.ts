@@ -3,7 +3,6 @@ import { defineFunction } from '@aws-amplify/backend';
 export const tenantLinker = defineFunction({
   name: 'tenant-linker',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   environment: {
     // API base — update with your actual API Gateway URL after deploy
     API_BASE_URL: 'https://api.bebocard.app',
