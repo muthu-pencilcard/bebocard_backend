@@ -1,9 +1,9 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const analyticsBackfillerFn = defineFunction({
+  resourceGroupName: 'data',
   name: 'bebo-analytics-backfiller',
   entry: './handler.ts',
-  resourceGroupName: 'ops',
   timeoutSeconds: 300, 
   environment: {
     ANALYTICS_BUCKET:  process.env.ANALYTICS_BUCKET  ?? '',

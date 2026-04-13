@@ -1,9 +1,9 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const customSegmentEvaluatorFn = defineFunction({
+  resourceGroupName: 'data',
   name: 'bebo-custom-segment-evaluator',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   timeoutSeconds: 900, // 15 minutes — may evaluate large subscriber cohorts
   environment: {
     USER_TABLE: process.env.USER_TABLE ?? '',

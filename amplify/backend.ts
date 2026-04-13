@@ -268,16 +268,16 @@ postConfirmLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${dataStack.region}:${dataStack.account}:parameter/bebocard/*`],
+  resources: [`arn:aws:ssm:${stack.region}:${stack.account}:parameter/bebocard/*`],
 }));
 postConfirmLambda.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonCognitoPowerUser'));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminUpdateUserAttributes'],
-  resources: [`arn:aws:cognito-idp:${dataStack.region}:${dataStack.account}:userpool/*`],
+  resources: [`arn:aws:cognito-idp:${stack.region}:${stack.account}:userpool/*`],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
-  resources: [`arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/UserDataEvent-*`, `arn:aws:dynamodb:${dataStack.region}:${dataStack.account}:table/AdminDataEvent-*`],
+  resources: [`arn:aws:dynamodb:${stack.region}:${stack.account}:table/UserDataEvent-*`, `arn:aws:dynamodb:${stack.region}:${stack.account}:table/AdminDataEvent-*`],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail', 'ses:SendRawEmail'],

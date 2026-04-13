@@ -1,9 +1,9 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const brandHealthMonitorFn = defineFunction({
+  resourceGroupName: 'data',
   name: 'bebo-brand-health-monitor',
   entry: './handler.ts',
-  resourceGroupName: 'data',
   timeoutSeconds: 300,
   environment: {
     REFDATA_TABLE: process.env.REFDATA_TABLE ?? '',
