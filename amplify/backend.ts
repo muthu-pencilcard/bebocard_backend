@@ -378,6 +378,13 @@ userTable.grantReadWriteData(geofenceLambda);
 refDataTable.grantReadData(geofenceLambda);
 adminTable.grantReadData(geofenceLambda);
 
+// ── Consent handler ──
+const consentLambda = backend.consentHandlerFn.resources.lambda as lambda.Function;
+Object.entries(tableNames).forEach(([k, v]) => consentLambda.addEnvironment(k, v));
+userTable.grantReadWriteData(consentLambda);
+refDataTable.grantReadData(consentLambda);
+adminTable.grantReadWriteData(consentLambda);
+
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
 segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);

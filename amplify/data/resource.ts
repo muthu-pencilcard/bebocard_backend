@@ -6,6 +6,7 @@ import { exporterFn } from '../functions/user-data-exporter/resource';
 import { giftCardHandlerFn } from '../functions/gift-card-handler/resource';
 import { remoteConfigHandlerFn } from '../functions/remote-config-handler/resource';
 import { clickTrackingHandlerFn } from '../functions/click-tracking-handler/resource';
+import { consentHandlerFn } from '../functions/consent-handler/resource';
 
 const schema = a.schema({
   // ── User data: loyalty cards, receipts, invoices, gift cards, segments ───
@@ -501,6 +502,7 @@ const schema = a.schema({
       textVersion: a.string().required(),
     })
     .returns(a.boolean())
+    .handler(a.handler.function(consentHandlerFn))
     .authorization(allow => [allow.authenticated()]),
 
   startDataExport: a.mutation()
