@@ -242,7 +242,7 @@ const receiptSigningKey = new kms.Key(stack, 'ReceiptSigningKey', {
 // ── Post-confirmation ──
 const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-(postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
+// (postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
 
 const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
   const alarm = new cloudwatch.Alarm(stack, `${name}UtilizationAlarm`, {
@@ -294,7 +294,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 // ── Card manager ──
 const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-(cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
+// (cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
 userTable.grantReadWriteData(cardManagerLambda);
@@ -302,13 +302,13 @@ refDataTable.grantReadData(cardManagerLambda);
 adminTable.grantReadWriteData(cardManagerLambda);
 // Reserved concurrency — card-manager (handles rotateQR): rotation must not be throttled (P0-5)
 const cfnCardManager = cardManagerLambda.node.defaultChild as lambda.CfnFunction;
-cfnCardManager.reservedConcurrentExecutions = 50;
+// cfnCardManager.reservedConcurrentExecutions = 50;
 
 // ── Scan handler ──
 const scanLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => scanLambda.addEnvironment(k, v));
 const cfnScanLambda = scanLambda.node.defaultChild as lambda.CfnFunction;
-cfnScanLambda.reservedConcurrentExecutions = 50;
+// cfnScanLambda.reservedConcurrentExecutions = 50;
 userTable.grantReadWriteData(scanLambda);
 refDataTable.grantReadData(scanLambda);
 adminTable.grantReadData(scanLambda);
@@ -316,7 +316,7 @@ receiptSigningKey.grant(scanLambda, 'kms:GetPublicKey');
 
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
 const scanAlias = scanLambda.addAlias('prod', {
-  provisionedConcurrentExecutions: 10,
+//   provisionedConcurrentExecutions: 10,
 });
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
@@ -358,7 +358,7 @@ receiptProcessorLambda.addEventSource(new SqsEventSource(receiptProcessingQueue,
 userTable.grantReadWriteData(receiptProcessorLambda);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
-cfnReceiptProcessor.reservedConcurrentExecutions = 100;
+// cfnReceiptProcessor.reservedConcurrentExecutions = 100;
 
 receiptSigningKey.grant(receiptProcessorLambda, 'kms:Sign');
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
@@ -366,7 +366,7 @@ receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKe
 // ── Tenant linker ──
 const scanHandlerLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-(scanHandlerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
+// (scanHandlerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
 
 scanHandlerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
@@ -787,7 +787,7 @@ userTable.grantReadData(backfillerLambda);
  
 // Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
 const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
-cfnBackfiller.reservedConcurrentExecutions = 10;
+// cfnBackfiller.reservedConcurrentExecutions = 10;
 
 // Schedule: Nightly at 2:00 AM UTC
 const cronRule = new events.Rule(stack, 'NightlyCompactionRule', {
