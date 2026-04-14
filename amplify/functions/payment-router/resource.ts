@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const paymentRouterFn = defineFunction({
-  resourceGroupName: 'data',
+  resourceGroupName: "functions",
   name: 'bebo-payment-router',
   entry: './handler.ts',
   timeoutSeconds: 30,

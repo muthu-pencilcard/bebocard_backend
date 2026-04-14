@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const cognitoExportFn = defineFunction({
-  resourceGroupName: 'data',
+  resourceGroupName: "functions",
   name: 'bebo-cognito-export',
   entry: './handler.ts',
   timeoutSeconds: 300, // 5 min — large pools may have many users

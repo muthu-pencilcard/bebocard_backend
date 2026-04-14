@@ -138,7 +138,7 @@ const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
 const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
 
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
-const stack = dataStack; // Global alias for backward compatibility in this file
+const stack = backend.createStack('SharedInfrastructure'); // Isolated stack to prevent circular deps
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
@@ -146,11 +146,11 @@ const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABL
 const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
 const restApiUrlParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/SCAN_API_URL`;
 
-new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
-new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
+new ssm.StringParameter(stack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
+new ssm.StringParameter(stack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
-const analyticsBucket = new s3.Bucket(dataStack, 'AnalyticsLake', {
+const analyticsBucket = new s3.Bucket(stack, 'AnalyticsLake', {
   removalPolicy: RemovalPolicy.RETAIN,
   versioned: true, // Required for CRR (P3-12)
   intelligentTieringConfigurations: [
@@ -218,7 +218,7 @@ const alertsTopic = new sns.Topic(stack, 'InfrastructureAlerts', {
 alertsTopic.addSubscription(new snsSubscriptions.EmailSubscription('farahgalaria@gmail.com'));
 
 const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
-  const alarm = new cloudwatch.Alarm(stack, `${name}Alarm`, {
+  const alarm = new cloudwatch.Alarm(Stack.of(queue), `${name}Alarm`, {
     metric: queue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
     threshold,
     evaluationPeriods: 1,
@@ -245,7 +245,7 @@ const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.
 // (postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
 
 const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
-  const alarm = new cloudwatch.Alarm(stack, `${name}UtilizationAlarm`, {
+  const alarm = new cloudwatch.Alarm(Stack.of(fn), `${name}UtilizationAlarm`, {
     metric: fn.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
     threshold: 7.5, // 75% of 10
     evaluationPeriods: 2,
@@ -257,7 +257,7 @@ const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
 createUtilizationAlarm(postConfirmLambda, 'PostConfirmation');
 
 const createHighTrafficUtilizationAlarm = (fn: lambda.Function, name: string) => {
-  const alarm = new cloudwatch.Alarm(stack, `${name}UtilizationAlarm`, {
+  const alarm = new cloudwatch.Alarm(Stack.of(fn), `${name}UtilizationAlarm`, {
     metric: fn.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
     threshold: 37.5, // 75% of 50
     evaluationPeriods: 2,
@@ -320,12 +320,10 @@ grantTableAccess(scanLambda, adminTable, false);
 receiptSigningKey.grant(scanLambda, 'kms:GetPublicKey');
 
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
-const scanAlias = scanLambda.addAlias('prod', {
-//   provisionedConcurrentExecutions: 10,
-});
+const scanAlias = scanLambda.addAlias('prod');
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
-const scanThrottleAlarm = new cloudwatch.Alarm(stack, 'ScanHandlerThrottlesAlarm', {
+const scanThrottleAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerThrottlesAlarm', {
   metric: scanLambda.metricThrottles({ period: Duration.minutes(1) }),
   threshold: 1,
   evaluationPeriods: 1,
@@ -335,7 +333,7 @@ const scanThrottleAlarm = new cloudwatch.Alarm(stack, 'ScanHandlerThrottlesAlarm
 scanThrottleAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
  
 // Utilization Alarm — scan-handler: fires when concurrent executions exceed 75% of reservation (37/50)
-const scanUtilizationAlarm = new cloudwatch.Alarm(stack, 'ScanHandlerUtilizationAlarm', {
+const scanUtilizationAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerUtilizationAlarm', {
   metric: scanLambda.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
   threshold: 37,
   evaluationPeriods: 2,
@@ -563,7 +561,7 @@ analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // ── Scan API (v1 & Legacy) ──
-const scanApi = new apigw.RestApi(dataStack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
+const scanApi = new apigw.RestApi(stack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
 const scanIntegration = new apigw.LambdaIntegration(scanLambda);
 
 // v1 routes
@@ -594,7 +592,7 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 // We use a decoupled environment variable for the API URL to break the auth -> data circular dependency.
 postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
 
-new ssm.StringParameter(dataStack, 'ScanApiUrlParam', {
+new ssm.StringParameter(stack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
   stringValue: scanApi.url,
 });
@@ -1045,19 +1043,20 @@ const blueGreenTargets: Array<{ lambda: lambda.Function; name: string }> = [
 for (const { lambda: fn, name } of blueGreenTargets) {
   const version = fn.currentVersion;
 
-  const liveAlias = new lambda.Alias(stack, `${name}LiveAlias`, {
+  const fnStack = Stack.of(fn);
+  const liveAlias = new lambda.Alias(fnStack, `${name}LiveAlias`, {
     aliasName: 'live',
     version,
   });
 
-  const errorAlarm = new cloudwatch.Alarm(stack, `${name}CanaryErrorAlarm`, {
+  const errorAlarm = new cloudwatch.Alarm(fnStack, `${name}CanaryErrorAlarm`, {
     metric: liveAlias.metricErrors({ period: Duration.minutes(1) }),
     threshold: 1,
     evaluationPeriods: 3,
     alarmDescription: `P3-12: ${name} canary error rate elevated — auto-rollback triggered`,
   });
 
-  new codedeploy.LambdaDeploymentGroup(stack, `${name}DeploymentGroup`, {
+  new codedeploy.LambdaDeploymentGroup(fnStack, `${name}DeploymentGroup`, {
     alias: liveAlias,
     deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
     alarms: [errorAlarm],

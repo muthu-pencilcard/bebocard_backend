@@ -1,6 +1,6 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const parentalConsentHandlerFn = defineFunction({
-  resourceGroupName: 'data',
+  resourceGroupName: "functions",
   name: 'parental-consent-handler',
 });

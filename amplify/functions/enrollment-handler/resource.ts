@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const enrollmentHandlerFn = defineFunction({
-  resourceGroupName: 'data',
+  resourceGroupName: "functions",
   name: 'bebo-enrollment-handler',
   entry: './handler.ts',
   timeoutSeconds: 30,

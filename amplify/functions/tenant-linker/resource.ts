@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const tenantLinker = defineFunction({
-  resourceGroupName: 'data',
+  resourceGroupName: "functions",
   name: 'tenant-linker',
   entry: './handler.ts',
   environment: {
