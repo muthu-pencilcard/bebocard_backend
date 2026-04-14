@@ -1,7 +1,6 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const subscriptionProxyFn = defineFunction({
-  resourceGroupName: "data",
   name: 'bebo-subscription-proxy',
   entry: './handler.ts',
   timeoutSeconds: 30,

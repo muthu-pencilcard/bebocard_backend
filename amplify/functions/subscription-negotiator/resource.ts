@@ -1,7 +1,6 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const subscriptionNegotiator = defineFunction({
-  resourceGroupName: "data",
     name: 'subscription-negotiator',
     entry: './handler.ts',
     timeoutSeconds: 300,

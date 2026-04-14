@@ -1,7 +1,6 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const exporterFn = defineFunction({
-  resourceGroupName: "data",
   name: 'user-data-exporter',
   entry: './handler.ts',
   timeoutSeconds: 300,

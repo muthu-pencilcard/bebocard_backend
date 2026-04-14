@@ -1,7 +1,6 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const giftCardRouterFn = defineFunction({
-  resourceGroupName: "data",
   name: 'bebo-gift-card-router',
   entry: './handler.ts',
   timeoutSeconds: 30,
