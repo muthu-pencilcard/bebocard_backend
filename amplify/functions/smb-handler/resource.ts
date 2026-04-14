@@ -1,6 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const smbHandlerFn = defineFunction({
+  resourceGroupName: 'data',
   name: 'bebo-smb-handler',
   entry: './handler.ts',
   timeoutSeconds: 30,
