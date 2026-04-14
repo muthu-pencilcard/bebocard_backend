@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const brandApiHandlerFn = defineFunction({
-  resourceGroupName: "functions",
+  resourceGroupName: "data",
   name: 'bebo-brand-api',
   entry: './handler.ts',
   runtime: 20,

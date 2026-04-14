@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const qrRouterHandlerFn = defineFunction({
-  resourceGroupName: "functions",
+  resourceGroupName: "data",
   name: 'qr-router-handler',
   entry: './handler.ts',
   timeoutSeconds: 10,

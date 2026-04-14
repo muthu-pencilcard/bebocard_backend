@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const tenantAnalyticsFn = defineFunction({
-  resourceGroupName: "functions",
+  resourceGroupName: "data",
   name: 'bebo-tenant-analytics',
   entry: './handler.ts',
   environment: {

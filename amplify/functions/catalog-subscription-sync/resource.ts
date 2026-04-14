@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const catalogSubscriptionSyncFn = defineFunction({
-  resourceGroupName: "functions",
+  resourceGroupName: "data",
   name: 'catalog-subscription-sync',
   entry: './handler.ts',
   runtime: 20,
