@@ -303,13 +303,37 @@ createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
 const grantTableAccess = (fn: lambda.Function, table: any, write: boolean = false) => {
   const stack = Stack.of(fn);
-  const tableName = table.tableName.split('-').shift() + '-*'; // Use prefix to break token cycles
+  const tableName = table.tableName.split('-').shift() + '-*'; 
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions: write ? ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem'] : ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchGetItem'],
     resources: [
       `arn:aws:dynamodb:${stack.region}:${stack.account}:table/${tableName}`,
       `arn:aws:dynamodb:${stack.region}:${stack.account}:table/${tableName}/index/*`
     ],
+  }));
+};
+
+const grantS3Access = (fn: lambda.Function, bucket: s3.IBucket, actions: string[]) => {
+  const bucketName = bucket.bucketName;
+  fn.addToRolePolicy(new iam.PolicyStatement({
+    actions,
+    resources: [`arn:aws:s3:::${bucketName}`, `arn:aws:s3:::${bucketName}/*`],
+  }));
+};
+
+const grantSqsAccess = (fn: lambda.Function, queue: sqs.IQueue, actions: string[]) => {
+  const stack = Stack.of(fn);
+  fn.addToRolePolicy(new iam.PolicyStatement({
+    actions,
+    resources: [`arn:aws:sqs:${stack.region}:${stack.account}:${queue.queueName}`],
+  }));
+};
+
+const grantKmsAccess = (fn: lambda.Function, key: kms.IKey, actions: string[]) => {
+  const stack = Stack.of(fn);
+  fn.addToRolePolicy(new iam.PolicyStatement({
+    actions,
+    resources: [`arn:aws:kms:${stack.region}:${stack.account}:key/${key.keyId}`],
   }));
 };
 
@@ -323,7 +347,7 @@ Object.entries(tableNames).forEach(([k, v]) => scanLambda.addEnvironment(k, v));
 grantTableAccess(scanLambda, userTable, true);
 grantTableAccess(scanLambda, refDataTable, false);
 grantTableAccess(scanLambda, adminTable, false);
-receiptSigningKey.grant(scanLambda, 'kms:GetPublicKey');
+grantKmsAccess(scanLambda, receiptSigningKey, ['kms:GetPublicKey']);
 
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
 const scanAlias = scanLambda.addAlias('prod');
@@ -358,7 +382,7 @@ const receiptProcessingQueue = new sqs.Queue(infraStack, 'ReceiptProcessingQueue
 });
 createDlqAlarm(receiptProcessingDLQ, 'ReceiptProcessingDLQ'); // Zero tolerance for checkout failures
 
-receiptProcessingQueue.grantSendMessages(scanLambda);
+grantSqsAccess(scanLambda, receiptProcessingQueue, ['sqs:SendMessage']);
 scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
 
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
@@ -369,7 +393,7 @@ grantTableAccess(receiptProcessorLambda, userTable, true);
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
 // cfnReceiptProcessor.reservedConcurrentExecutions = 100;
 
-receiptSigningKey.grant(receiptProcessorLambda, 'kms:Sign');
+grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
 
 // ── Tenant linker ──
@@ -408,7 +432,7 @@ if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAG
 const segmentDLQ = new sqs.Queue(infraStack, 'SegmentProcessorDLQ', { retentionPeriod: Duration.days(14) });
 createDlqAlarm(segmentDLQ, 'SegmentProcessorDLQ', 5); // Allow small batch jitter before alerting
 segmentLambda.addEnvironment('SEGMENT_DLQ_URL', segmentDLQ.queueUrl);
-segmentDLQ.grantSendMessages(segmentLambda);
+grantSqsAccess(segmentLambda, segmentDLQ, ['sqs:SendMessage']);
 
 segmentLambda.addEventSource(new DynamoEventSource(userTable, {
   startingPosition: lambda.StartingPosition.TRIM_HORIZON,
@@ -474,8 +498,8 @@ receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
-analyticsBucket.grantReadWrite(receiptIcebergLambda);
-icebergDLQ.grantSendMessages(receiptIcebergLambda);
+grantS3Access(receiptIcebergLambda, analyticsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantSqsAccess(receiptIcebergLambda, icebergDLQ, ['sqs:SendMessage']);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
   resources: [`arn:aws:athena:${infraStack.region}:${infraStack.account}:workgroup/${athenaWorkgroup.name}`],
@@ -551,7 +575,7 @@ analyticsLambda.addEnvironment('REPORT_TABLE', backend.data.resources.tables['Re
 grantTableAccess(analyticsLambda, userTable, false);
 grantTableAccess(analyticsLambda, refDataTable, false);
 grantTableAccess(analyticsLambda, backend.data.resources.tables['ReportDataEvent'], false);
-analyticsBucket.grantReadWrite(analyticsLambda);
+grantS3Access(analyticsLambda, analyticsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
   resources: [`arn:aws:athena:${infraStack.region}:${infraStack.account}:workgroup/${athenaWorkgroup.name}`],
@@ -670,7 +694,7 @@ backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride('AdminCreate
 
 grantTableAccess(exporterLambda, userTable, true);
 grantTableAccess(exporterLambda, adminTable, true);
-exportsBucket.grantReadWrite(exporterLambda);
+grantS3Access(exporterLambda, exportsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminDisableUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:AdminDeleteUser'],
@@ -688,7 +712,7 @@ const webhookQueue = new sqs.Queue(infraStack, 'WebhookReliabilityQueue', {
 });
 createDlqAlarm(webhookDLQ, 'WebhookReliabilityDLQ');
 
-webhookQueue.grantSendMessages(exporterLambda);
+grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
 exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
@@ -731,7 +755,7 @@ compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analyt
 compactorLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 compactorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 
-analyticsBucket.grantReadWrite(compactorLambda);
+grantS3Access(compactorLambda, analyticsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:DeleteObject']);
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
   resources: [
@@ -765,7 +789,7 @@ backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 backfillerLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 
-analyticsBucket.grantReadWrite(backfillerLambda);
+grantS3Access(backfillerLambda, analyticsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
   resources: [
@@ -833,7 +857,7 @@ const customSegmentDLQ = new sqs.Queue(infraStack, 'CustomSegmentEvaluatorDLQ', 
 });
 createDlqAlarm(customSegmentDLQ, 'CustomSegmentEvaluatorDLQ');
 customSegmentLambda.addEnvironment('CUSTOM_SEGMENT_DLQ_URL', customSegmentDLQ.queueUrl);
-customSegmentDLQ.grantSendMessages(customSegmentLambda);
+grantSqsAccess(customSegmentLambda, customSegmentDLQ, ['sqs:SendMessage']);
 
 const customSegmentRule = new events.Rule(infraStack, 'NightlyCustomSegmentRule', {
   schedule: events.Schedule.cron({ hour: '0', minute: '30' }),
@@ -959,7 +983,7 @@ const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExportBucket', {
 const cognitoExportLambda = backend.cognitoExportFn.resources.lambda as lambda.Function;
 cognitoExportLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
 cognitoExportLambda.addEnvironment('EXPORT_BUCKET', cognitoExportBucket.bucketName);
-cognitoExportBucket.grantPut(cognitoExportLambda);
+grantS3Access(cognitoExportLambda, cognitoExportBucket, ['s3:PutObject']);
 
 cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:ListUsers'],

@@ -1,7 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const cardManagerFn = defineFunction({
-  resourceGroupName: "functions",
+  resourceGroupName: "data",
   name: 'bebo-card-manager',
   entry: './handler.ts',
   environment: {
