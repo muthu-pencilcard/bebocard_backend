@@ -143,7 +143,7 @@ const authStack = backend.auth.resources.userPool.stack;
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
 const infraStack = dataStack; // Storage, Glue, SNS, KMS go in the Data stack
-const mappingStack = backend.createStack('EventSourceMappings');
+const mappingStack = dataStack; // MUST be in data stack to break cross-stack loop
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
