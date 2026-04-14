@@ -131,12 +131,14 @@ const tableNames = {
 
 const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
 
-const dataStack = Stack.of(userTable);
-const authStack = backend.auth.resources.userPool.stack;
-const stage = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'dev';
-const branchName = dataStack.stackName.toLowerCase().includes('prod') ? 'prod' : 'sandbox';
 const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
 const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
+
+const stage = amplifyBranch === 'main' ? 'prod' : 'dev';
+const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
+
+const dataStack = Stack.of(userTable);
+const authStack = backend.auth.resources.userPool.stack;
 
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
@@ -224,8 +226,8 @@ const icebergDLQ = new sqs.Queue(infraStack, 'ReceiptIcebergDLQ', { retentionPer
 Tags.of(icebergDLQ).add('CostCenter', 'tenant-side');
 
 // ── Monitoring & Alarming (P0-1) ─────────────────────────────────────────────
-const alertsTopic = new sns.Topic(infraStack, 'InfrastructureAlerts', {
-  displayName: `BeboCard [${stage}] Infrastructure Alerts`,
+const alertsTopic = new sns.Topic(authStack, 'InfrastructureAlerts', {
+  displayName: `BeboCard ${stage.toUpperCase()} Infrastructure Alerts`,
 });
 
 // Default engineer contact — in prod this would be an OpsGenie/PagerDuty endpoint
