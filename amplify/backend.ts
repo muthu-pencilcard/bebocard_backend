@@ -142,8 +142,9 @@ const authStack = backend.auth.resources.userPool.stack;
 
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
-const infraStack = dataStack; // Storage, Glue, SNS, KMS go in the Data stack
-const mappingStack = dataStack; // MUST be in data stack to break cross-stack loop
+const funcStack = backend.auth.resources.userPool.stack.node.scope as Stack; // The root amplify stack
+const infraStack = funcStack; // Storage, Glue, SNS, KMS go in root scope to decouple from data
+const mappingStack = funcStack; // Event sources pointing to lambdas MUST be in root scope to break circularity
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
@@ -455,7 +456,12 @@ new lambda.EventSourceMapping(mappingStack, 'SegmentLambdaDDBSource', {
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.or('INSERT', 'MODIFY', 'REMOVE'), dynamodb: { Keys: { sK: { S: [{ prefix: 'RECEIPT#' }, { prefix: 'INVOICE#' }, { prefix: 'SUBSCRIPTION#' }] } } } })],
   retryAttempts: 1,
 });
-userTable.grantStreamRead(segmentLambda);
+grantTableAccess(segmentLambda, 'UserDataEvent', false); // P1-5: Read-only access for segment processing
+// userTable.grantStreamRead(segmentLambda); - removed to break cross-stack circularity
+segmentLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
+  resources: [`arn:aws:dynamodb:*:*:table/${tableNames.USER_TABLE}/stream/*`],
+}));
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
@@ -537,7 +543,17 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaUserSource', {
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') })],
   retryAttempts: 1,
 });
-userTable.grantStreamRead(receiptIcebergLambda);
+grantTableAccess(receiptIcebergLambda, 'UserDataEvent', false); 
+grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
+// userTable.grantStreamRead(receiptIcebergLambda);
+// refDataTable.grantStreamRead(receiptIcebergLambda);
+receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
+  resources: [
+    `arn:aws:dynamodb:*:*:table/${tableNames.USER_TABLE}/stream/*`,
+    `arn:aws:dynamodb:*:*:table/${tableNames.REFDATA_TABLE}/stream/*`
+  ],
+}));
 new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaRefSource', {
   target: receiptIcebergLambda,
   eventSourceArn: refDataTable.tableStreamArn,
@@ -586,7 +602,12 @@ new lambda.EventSourceMapping(mappingStack, 'TenantProvisionerLambdaRefSource', 
   })],
   retryAttempts: 1,
 });
-refDataTable.grantStreamRead(tenantProvisionerLambda);
+grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
+// refDataTable.grantStreamRead(tenantProvisionerLambda);
+tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
+  resources: [`arn:aws:dynamodb:*:*:table/${tableNames.REFDATA_TABLE}/stream/*`],
+}));
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
