@@ -1,8 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
 export const scanHandlerFn = defineFunction({
-  resourceGroupName: "data",
-  name: 'bebo-scan-handler',
+    name: 'bebo-scan-handler',
   entry: './handler.ts',
   environment: {
     ADMIN_TABLE: process.env.ADMIN_TABLE ?? '',
