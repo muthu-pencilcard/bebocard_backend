@@ -272,18 +272,18 @@ postConfirmLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 postConfirmLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/bebocard/*`],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
 }));
 postConfirmLambda.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonCognitoPowerUser'));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminUpdateUserAttributes'],
-  resources: [`arn:aws:cognito-idp:${infraStack.region}:${infraStack.account}:userpool/*`],
+  resources: [`arn:aws:cognito-idp:*:*:userpool/*`],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
   resources: [
-    `arn:aws:dynamodb:${infraStack.region}:${infraStack.account}:table/UserDataEvent-*`, 
-    `arn:aws:dynamodb:${infraStack.region}:${infraStack.account}:table/AdminDataEvent-*`
+    `arn:aws:dynamodb:*:*:table/UserDataEvent-*`, 
+    `arn:aws:dynamodb:*:*:table/AdminDataEvent-*`
   ],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -292,7 +292,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
+  resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
 }));
 
 // ── Card manager ──
@@ -301,14 +301,12 @@ const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Funct
 // (cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
-const grantTableAccess = (fn: lambda.Function, table: any, write: boolean = false) => {
-  const stack = Stack.of(fn);
-  const tableName = table.tableName.split('-').shift() + '-*'; 
+const grantTableAccess = (fn: lambda.Function, tableNamePrefix: string, write: boolean = false) => {
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions: write ? ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem'] : ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchGetItem'],
     resources: [
-      `arn:aws:dynamodb:${stack.region}:${stack.account}:table/${tableName}`,
-      `arn:aws:dynamodb:${stack.region}:${stack.account}:table/${tableName}/index/*`
+      `arn:aws:dynamodb:*:*:table/${tableNamePrefix}-*`,
+      `arn:aws:dynamodb:*:*:table/${tableNamePrefix}-*/index/*`
     ],
   }));
 };
@@ -322,31 +320,28 @@ const grantS3Access = (fn: lambda.Function, bucket: s3.IBucket, actions: string[
 };
 
 const grantSqsAccess = (fn: lambda.Function, queue: sqs.IQueue, actions: string[]) => {
-  const stack = Stack.of(fn);
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions,
-    resources: [`arn:aws:sqs:${stack.region}:${stack.account}:${queue.queueName}`],
+    resources: [`arn:aws:sqs:*:*:${queue.queueName}`],
   }));
 };
 
 const grantKmsAccess = (fn: lambda.Function, key: kms.IKey, actions: string[]) => {
-  const stack = Stack.of(fn);
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions,
-    resources: [`arn:aws:kms:${stack.region}:${stack.account}:key/${key.keyId}`],
+    resources: [`arn:aws:kms:*:*:key/${key.keyId}`],
   }));
 };
 
-grantTableAccess(cardManagerLambda, userTable, true);
-grantTableAccess(cardManagerLambda, refDataTable, false);
-grantTableAccess(cardManagerLambda, adminTable, true);
+grantTableAccess(cardManagerLambda, 'UserDataEvent', true);
+grantTableAccess(cardManagerLambda, 'RefDataEvent', false);
+grantTableAccess(cardManagerLambda, 'AdminDataEvent', true);
 
 // ── Scan handler ──
 const scanLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => scanLambda.addEnvironment(k, v));
-grantTableAccess(scanLambda, userTable, true);
-grantTableAccess(scanLambda, refDataTable, false);
-grantTableAccess(scanLambda, adminTable, false);
+grantTableAccess(scanLambda, 'UserDataEvent', true);
+grantTableAccess(scanLambda, 'RefDataEvent', false);
+grantTableAccess(scanLambda, 'AdminDataEvent', false);
 grantKmsAccess(scanLambda, receiptSigningKey, ['kms:GetPublicKey']);
 
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
@@ -388,7 +383,7 @@ scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
 receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
 receiptProcessorLambda.addEventSource(new SqsEventSource(receiptProcessingQueue, { batchSize: 10 }));
-grantTableAccess(receiptProcessorLambda, userTable, true);
+grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
 // cfnReceiptProcessor.reservedConcurrentExecutions = 100;
@@ -396,37 +391,31 @@ const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.C
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
 
-// ── Tenant linker ──
-const scanHandlerLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
-// ── P0-5: Concurrency Reservation ──
-// (scanHandlerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
-
-scanHandlerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
-tenantLinkerLambda.addEnvironment('USER_TABLE', userTable.tableName);
-tenantLinkerLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-grantTableAccess(tenantLinkerLambda, userTable, true);
-grantTableAccess(tenantLinkerLambda, adminTable, true);
+tenantLinkerLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+tenantLinkerLambda.addEnvironment('ADMIN_TABLE', 'AdminDataEvent');
+grantTableAccess(tenantLinkerLambda, 'UserDataEvent', true);
+grantTableAccess(tenantLinkerLambda, 'AdminDataEvent', true);
 
 // ── Geofence handler ──
 const geofenceLambda = backend.geofenceHandlerFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => geofenceLambda.addEnvironment(k, v));
-grantTableAccess(geofenceLambda, userTable, true);
-grantTableAccess(geofenceLambda, refDataTable, false);
-grantTableAccess(geofenceLambda, adminTable, false);
+grantTableAccess(geofenceLambda, 'UserDataEvent', true);
+grantTableAccess(geofenceLambda, 'RefDataEvent', false);
+grantTableAccess(geofenceLambda, 'AdminDataEvent', false);
 
 // ── Consent handler ──
 const consentLambda = backend.consentHandlerFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => consentLambda.addEnvironment(k, v));
-grantTableAccess(consentLambda, userTable, true);
-grantTableAccess(consentLambda, refDataTable, false);
-grantTableAccess(consentLambda, adminTable, true);
+grantTableAccess(consentLambda, 'UserDataEvent', true);
+grantTableAccess(consentLambda, 'RefDataEvent', false);
+grantTableAccess(consentLambda, 'AdminDataEvent', true);
 
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
-segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+segmentLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
 segmentLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
-grantTableAccess(segmentLambda, userTable, true);
+grantTableAccess(segmentLambda, 'UserDataEvent', true);
 if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
 
 const segmentDLQ = new sqs.Queue(infraStack, 'SegmentProcessorDLQ', { retentionPeriod: Duration.days(14) });
@@ -442,8 +431,8 @@ segmentLambda.addEventSource(new DynamoEventSource(userTable, {
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
-billingRunLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(billingRunLambda, refDataTable, true);
+billingRunLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+grantTableAccess(billingRunLambda, 'RefDataEvent', true);
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail'],
   resources: ['*'], // In production, scope to the verified identity
@@ -451,7 +440,7 @@ billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
 
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/amplify/shared/STRIPE_SECRET_KEY`],
+  resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/STRIPE_SECRET_KEY`],
 }));
 
 // Run daily at 02:00 UTC (processes monthly overages on the 1st)
@@ -462,20 +451,20 @@ billingRunRule.addTarget(new eventsTargets.LambdaFunction(billingRunLambda));
 
 // ── Billing Webhook Handler (P1-8) ──
 const billingWebhookLambda = backend.billingWebhookHandlerFn.resources.lambda as lambda.Function;
-billingWebhookLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(billingWebhookLambda, refDataTable, true);
+billingWebhookLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+grantTableAccess(billingWebhookLambda, 'UserDataEvent', true);
 billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [
-    `arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/amplify/shared/STRIPE_SECRET_KEY`,
-    `arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/amplify/shared/STRIPE_WEBHOOK_SECRET`,
+    `arn:aws:ssm:*:*:parameter/amplify/shared/STRIPE_SECRET_KEY`,
+    `arn:aws:ssm:*:*:parameter/amplify/shared/STRIPE_WEBHOOK_SECRET`,
   ],
 }));
 
 // ── QR Router (P1-10) ──
 const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Function;
-qrRouterLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(qrRouterLambda, refDataTable, false);
+qrRouterLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+grantTableAccess(qrRouterLambda, 'RefDataEvent', false);
 
 const qrApi = new apigw.RestApi(Stack.of(qrRouterLambda), 'QrRouterApi', { 
   restApiName: `bebo-qr-router-${stage}`,
@@ -494,7 +483,7 @@ const receiptIcebergLambda = backend.receiptIcebergWriterFn.resources.lambda as 
 receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
-receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+receiptIcebergLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
@@ -502,17 +491,17 @@ grantS3Access(receiptIcebergLambda, analyticsBucket, ['s3:GetObject', 's3:PutObj
 grantSqsAccess(receiptIcebergLambda, icebergDLQ, ['sqs:SendMessage']);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:${infraStack.region}:${infraStack.account}:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
 }));
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
   resources: [
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:catalog`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:catalog`,
+    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
   ],
 }));
-grantTableAccess(receiptIcebergLambda, refDataTable, false);
+grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
 receiptIcebergLambda.addEventSource(new DynamoEventSource(userTable, {
   startingPosition: lambda.StartingPosition.LATEST,
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') })],
@@ -531,16 +520,16 @@ receiptIcebergLambda.addEventSource(new DynamoEventSource(refDataTable, {
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
 tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
-tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 
-grantTableAccess(tenantProvisionerLambda, refDataTable, true);
+grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
 
 tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
   resources: [
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:catalog`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:catalog`,
+    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
   ],
 }));
 
@@ -565,27 +554,27 @@ tenantProvisionerLambda.addEventSource(new DynamoEventSource(refDataTable, {
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
-analyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
-analyticsLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+analyticsLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+analyticsLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
-analyticsLambda.addEnvironment('REPORT_TABLE', backend.data.resources.tables['ReportDataEvent'].tableName);
+analyticsLambda.addEnvironment('REPORT_TABLE', 'ReportDataEvent');
 
-grantTableAccess(analyticsLambda, userTable, false);
-grantTableAccess(analyticsLambda, refDataTable, false);
-grantTableAccess(analyticsLambda, backend.data.resources.tables['ReportDataEvent'], false);
+grantTableAccess(analyticsLambda, 'UserDataEvent', false);
+grantTableAccess(analyticsLambda, 'RefDataEvent', false);
+grantTableAccess(analyticsLambda, 'ReportDataEvent', false);
 grantS3Access(analyticsLambda, analyticsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:${infraStack.region}:${infraStack.account}:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
 }));
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTable'],
   resources: [
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:catalog`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts`,
+    `arn:aws:glue:*:*:catalog`,
+    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts`,
   ],
 }));
 
@@ -606,11 +595,11 @@ const parentalRes = consentRes.addResource('parental');
 const approveRes = parentalRes.addResource('approve');
 const parentalConsentLambda = backend.parentalConsentHandlerFn.resources.lambda as lambda.Function;
 approveRes.addMethod('GET', new apigw.LambdaIntegration(parentalConsentLambda), { apiKeyRequired: false });
-parentalConsentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-grantTableAccess(parentalConsentLambda, userTable, true);
+parentalConsentLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+grantTableAccess(parentalConsentLambda, 'UserDataEvent', true);
 parentalConsentLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
+  resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/PARENTAL_CONSENT_SECRET`],
 }));
 
 // Billing Webhook Route
@@ -686,14 +675,14 @@ analyticsLegacy.addResource('subscriber-count').addMethod('GET', analyticsIntegr
 
 // ── User Data Exporter (P2-5) ──
 const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
-exporterLambda.addEnvironment('USER_TABLE', userTable.tableName);
-exporterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+exporterLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+exporterLambda.addEnvironment('ADMIN_TABLE', 'AdminDataEvent');
 exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucket.bucketName);
 exporterLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
 backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride('AdminCreateUserConfig.AllowAdminCreateUserOnly', true);
 
-grantTableAccess(exporterLambda, userTable, true);
-grantTableAccess(exporterLambda, adminTable, true);
+grantTableAccess(exporterLambda, 'UserDataEvent', true);
+grantTableAccess(exporterLambda, 'AdminDataEvent', true);
 grantS3Access(exporterLambda, exportsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -716,13 +705,13 @@ grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
 exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
-webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 webhookDispatcherLambda.addEventSource(new SqsEventSource(webhookQueue, { batchSize: 5 }));
-grantTableAccess(webhookDispatcherLambda, refDataTable, false);
+grantTableAccess(webhookDispatcherLambda, 'RefDataEvent', false);
 // Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
 webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
-  resources: [`arn:aws:secretsmanager:${infraStack.region}:${infraStack.account}:secret:bebocard/webhook-signing/*`],
+  resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/webhook-signing/*`],
 }));
 
 // Secrets for FCM
@@ -744,7 +733,7 @@ const publicWebAcl = new wafv2.CfnWebACL(infraStack, 'PublicApiWebAcl', {
 
 [scanApi, analyticsApi].forEach((api, idx) => {
   new wafv2.CfnWebACLAssociation(infraStack, `WafAssoc${idx}`, {
-    resourceArn: `arn:aws:apigateway:${infraStack.region}::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
+    resourceArn: `arn:aws:apigateway:*::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
     webAclArn: publicWebAcl.attrArn,
   });
 });
@@ -768,15 +757,15 @@ compactorLambda.addToRolePolicy(new iam.PolicyStatement({
 
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:${infraStack.region}:${infraStack.account}:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
 }));
 
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTables', 'glue:GetTable', 'glue:UpdateTable'],
   resources: [
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:catalog`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:catalog`,
+    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
   ],
 }));
 
@@ -785,8 +774,8 @@ const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambd
 backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
-backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
+backfillerLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+backfillerLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
 backfillerLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 
 grantS3Access(backfillerLambda, analyticsBucket, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
@@ -802,20 +791,20 @@ backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
 
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:${infraStack.region}:${infraStack.account}:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
 }));
 
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTables', 'glue:GetTable', 'glue:UpdateTable', 'glue:CreateTable'],
   resources: [
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:catalog`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:${infraStack.region}:${infraStack.account}:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:catalog`,
+    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
   ],
 }));
 
-grantTableAccess(backfillerLambda, refDataTable, false);
-grantTableAccess(backfillerLambda, userTable, false);
+grantTableAccess(backfillerLambda, 'RefDataEvent', false);
+grantTableAccess(backfillerLambda, 'UserDataEvent', false);
  
 // Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
 const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
@@ -830,9 +819,9 @@ cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
 // Analytics Aggregator Schedule: Nightly at 1:00 AM UTC (before compaction)
 const aggregatorLambda = backend.analyticsAggregatorFn.resources.lambda as lambda.Function;
 Object.entries(tableNames).forEach(([k, v]) => aggregatorLambda.addEnvironment(k, v));
-grantTableAccess(aggregatorLambda, userTable, false);
-grantTableAccess(aggregatorLambda, refDataTable, false);
-grantTableAccess(aggregatorLambda, backend.data.resources.tables['ReportDataEvent'], true);
+grantTableAccess(aggregatorLambda, 'UserDataEvent', false);
+grantTableAccess(aggregatorLambda, 'RefDataEvent', false);
+grantTableAccess(aggregatorLambda, 'ReportDataEvent', true);
 
 const aggregatorRule = new events.Rule(infraStack, 'NightlyAggregationRule', {
   schedule: events.Schedule.cron({ hour: '1', minute: '0' }),
@@ -842,15 +831,15 @@ aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
 // ── Custom Segment Evaluator (EOD batch) ──
 // Nightly at 00:30 UTC — after segment-processor stream has caught up, before analytics compaction at 02:00.
 const customSegmentLambda = backend.customSegmentEvaluatorFn.resources.lambda as lambda.Function;
-customSegmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-customSegmentLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+customSegmentLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+customSegmentLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 
 // Read segment defs from RefDataEvent; write membership records to UserDataEvent
-grantTableAccess(customSegmentLambda, refDataTable, false);
-grantTableAccess(customSegmentLambda, userTable, true);
+grantTableAccess(customSegmentLambda, 'RefDataEvent', false);
+grantTableAccess(customSegmentLambda, 'UserDataEvent', true);
 
 // Update SEGMENT_DEF# stats (memberCount, lastEvaluatedAt) — needs UpdateItem on RefDataEvent
-grantTableAccess(customSegmentLambda, refDataTable, true);
+grantTableAccess(customSegmentLambda, 'RefDataEvent', true);
 
 const customSegmentDLQ = new sqs.Queue(infraStack, 'CustomSegmentEvaluatorDLQ', {
   retentionPeriod: Duration.days(14),
@@ -871,7 +860,7 @@ Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
 // ── Affiliate Feed Sync (Nightly at 05:00 UTC) ──
 const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
 affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(affiliateSyncLambda, refDataTable, true);
+grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 
 const affiliateSyncRule = new events.Rule(infraStack, 'NightlyAffiliateSyncRule', {
   schedule: events.Schedule.cron({ hour: '5', minute: '0' }),
@@ -909,28 +898,28 @@ for (const [fn, name, cost] of functionTags) {
 const receiptClaimLambda = backend.receiptClaimHandlerFn.resources.lambda as lambda.Function;
 receiptClaimLambda.addEnvironment('USER_TABLE', userTable.tableName);
 receiptClaimLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(receiptClaimLambda, userTable, true);
-grantTableAccess(receiptClaimLambda, refDataTable, true);
+grantTableAccess(receiptClaimLambda, 'UserDataEvent', true);
+grantTableAccess(receiptClaimLambda, 'RefDataEvent', true);
 
 // ── Remote Config Wiring (P2-21) ──
 const remoteConfigLambda = backend.remoteConfigHandlerFn.resources.lambda as lambda.Function;
 remoteConfigLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(remoteConfigLambda, refDataTable, false);
+grantTableAccess(remoteConfigLambda, 'RefDataEvent', false);
 
 // ── Click Tracking (P2-19) ──
 const clickTrackingLambda = backend.clickTrackingHandlerFn.resources.lambda as lambda.Function;
 clickTrackingLambda.addEnvironment('REPORT_TABLE', tableNames.REPORT_TABLE);
 clickTrackingLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-grantTableAccess(clickTrackingLambda, backend.data.resources.tables['ReportDataEvent'], true);
-grantTableAccess(clickTrackingLambda, refDataTable, false);
+grantTableAccess(clickTrackingLambda, 'ReportDataEvent', true);
+grantTableAccess(clickTrackingLambda, 'RefDataEvent', false);
 
 // ── P1-2 Glue IAM Refinement ──
 [tenantProvisionerLambda, receiptIcebergLambda].forEach(fn => {
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions: ['glue:GetDatabase'],
     resources: [
-      `arn:aws:glue:${infraStack.region}:${infraStack.account}:catalog`,
-      `arn:aws:glue:${infraStack.region}:${infraStack.account}:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+      `arn:aws:glue:*:*:catalog`,
+      `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
     ],
   }));
 });
@@ -972,7 +961,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
 
 // ── P0-6: Cognito Export Lambda (weekly DR backup) ───────────────────────────
 const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExportBucket', {
-  bucketName: `bebocard-cognito-exports-${infraStack.account}`,
+  bucketName: `bebocard-cognito-exports-*`,
   encryption: s3.BucketEncryption.KMS_MANAGED,
   versioned: true,
   lifecycleRules: [{ expiration: Duration.days(90), id: 'expire-old-exports' }],
@@ -1037,8 +1026,8 @@ new cloudwatch.CompositeAlarm(infraStack, 'BebocardDRCompositeAlarm', {
 const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
 brandHealthLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 brandHealthLambda.addEnvironment('USER_TABLE', userTable.tableName);
-grantTableAccess(brandHealthLambda, refDataTable, false);
-grantTableAccess(brandHealthLambda, userTable, false);
+grantTableAccess(brandHealthLambda, 'RefDataEvent', false);
+grantTableAccess(brandHealthLambda, 'UserDataEvent', false);
 
 const brandHealthRule = new events.Rule(infraStack, 'WeeklyBrandHealthRule', {
   schedule: events.Schedule.cron({ weekDay: 'MON', hour: '8', minute: '0' }),
@@ -1054,9 +1043,9 @@ templateManagerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 templateManagerLambda.addEnvironment('PORTAL_ORIGIN', process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com.au');
 templateManagerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${infraStack.region}:${infraStack.account}:parameter/amplify/shared/INTERNAL_SIGNING_SECRET`],
+  resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/INTERNAL_SIGNING_SECRET`],
 }));
-grantTableAccess(templateManagerLambda, refDataTable, true);
+grantTableAccess(templateManagerLambda, 'RefDataEvent', true);
 Tags.of(templateManagerLambda).add('Function', 'template-manager');
 Tags.of(templateManagerLambda).add('CostCenter', 'ops');
 
