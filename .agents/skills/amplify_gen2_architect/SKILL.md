@@ -5,44 +5,46 @@ description: Architectural rules to prevent circular dependencies and deployment
 
 # Amplify Gen 2 Architecture SOP
 
-This skill provides mandatory guidelines for managing dependencies between nested stacks in Amplify Gen 2 projects, specifically to avoid the `CloudformationStackCircularDependencyError`.
+This skill provides mandatory guidelines for managing dependencies between nested stacks in Amplify Gen 2 projects, specifically to avoid `CloudformationResourceCircularDependencyError` and deployment locks.
 
 ## The Core Problem
-Amplify Gen 2 partitions resources into nested stacks: `auth`, `data`, `storage`, and `functions`.
-A loop occurs when:
-1. **Stack A (Data)** depends on **Stack B (Function)** (e.g., as a GraphQL handler).
-2. **Stack B (Function)** depends on **Stack A (Data)** (e.g., referencing a DynamoDB Table Name for an environment variable).
+Amplify Gen 2 partitions resources into nested stacks. Complexity arises when auxiliary resources (API Gateways, Alarms, S3 Buckets) and business logic (functions) create tight webs of dependencies between the `data`, `auth`, and `storage` stacks.
 
 ## Mandatory Rules
 
-### 1. Resource Grouping (The Co-location Rule)
-Break loops by moving the function into the stack it depends on. Use `resourceGroupName` in `defineFunction`.
+### 1. Shared Infrastructure Stack (Stack Partitioning)
+For large-scale projects, do not crowd the `data` stack with auxiliary plumbing. Use `backend.createStack('SharedInfrastructure')` to isolate:
+- API Gateways
+- Global S3 Buckets
+- SNS Topics / Alarms
+- SSM Parameters
 
-| If the Lambda is a... | Use `resourceGroupName` |
-| :--- | :--- |
-| GraphQL Resolver (`.handler()`) | `'data'` |
-| DynamoDB Stream Processor | `'data'` |
-| SQS Consumer (Queue in Data stack) | `'data'` |
-| API Gateway Integration | `'data'` |
-| Cognito Trigger (Pre-signup, etc.) | `'auth'` |
-| S3 Trigger (Bucket in Storage stack) | `'storage'` |
+### 2. Fine-Grained Function Grouping
+Break loops by moving functions into logical stacks. Use `resourceGroupName` in `defineFunction`.
 
-### 2. IAM Decoupling (String-based ARNs)
-Avoid using CDK Tokens (like `table.tableArn`) for cross-stack grants. Tokens create implicit stack dependencies.
-**In `amplify/backend.ts`**, use string-based ARN construction:
+| Function Type | Stack Group | Rationale |
+| :--- | :--- | :--- |
+| **Stream Processor** | `'data'` | Co-located with Table Streams to avoid cross-stack EventSourceMapping loops. |
+| **GraphQL Resolver** | `'data'` | Default for AppSync proximity. |
+| **Cognito Trigger** | `'auth'` | Co-located with UserPool. |
+| **Business Logic** | `'functions'` | Isolated from data schema changes; reduces `data` stack complexity. |
+
+### 3. Localization of Auxiliary CDK Resources
+Auxiliary resources like **Alarms**, **Aliases**, and **LambdaDeploymentGroups** must use the same scope as the resource they monitor/wrap. Use `Stack.of(resource)`:
 
 ```typescript
-// SAFE: No hard dependency on the table's construct output
-lambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['dynamodb:GetItem', 'dynamodb:Query'],
-  resources: [`arn:aws:dynamodb:${stack.region}:${stack.account}:table/${tableName}`],
-}));
+// SAFE: Alias and DeploymentGroup stay with the function stack
+const fnStack = Stack.of(scanLambda);
+const liveAlias = new lambda.Alias(fnStack, 'LiveAlias', { version: scanLambda.currentVersion, aliasName: 'live' });
+new codedeploy.LambdaDeploymentGroup(fnStack, 'DG', { alias: liveAlias });
 ```
 
-### 3. Environment Variable Decoupling
-Do not use `table.tableName` in `addEnvironment` for functions in the default group if you have many cross-stack targets. Use SSM Parameters or hardcoded patterns where possible.
+### 4. IAM & Environment Variable Decoupling
+- **IAM**: Avoid CDK Tokens (like `table.tableArn`) for cross-stack grants. Use string-based ARN templates (e.g., `arn:aws:dynamodb:${region}:${account}:table/MyTable-*`).
+- **Env Vars**: For non-stream functions, pass Table Names or API URLs via SSM parameters or hardcoded config to break the synthesis-time link back to the `data` stack.
 
 ## Troubleshooting Checklist
-- [ ] Is the stack in `UPDATE_ROLLBACK_FAILED`? Use `aws cloudformation continue-update-rollback` to force a skip of the stuck resource.
-- [ ] Did you check all `events.Rule` targets? Cron jobs must also be co-located if they touch tables.
-- [ ] Verify `custom:attributes` in Cognito. Mutability cannot be changed after creation.
+- [ ] **Circular Dependency?** Split business logic out of `data` stack and move Alarms/Aliases to their respective function stacks.
+- [ ] **Large Resource Count?** Offload API Gateways and S3 Buckets to a `SharedInfrastructure` stack.
+- [ ] **Stack Stuck?** Use `aws cloudformation continue-update-rollback --resources-to-skip [LogicalID]` for persistent locks.
+
