@@ -116,21 +116,17 @@ const dlqAlarm = new cloudwatch.Alarm(Stack.of(myDLQ), `${name}DLQAlarm`, { ... 
 ## Fix 4 — IAM & Env Var Decoupling (BEBOCARD PATTERN)
 
 **Root cause**: Using CDK Token values like `table.tableArn` or `table.tableName` in cross-stack contexts creates synthesis-time links that CloudFormation cannot resolve.
+- **Rule 4 — IAM Decoupling (Total Anonymization)**: Replace all CDK token-based IAM grants (`table.grant()`) with `fn.addToRolePolicy()` using **literal string ARNs**.
+  - **CRITICAL**: Use wildcard `*` for region and account (e.g., `arn:aws:dynamodb:*:*:table/TableName-*`) to break synthesis-time locks. Do NOT use `infraStack.region`.
 
-**Fix (IAM)**: Use string-based ARN templates instead of CDK Token outputs:
+- **Rule 5 — Environment Variable Decoupling**: Avoid using `table.tableName` or `bucket.bucketName` in `addEnvironment` for cross-stack functions. Use the **known string prefix** (e.g. `'UserDataEvent'`) or look up values at runtime via SSM.
 
-```typescript
-// SAFE — string interpolation, no CDK Token dependency
-fn.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['dynamodb:GetItem', 'dynamodb:Query'],
-  resources: [
-    `arn:aws:dynamodb:${stack.region}:${stack.account}:table/UserDataEvent-*`,
-    `arn:aws:dynamodb:${stack.region}:${stack.account}:table/UserDataEvent-*/index/*`,
-  ],
-}));
-```
+- **Rule 6 — SSM Parameter Bridging**: Use **hardcoded string paths** for SSM parameters (e.g. `'/bebocard/params/USER_TABLE'`) instead of token-interpolated paths. This allows Stack A to "produce" and Stack B to "consume" identifiers without CloudFormation seeing a synthesis-time dependency.
 
-**Fix (Env Vars)**: For functions that do NOT co-locate with the `data` stack, pass table names via SSM parameters resolved at runtime, not at synthesis time. Avoid `addEnvironment('TABLE', table.tableName)` across stack boundaries.
+## Maintenance Checklist
+1. Never call `backend.createStack()` for shared infra; use the group stacks.
+2. If `tsc` reports `Argument of type 'ITable' is not assignable to parameter of type 'string'`, it's a reminder to use the string-literal prefix instead of the table object in `grantTableAccess`.
+3. Verify `resourceGroupName` in `defineFunction` matches the primary stack consumer.
 
 ---
 
