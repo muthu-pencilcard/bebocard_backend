@@ -143,6 +143,7 @@ const authStack = backend.auth.resources.userPool.stack;
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
 const infraStack = dataStack; // Storage, Glue, SNS, KMS go in the Data stack
+const mappingStack = backend.createStack('EventSourceMappings');
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
@@ -401,7 +402,12 @@ scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
 
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
 receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
-receiptProcessorLambda.addEventSource(new SqsEventSource(receiptProcessingQueue, { batchSize: 10 }));
+new lambda.EventSourceMapping(mappingStack, 'ReceiptProcessorSQSSource', {
+  target: receiptProcessorLambda,
+  eventSourceArn: receiptProcessingQueue.queueArn,
+  batchSize: 10,
+});
+receiptProcessingQueue.grantConsumeMessages(receiptProcessorLambda);
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
@@ -442,11 +448,14 @@ createDlqAlarm(segmentDLQ, 'SegmentProcessorDLQ', 5); // Allow small batch jitte
 segmentLambda.addEnvironment('SEGMENT_DLQ_URL', segmentDLQ.queueUrl);
 grantSqsAccess(segmentLambda, segmentDLQ, ['sqs:SendMessage']);
 
-segmentLambda.addEventSource(new DynamoEventSource(userTable, {
+new lambda.EventSourceMapping(mappingStack, 'SegmentLambdaDDBSource', {
+  target: segmentLambda,
+  eventSourceArn: userTable.tableStreamArn,
   startingPosition: lambda.StartingPosition.TRIM_HORIZON,
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.or('INSERT', 'MODIFY', 'REMOVE'), dynamodb: { Keys: { sK: { S: [{ prefix: 'RECEIPT#' }, { prefix: 'INVOICE#' }, { prefix: 'SUBSCRIPTION#' }] } } } })],
   retryAttempts: 1,
-}));
+});
+userTable.grantStreamRead(segmentLambda);
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
@@ -521,19 +530,25 @@ receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   ],
 }));
 grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
-receiptIcebergLambda.addEventSource(new DynamoEventSource(userTable, {
+new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaUserSource', {
+  target: receiptIcebergLambda,
+  eventSourceArn: userTable.tableStreamArn,
   startingPosition: lambda.StartingPosition.LATEST,
   filters: [lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') })],
   retryAttempts: 1,
-}));
-receiptIcebergLambda.addEventSource(new DynamoEventSource(refDataTable, {
+});
+userTable.grantStreamRead(receiptIcebergLambda);
+new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaRefSource', {
+  target: receiptIcebergLambda,
+  eventSourceArn: refDataTable.tableStreamArn,
   startingPosition: lambda.StartingPosition.LATEST,
   filters: [lambda.FilterCriteria.filter({ 
     eventName: lambda.FilterRule.isEqual('INSERT'),
     dynamodb: { Keys: { pK: { S: [{ prefix: 'ANON#' }] } } }
   })],
   retryAttempts: 1,
-}));
+});
+refDataTable.grantStreamRead(receiptIcebergLambda);
 
 // ── Tenant provisioner (P1-2) ──
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
@@ -557,19 +572,21 @@ tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: ['arn:aws:s3:::bebocard-enterprise-*', 'arn:aws:s3:::bebocard-*'],
 }));
 
-tenantProvisionerLambda.addEventSource(new DynamoEventSource(refDataTable, {
+new lambda.EventSourceMapping(mappingStack, 'TenantProvisionerLambdaRefSource', {
+  target: tenantProvisionerLambda,
+  eventSourceArn: refDataTable.tableStreamArn,
   startingPosition: lambda.StartingPosition.LATEST,
   filters: [lambda.FilterCriteria.filter({ 
     eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
     dynamodb: { 
       NewImage: { 
-        pK: { S: [{ prefix: 'TENANT#' }] },
-        sK: { S: ['profile'] }
+        primaryCat: { S: ['tenant'] }
       } 
     } 
   })],
   retryAttempts: 1,
-}));
+});
+refDataTable.grantStreamRead(tenantProvisionerLambda);
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
@@ -731,7 +748,12 @@ exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
 webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
-webhookDispatcherLambda.addEventSource(new SqsEventSource(webhookQueue, { batchSize: 5 }));
+new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
+  target: webhookDispatcherLambda,
+  eventSourceArn: webhookQueue.queueArn,
+  batchSize: 5,
+});
+webhookQueue.grantConsumeMessages(webhookDispatcherLambda);
 grantTableAccess(webhookDispatcherLambda, 'RefDataEvent', false);
 // Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
 webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
