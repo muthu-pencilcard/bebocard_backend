@@ -485,7 +485,7 @@ const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Func
 qrRouterLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 grantTableAccess(qrRouterLambda, 'RefDataEvent', false);
 
-const qrApi = new apigw.RestApi(Stack.of(qrRouterLambda), 'QrRouterApi', { 
+const qrApi = new apigw.RestApi(infraStack, 'QrRouterApi', { 
   restApiName: `bebo-qr-router-${stage}`,
 });
 const qrIntegration = new apigw.LambdaIntegration(qrRouterLambda);
@@ -598,7 +598,7 @@ analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // ── Scan API (v1 & Legacy) ──
-const scanApi = new apigw.RestApi(Stack.of(scanLambda), 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
+const scanApi = new apigw.RestApi(infraStack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
 const scanIntegration = new apigw.LambdaIntegration(scanLambda);
 
 // v1 routes
@@ -629,7 +629,7 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 // We use a decoupled environment variable for the API URL to break the auth -> data circular dependency.
 postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
 
-new ssm.StringParameter(Stack.of(scanLambda), 'ScanApiUrlParam', {
+new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
   stringValue: scanApi.url,
 });
@@ -672,7 +672,7 @@ const { integration: invoice301, options: invoice301Opts } = make301('/v1/invoic
 scanApi.root.addResource('invoice').addMethod('POST', invoice301, invoice301Opts);
 
 // ── Tenant Analytics API (v1 & Legacy) ──
-const analyticsApi = new apigw.RestApi(Stack.of(analyticsLambda), 'TenantAnalyticsApi', {
+const analyticsApi = new apigw.RestApi(infraStack, 'TenantAnalyticsApi', {
   restApiName: `bebo-tenant-analytics-${stage}`,
   deployOptions: { stageName: stage },
   defaultMethodOptions: { apiKeyRequired: true },
