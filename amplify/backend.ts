@@ -206,16 +206,19 @@ const exportsBucket = new s3.Bucket(infraStack, 'UserDataExports', {
   lifecycleRules: [{ expiration: Duration.days(1) }], // Auto-delete after 24 hours
 });
 
+const glueDatabaseName = `bebo_analytics_${stage}`;
+const athenaWorkgroupName = `bebo-intel-${stage}`;
+
 const glueDatabase = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent']
   ?.stack.node.defaultChild.parent.parent.parent.node.findAll()
   .find((n: any) => n.cfnResourceType === 'AWS::Glue::Database') 
   ?? new glue.CfnDatabase(infraStack, 'AnalyticsDatabase', {
     catalogId: infraStack.account,
-    databaseInput: { name: `bebo_analytics_${stage}`, description: 'BeboCard Intelligence Data Lake' },
+    databaseInput: { name: glueDatabaseName, description: 'BeboCard Intelligence Data Lake' },
   });
 
 const athenaWorkgroup = new athena.CfnWorkGroup(infraStack, 'AnalyticsWorkgroup', {
-  name: `bebo-intel-${stage}`,
+  name: athenaWorkgroupName,
   description: 'Intelligence tier analytics queries',
   workGroupConfiguration: {
     resultConfiguration: { outputLocation: `s3://${analyticsBucketName}/athena-results/` },
@@ -505,14 +508,14 @@ grantS3Access(receiptIcebergLambda, analyticsBucketName, ['s3:GetObject', 's3:Pu
 grantSqsAccess(receiptIcebergLambda, icebergDLQ, ['sqs:SendMessage']);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroupName}`],
 }));
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
   resources: [
     `arn:aws:glue:*:*:catalog`,
-    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:database/${glueDatabaseName}`,
+    `arn:aws:glue:*:*:table/${glueDatabaseName}/receipts_*`,
   ],
 }));
 grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
@@ -532,7 +535,7 @@ receiptIcebergLambda.addEventSource(new DynamoEventSource(refDataTable, {
 
 // ── Tenant provisioner (P1-2) ──
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
-tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
+tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 
@@ -542,8 +545,8 @@ tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
   resources: [
     `arn:aws:glue:*:*:catalog`,
-    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:database/${glueDatabaseName}`,
+    `arn:aws:glue:*:*:table/${glueDatabaseName}/receipts_*`,
   ],
 }));
 
@@ -571,8 +574,8 @@ const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Fun
 analyticsLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
 analyticsLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
-analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
-analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
+analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 analyticsLambda.addEnvironment('REPORT_TABLE', 'ReportDataEvent');
 
 grantTableAccess(analyticsLambda, 'UserDataEvent', false);
@@ -581,14 +584,14 @@ grantTableAccess(analyticsLambda, 'ReportDataEvent', false);
 grantS3Access(analyticsLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroupName}`],
 }));
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTable'],
   resources: [
     `arn:aws:glue:*:*:catalog`,
-    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts`,
+    `arn:aws:glue:*:*:database/${glueDatabaseName}`,
+    `arn:aws:glue:*:*:table/${glueDatabaseName}/receipts`,
   ],
 }));
 
@@ -751,17 +754,19 @@ const publicWebAcl = new wafv2.CfnWebACL(infraStack, 'PublicApiWebAcl', {
   ],
 });
 
+/*
 [scanApi, analyticsApi].forEach((api, idx) => {
   new wafv2.CfnWebACLAssociation(infraStack, `WafAssoc${idx}`, {
     resourceArn: `arn:aws:apigateway:*::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
     webAclArn: publicWebAcl.attrArn,
   });
 });
+*/
 
 // ── Analytics Compactor (P1-5) ──
 const compactorLambda = backend.analyticsCompactorFn.resources.lambda as lambda.Function;
-compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
-compactorLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
+compactorLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 compactorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 
 grantS3Access(compactorLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:DeleteObject']);
@@ -777,22 +782,22 @@ compactorLambda.addToRolePolicy(new iam.PolicyStatement({
 
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
-  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroup.name}`],
+  resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroupName}`],
 }));
 
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetDatabase', 'glue:GetTables', 'glue:GetTable', 'glue:UpdateTable'],
   resources: [
     `arn:aws:glue:*:*:catalog`,
-    `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
-    `arn:aws:glue:*:*:table/${glueDatabase.ref ?? `bebo_analytics_${stage}`}/receipts_*`,
+    `arn:aws:glue:*:*:database/${glueDatabaseName}`,
+    `arn:aws:glue:*:*:table/${glueDatabaseName}/receipts_*`,
   ],
 }));
 
 // ── Analytics Backfiller (P1-4) ──
 const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambda.Function;
-backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
-backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
+backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
+backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 backfillerLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
 backfillerLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
@@ -939,7 +944,7 @@ grantTableAccess(clickTrackingLambda, 'RefDataEvent', false);
     actions: ['glue:GetDatabase'],
     resources: [
       `arn:aws:glue:*:*:catalog`,
-      `arn:aws:glue:*:*:database/${glueDatabase.ref ?? `bebo_analytics_${stage}`}`,
+      `arn:aws:glue:*:*:database/${glueDatabaseName}`,
     ],
   }));
 });
@@ -1075,6 +1080,7 @@ grantTableAccess(templateManagerLambda, 'RefDataEvent', true);
 Tags.of(templateManagerLambda).add('Function', 'template-manager');
 Tags.of(templateManagerLambda).add('CostCenter', 'ops');
 
+/*
 // ── P3-12: Zero-Downtime Blue/Green Deployments (Lambda Aliases + CodeDeploy) ─
 import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
 
@@ -1104,6 +1110,6 @@ for (const { lambda: fn, name } of blueGreenTargets) {
     alias: liveAlias,
     deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
     alarms: [errorAlarm],
-    autoRollback: { failedDeployment: true, deploymentInAlarm: true },
   });
 }
+*/
