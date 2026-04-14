@@ -361,6 +361,7 @@ grantTableAccess(scanLambda, 'RefDataEvent', false);
 grantTableAccess(scanLambda, 'AdminDataEvent', false);
 grantKmsAccess(scanLambda, receiptSigningKey, ['kms:GetPublicKey']);
 
+/*
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
 const scanAlias = scanLambda.addAlias('prod');
 
@@ -383,6 +384,7 @@ const scanUtilizationAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHan
   treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 });
 scanUtilizationAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+*/
 
 const receiptProcessingDLQ = new sqs.Queue(infraStack, 'ReceiptProcessingDLQ', { retentionPeriod: Duration.days(14) });
 const receiptProcessingQueue = new sqs.Queue(infraStack, 'ReceiptProcessingQueue', {
