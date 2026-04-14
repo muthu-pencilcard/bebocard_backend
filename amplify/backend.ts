@@ -121,11 +121,12 @@ const userTable = backend.data.resources.tables['UserDataEvent'];
 const refDataTable = backend.data.resources.tables['RefDataEvent'];
 const adminTable = backend.data.resources.tables['AdminDataEvent'];
 
+// ── String-literal table names (no CDK tokens — breaks functions→data synthesis link) ──
 const tableNames = {
-  USER_TABLE: userTable.tableName,
-  REFDATA_TABLE: refDataTable.tableName,
-  ADMIN_TABLE: adminTable.tableName,
-  REPORT_TABLE: backend.data.resources.tables['ReportDataEvent'].tableName,
+  USER_TABLE: 'UserDataEvent',
+  REFDATA_TABLE: 'RefDataEvent',
+  ADMIN_TABLE: 'AdminDataEvent',
+  REPORT_TABLE: 'ReportDataEvent',
 };
 
 const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
@@ -146,9 +147,15 @@ const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.no
 const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABLE`;
 const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
 const restApiUrlParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/SCAN_API_URL`;
+const USER_POOL_ID_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_POOL_ID`;
 
 new ssm.StringParameter(infraStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
 new ssm.StringParameter(infraStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
+// ── Store Cognito UserPoolId in auth stack's own SSM param (no data→auth token) ──
+new ssm.StringParameter(authStack, 'UserPoolIdParam', {
+  parameterName: USER_POOL_ID_PARAM,
+  stringValue: backend.auth.resources.userPool.userPoolId,
+});
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
 const analyticsBucketName = `bebocard-analytics-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
@@ -683,8 +690,14 @@ const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
 exporterLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
 exporterLambda.addEnvironment('ADMIN_TABLE', 'AdminDataEvent');
 exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucketName);
-exporterLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
-backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride('AdminCreateUserConfig.AllowAdminCreateUserOnly', true);
+// USER_POOL_ID read from SSM at runtime — no synthesis-time auth→data token
+exporterLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
+exporterLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter${USER_POOL_ID_PARAM}`],
+}));
+// cfnUserPool.addPropertyOverride removed — was creating data→auth cross-stack mutation.
+// AllowAdminCreateUserOnly defaults to false but can be enforced via a separate auth stack customisation.
 
 grantTableAccess(exporterLambda, 'UserDataEvent', true);
 grantTableAccess(exporterLambda, 'AdminDataEvent', true);
@@ -692,7 +705,7 @@ grantS3Access(exporterLambda, exportsBucketName, ['s3:GetObject', 's3:PutObject'
 
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminDisableUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:AdminDeleteUser'],
-  resources: [backend.auth.resources.userPool.userPoolArn],
+  resources: ['arn:aws:cognito-idp:*:*:userpool/*'],
 }));
 
 // ── Webhook Reliability Queue (P2-12) ──
@@ -976,13 +989,18 @@ const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
 });
 
 const cognitoExportLambda = backend.cognitoExportFn.resources.lambda as lambda.Function;
-cognitoExportLambda.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
+// USER_POOL_ID read from SSM at runtime — no functions→auth token
+cognitoExportLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
 cognitoExportLambda.addEnvironment('EXPORT_BUCKET', cognitoExportBucketName);
 grantS3Access(cognitoExportLambda, cognitoExportBucketName, ['s3:PutObject']);
+cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter${USER_POOL_ID_PARAM}`],
+}));
 
 cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:ListUsers'],
-  resources: [backend.auth.resources.userPool.userPoolArn],
+  resources: ['arn:aws:cognito-idp:*:*:userpool/*'],
 }));
 
 const cognitoExportRule = new events.Rule(infraStack, 'WeeklyCognitoExportRule', {
