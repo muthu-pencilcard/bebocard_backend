@@ -675,10 +675,12 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
 
 // Break Circularity: Store the API URL in the ROOT stack (infraStack), not the scanApiStack.
-// This ensures the API stack doesn't have a dependency on the synthesis of its own URL parameter.
+// We use a literal ARN pattern — the URL is deterministic given restApiId and stage
+const scanApiUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod/`;
+
 new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
-  stringValue: scanApi.url,
+  stringValue: scanApiUrl,
 });
 
 // Legacy routes — 301 permanent redirect to /v1/ equivalents (P2-7)
@@ -692,25 +694,26 @@ const make301 = (v1Path: string) => {
       integrationResponses: [{
         statusCode: '301',
         responseParameters: {
-          'method.header.Location': `'${redirectUrl}'`, // Standard header for redirects
+          'method.header.Location': `'${redirectUrl}'`,
           'method.response.header.Location': `'${redirectUrl}'`,
           'method.response.header.Deprecation': "'true'",
           'method.response.header.Sunset': "'Wed, 01 Jul 2026 00:00:00 GMT'",
         },
       }],
     }),
-  options: {
-    apiKeyRequired: false,
-    methodResponses: [{
-      statusCode: '301',
-      responseParameters: { 
-        'method.response.header.Location': true,
-        'method.response.header.Deprecation': true,
-        'method.response.header.Sunset': true,
-      },
-    }],
-  } satisfies apigw.MethodOptions,
-});
+    options: {
+      apiKeyRequired: false,
+      methodResponses: [{
+        statusCode: '301',
+        responseParameters: { 
+          'method.response.header.Location': true,
+          'method.response.header.Deprecation': true,
+          'method.response.header.Sunset': true,
+        },
+      }],
+    } as apigw.MethodOptions,
+  };
+};
 
 const { integration: scan301, options: scan301Opts } = make301('/v1/scan');
 scanApi.root.addResource('scan').addMethod('POST', scan301, scan301Opts);
