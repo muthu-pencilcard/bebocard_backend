@@ -687,14 +687,14 @@ new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
 // Brands that haven't updated their integration receive a redirect, not an error.
 // No API key required on the redirect itself — the brand's key is used on the /v1/ destination.
 const make301 = (v1Path: string) => {
-  const redirectUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod${v1Path}`;
+  const targetUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod${v1Path}`;
   return {
     integration: new apigw.MockIntegration({
       requestTemplates: { 'application/json': '{"statusCode": 301}' },
       integrationResponses: [{
         statusCode: '301',
         responseParameters: {
-          'method.response.header.Location': `'${redirectUrl}'`,
+          'method.response.header.Location': `'${targetUrl}'`,
           'method.response.header.Deprecation': "'true'",
           'method.response.header.Sunset': "'Wed, 01 Jul 2026 00:00:00 GMT'",
         },

@@ -12,6 +12,7 @@ export const geofenceHandlerFn = defineFunction({
     REF_TABLE:   process.env.REF_TABLE   ?? '',
     ADMIN_TABLE: process.env.ADMIN_TABLE ?? '', // needed to resolve secondaryULID → permULID
     // Set via: amplify secret set FIREBASE_SERVICE_ACCOUNT_JSON
-    FIREBASE_SERVICE_ACCOUNT_JSON: process.env.FIREBASE_SERVICE_ACCOUNT_JSON ?? '',
+    // Using a fallback to prevent stack synthesis crashes if the secret isn't configured in the environment yet.
+    FIREBASE_SERVICE_ACCOUNT_JSON: process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '{}',
   },
 });
