@@ -880,7 +880,7 @@ const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
 
 // Schedule: Nightly at 2:00 AM UTC
 const cronRule = new events.Rule(infraStack, 'NightlyCompactionRule', {
-  schedule: events.Schedule.cron({ hour: '2', minute: '0' }),
+  schedule: events.Schedule.expression('cron(0 2 * * ? *)'),
 });
 cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
 
@@ -892,7 +892,7 @@ grantTableAccess(aggregatorLambda, 'RefDataEvent', false);
 grantTableAccess(aggregatorLambda, 'ReportDataEvent', true);
 
 const aggregatorRule = new events.Rule(infraStack, 'NightlyAggregationRule', {
-  schedule: events.Schedule.cron({ hour: '1', minute: '0' }),
+  schedule: events.Schedule.expression('cron(0 1 * * ? *)'),
 });
 aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
 
@@ -917,7 +917,7 @@ customSegmentLambda.addEnvironment('CUSTOM_SEGMENT_DLQ_URL', customSegmentDLQ.qu
 grantSqsAccess(customSegmentLambda, customSegmentDLQ, ['sqs:SendMessage']);
 
 const customSegmentRule = new events.Rule(infraStack, 'NightlyCustomSegmentRule', {
-  schedule: events.Schedule.cron({ hour: '0', minute: '30' }),
+  schedule: events.Schedule.expression('cron(30 0 * * ? *)'),
   description: 'Nightly end-of-day custom segment evaluation at 00:30 UTC',
 });
 customSegmentRule.addTarget(new eventsTargets.LambdaFunction(customSegmentLambda));
@@ -931,7 +931,7 @@ affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 
 const affiliateSyncRule = new events.Rule(infraStack, 'NightlyAffiliateSyncRule', {
-  schedule: events.Schedule.cron({ hour: '5', minute: '0' }),
+  schedule: events.Schedule.expression('cron(0 5 * * ? *)'),
   description: 'Nightly sync of affiliate offers from Commission Factory / Impact',
 });
 affiliateSyncRule.addTarget(new eventsTargets.LambdaFunction(affiliateSyncLambda));
@@ -1054,7 +1054,7 @@ cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 const cognitoExportRule = new events.Rule(infraStack, 'WeeklyCognitoExportRule', {
-  schedule: events.Schedule.cron({ day: '?', weekDay: 'SUN', hour: '2', minute: '0' }),
+  schedule: events.Schedule.expression('cron(0 2 ? * SUN *)'),
   description: 'Weekly Cognito user pool export for DR (P0-6)',
 });
 cognitoExportRule.addTarget(new eventsTargets.LambdaFunction(cognitoExportLambda));
@@ -1104,7 +1104,7 @@ grantTableAccess(brandHealthLambda, 'RefDataEvent', false);
 grantTableAccess(brandHealthLambda, 'UserDataEvent', false);
 
 const brandHealthRule = new events.Rule(infraStack, 'WeeklyBrandHealthRule', {
-  schedule: events.Schedule.cron({ day: '?', weekDay: 'MON', hour: '8', minute: '0' }),
+  schedule: events.Schedule.expression('cron(0 8 ? * MON *)'),
   description: 'Weekly brand health check — alerts CSM when scan volume drops >50% (P3-16)',
 });
 brandHealthRule.addTarget(new eventsTargets.LambdaFunction(brandHealthLambda));
