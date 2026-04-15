@@ -636,7 +636,8 @@ analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // ── Scan API (v1 & Legacy) ──
-const scanApi = new apigw.RestApi(infraStack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
+const scanApiStack = backend.scanHandlerFn.resources.lambda.stack;
+const scanApi = new apigw.RestApi(scanApiStack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
 const scanIntegration = new apigw.LambdaIntegration(scanLambda);
 
 // v1 routes
@@ -667,7 +668,7 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 // We use a decoupled environment variable for the API URL to break the auth -> data circular dependency.
 postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
 
-new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
+new ssm.StringParameter(scanApiStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
   stringValue: scanApi.url,
 });
