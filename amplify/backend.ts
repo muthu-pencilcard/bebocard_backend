@@ -637,7 +637,11 @@ analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
 
 // ── Scan API (v1 & Legacy) ──
 const scanApiStack = backend.scanHandlerFn.resources.lambda.stack;
-const scanApi = new apigw.RestApi(scanApiStack, 'ScanApi', { restApiName: `bebo-scan-api-${stage}` });
+// Construct API in its own nested stack to co-locate with Lambdas (reduces cross-stack permission deps)
+const scanApi = new apigw.RestApi(scanApiStack, 'ScanApi', { 
+  restApiName: `bebo-scan-api-${stage}`,
+  deployOptions: { stageName: 'prod' } 
+});
 const scanIntegration = new apigw.LambdaIntegration(scanLambda);
 
 // v1 routes
@@ -668,7 +672,9 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 // We use a decoupled environment variable for the API URL to break the auth -> data circular dependency.
 postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
 
-new ssm.StringParameter(scanApiStack, 'ScanApiUrlParam', {
+// Break Circularity: Store the API URL in the ROOT stack (infraStack), not the scanApiStack.
+// This ensures the API stack doesn't have a dependency on the synthesis of its own URL parameter.
+new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
   stringValue: scanApi.url,
 });
