@@ -163,10 +163,11 @@ new ssm.StringParameter(authStack, 'UserPoolIdParam', {
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
 const analyticsBucketName = `bebocard-analytics-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
-const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
+// Adoption Pattern: Attempt to use existing bucket to prevent CREATE_FAILED collision on failed re-runs
+const analyticsBucket = s3.Bucket.fromBucketName(infraStack, 'AnalyticsLakeImport', analyticsBucketName) || new s3.Bucket(infraStack, 'AnalyticsLake', {
   bucketName: analyticsBucketName,
   removalPolicy: RemovalPolicy.RETAIN,
-  versioned: true, // Required for CRR (P3-12)
+  versioned: true, 
   intelligentTieringConfigurations: [
     { name: 'DefaultTiering', archiveAccessTierTime: Duration.days(90), deepArchiveAccessTierTime: Duration.days(180) }
   ],
@@ -178,11 +179,12 @@ const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
 
 // ── Remote Configuration (P2-2) ──
 // Allows instant UI/Feature updates without App Store reviews
+// ── Remote Configuration (P2-2) ──
 const remoteConfigBucketName = `bebocard-config-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
-const remoteConfigBucket = new s3.Bucket(infraStack, 'RemoteConfig', {
+const remoteConfigBucket = s3.Bucket.fromBucketName(infraStack, 'RemoteConfigImport', remoteConfigBucketName) || new s3.Bucket(infraStack, 'RemoteConfig', {
   bucketName: remoteConfigBucketName,
   versioned: true,
-  publicReadAccess: true, // Safe for non-sensitive public app configuration
+  publicReadAccess: true, 
   blockPublicAccess: {
     blockPublicAcls: false,
     blockPublicPolicy: false,
@@ -682,18 +684,21 @@ new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
 // Legacy routes — 301 permanent redirect to /v1/ equivalents (P2-7)
 // Brands that haven't updated their integration receive a redirect, not an error.
 // No API key required on the redirect itself — the brand's key is used on the /v1/ destination.
-const make301 = (v1Path: string) => ({
-  integration: new apigw.MockIntegration({
-    requestTemplates: { 'application/json': '{"statusCode": 301}' },
-    integrationResponses: [{
-      statusCode: '301',
-      responseParameters: {
-        'method.response.header.Location': `'${scanApi.urlForPath(v1Path)}'`,
-        'method.response.header.Deprecation': "'true'",
-        'method.response.header.Sunset': "'Wed, 01 Jul 2026 00:00:00 GMT'",
-      },
-    }],
-  }),
+const make301 = (v1Path: string) => {
+  const redirectUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod${v1Path}`;
+  return {
+    integration: new apigw.MockIntegration({
+      requestTemplates: { 'application/json': '{"statusCode": 301}' },
+      integrationResponses: [{
+        statusCode: '301',
+        responseParameters: {
+          'method.header.Location': `'${redirectUrl}'`, // Standard header for redirects
+          'method.response.header.Location': `'${redirectUrl}'`,
+          'method.response.header.Deprecation': "'true'",
+          'method.response.header.Sunset': "'Wed, 01 Jul 2026 00:00:00 GMT'",
+        },
+      }],
+    }),
   options: {
     apiKeyRequired: false,
     methodResponses: [{
@@ -1038,7 +1043,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
 
 // ── P0-6: Cognito Export Lambda (weekly DR backup) ───────────────────────────
 const cognitoExportBucketName = `bebocard-cognito-exports-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
-const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
+const cognitoExportBucket = s3.Bucket.fromBucketName(infraStack, 'CognitoExportsImport', cognitoExportBucketName) || new s3.Bucket(infraStack, 'CognitoExports', {
   bucketName: cognitoExportBucketName,
   encryption: s3.BucketEncryption.S3_MANAGED,
   versioned: true,
