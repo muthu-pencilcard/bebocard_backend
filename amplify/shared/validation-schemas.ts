@@ -31,6 +31,8 @@ export const OfferInputSchema = z.object({
   targetStoreIds: z.array(z.string().max(64)).max(100).optional().nullable(),
   minVisitCount:  z.number().int().min(0).max(9999).optional().nullable(),
   category:       z.string().max(64).optional().nullable(),
+  status:         z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'PAUSED', 'EXPIRED', 'ARCHIVED']).default('DRAFT'),
+  scheduledFor:   z.string().datetime().optional().nullable(),
   campaignType:   z.enum(['untargeted', 'acquisition', 'loyalty_reward', 're_engagement', 'seasonal', 'clearance']).default('untargeted'),
 }).refine((d: { validFrom: string; validTo: string }) => d.validTo >= d.validFrom, { message: 'validTo must be on or after validFrom' });
 
@@ -79,6 +81,23 @@ export const StoreInputSchema = z.object({
   radiusKm:   z.number().min(0.05).max(5).default(0.2),
   phone:      z.string().max(20).optional().nullable(),
   hours:      z.record(z.string().max(50)).optional().nullable(),
+});
+
+export const BrandProfileSchema = z.object({
+  brandName:        safeText(100),
+  brandColor:       z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected #RRGGBB'),
+  logoUrl:          httpsUrl.nullable(),
+  description:      safeText(1000).optional().nullable(),
+  barcodeType:      z.string().max(20).default('EAN13'),
+  isWidgetEnabled:  z.boolean().default(false),
+  widgetConfig: z.object({
+    iframeUrl:        httpsUrl.nullable(),
+    supportedActions: z.array(z.enum(['invoice', 'giftcard', 'subscription'])).optional().nullable(),
+  }).optional().nullable(),
+  loyaltyDefaults: z.object({
+    supportsMultipleCards: z.boolean().default(false),
+    pointsName:            safeText(30).optional().nullable(),
+  }).optional().nullable(),
 });
 
 export const SubscriptionCatalogInputSchema = z.object({

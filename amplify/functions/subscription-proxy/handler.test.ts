@@ -469,6 +469,7 @@ describe('POST /recurring/{subId}/invoice', () => {
         dueDate: '2026-05-01',
         billingPeriod: '2026-04-01/2026-04-30',
         invoiceNumber: 'WW-INV-001',
+        paymentUrl: 'https://pay.example.com/invoice/WW-INV-001',
       }),
       {} as never, () => {},
     );
@@ -488,6 +489,7 @@ describe('POST /recurring/{subId}/invoice', () => {
     expect(desc.linkedSubscriptionSk).toBe('RECURRING#woolworths#SUB-001');
     expect(desc.billingPeriod).toBe('2026-04-01/2026-04-30');
     expect(desc.invoiceNumber).toBe('WW-INV-001');
+    expect(desc.paymentUrl).toBe('https://pay.example.com/invoice/WW-INV-001');
     expect(desc.status).toBe('unpaid');
 
     expect(mockFcmSend).toHaveBeenCalledOnce();

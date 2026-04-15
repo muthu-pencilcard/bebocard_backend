@@ -442,6 +442,7 @@ async function handleReceipt(
   }
 
   let permULID: string;
+  let owner: string | undefined;
   let claimToken: string | undefined;
   const receiptId = ulid();
 
@@ -452,8 +453,12 @@ async function handleReceipt(
     // ── Anonymous Walk-In Receipt (P1-9) ──
     console.info(`[scan-handler] Processing anonymous receipt ${receiptId} for brand ${validKey.brandId}`);
     permULID = `ANON#${receiptId}`;
+    owner = undefined; // Anonymous receipts have no owner until claimed
     // Simple 8-char claim token. In production, this would be a signed HMAC.
     claimToken = createHash('sha256').update(`${receiptId}${validKey.brandId}${Date.now()}`).digest('hex').substring(0, 8).toUpperCase();
+  } else if (isSandboxUser) {
+    permULID = 'SANDBOX_IDENTITY_123';
+    owner = 'sandbox_user';
   } else {
     // Handle idempotency check BEFORE enqueuing (to avoid SQS bloat)
     // Resolve secondaryULID → permULID
@@ -464,12 +469,13 @@ async function handleReceipt(
       Limit: 1,
     }));
 
-    let scanItem = scanQuery.Items?.[0];
+    const scanItem = scanQuery.Items?.[0];
 
     if (!scanItem) {
       // ── GHOST Identity flow ──
       console.info(`[scan-handler] Unknown secondaryULID ${secondaryULID}. Creating GHOST profile.`);
       permULID = `GHOST#${secondaryULID}`;
+      owner = undefined; // Ghost users have no owner until they register
       
       await dynamo.send(new PutCommand({
         TableName: ADMIN_TABLE,
@@ -484,11 +490,8 @@ async function handleReceipt(
       return { statusCode: 404, headers, body: JSON.stringify({ error: 'Identity revoked' }) };
     } else {
       permULID = scanItem.sK;
+      owner = scanItem.owner;
     }
-  }
-
-  if (isSandboxUser) {
-    permULID = 'SANDBOX_IDENTITY_123';
   }
  
   // ── Billing Check (Receipt) ──
@@ -505,6 +508,7 @@ async function handleReceipt(
       ...body,
       receiptId,
       permULID,
+      owner,
       claimToken,
       brandId: validKey.brandId,
       isInvoice,

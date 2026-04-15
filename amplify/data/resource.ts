@@ -525,11 +525,12 @@ const schema = a.schema({
     .handler(a.handler.function(exporterFn))
     .authorization(allow => [allow.authenticated()]),
 
-  trackClick: a.mutation()
+  trackEngagement: a.mutation()
     .arguments({
-      offerId: a.string().required(),
+      eventType: a.string().required(),
+      targetId: a.string().required(),
       source: a.string(),
-      affiliateId: a.string(),
+      metadata: a.json(),
       permULID: a.string().required(),
     })
     .returns(a.json())

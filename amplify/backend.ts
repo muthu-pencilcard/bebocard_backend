@@ -44,6 +44,9 @@ import { cognitoExportFn } from './functions/cognito-export/resource';
 import { brandHealthMonitorFn } from './functions/brand-health-monitor/resource';
 import { clickTrackingHandlerFn } from './functions/click-tracking-handler/resource';
 import { templateManagerFn } from './functions/template-manager/resource';
+import { campaignSchedulerFn } from './functions/campaign-scheduler/resource';
+import { pointsExpiryForecastFn } from './functions/points-expiry-forecast/resource';
+import { aggregatedSpendingProcessorFn } from './functions/aggregated-spending-processor/resource';
 import { Stack, Duration, RemovalPolicy, Tags, CfnOutput } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
@@ -114,6 +117,9 @@ const backend = defineBackend({
   remoteConfigHandlerFn,
   clickTrackingHandlerFn,
   templateManagerFn,
+  campaignSchedulerFn,
+  pointsExpiryForecastFn,
+  aggregatedSpendingProcessorFn,
 });
 
 // ── Shared Infrastructure ────────────────────────────────────────────────────
@@ -1112,6 +1118,34 @@ brandHealthRule.addTarget(new eventsTargets.LambdaFunction(brandHealthLambda));
 Tags.of(brandHealthLambda).add('Function', 'brand-health-monitor');
 Tags.of(brandHealthLambda).add('CostCenter', 'ops');
 
+// ── P3-1: Points Expiry Forecast (Predictive engine) ─────────────────────────
+const pointsForecastLambda = backend.pointsExpiryForecastFn.resources.lambda as lambda.Function;
+pointsForecastLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+pointsForecastLambda.addEnvironment('USER_TABLE', userTable.tableName);
+grantTableAccess(pointsForecastLambda, 'RefDataEvent', false);
+grantTableAccess(pointsForecastLambda, 'UserDataEvent', true);
+
+const pointsForecastRule = new events.Rule(infraStack, 'NightlyPointsForecastRule', {
+  schedule: events.Schedule.expression('cron(15 1 * * ? *)'),
+  description: 'Nightly points expiry prediction at 01:15 UTC (P3-1)',
+});
+pointsForecastRule.addTarget(new eventsTargets.LambdaFunction(pointsForecastLambda));
+Tags.of(pointsForecastLambda).add('Function', 'points-expiry-forecast');
+Tags.of(pointsForecastLambda).add('CostCenter', 'user-intel');
+
+// ── P3-2: Aggregated Spending Processor (Private user intel) ─────────────────
+const spendProcessorLambda = backend.aggregatedSpendingProcessorFn.resources.lambda as lambda.Function;
+spendProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
+grantTableAccess(spendProcessorLambda, 'UserDataEvent', true);
+
+const spendProcessorRule = new events.Rule(infraStack, 'NightlySpendProcessorRule', {
+  schedule: events.Schedule.expression('cron(45 1 * * ? *)'),
+  description: 'Nightly aggregated spending reports at 01:45 UTC (P3-2)',
+});
+spendProcessorRule.addTarget(new eventsTargets.LambdaFunction(spendProcessorLambda));
+Tags.of(spendProcessorLambda).add('Function', 'aggregated-spending-processor');
+Tags.of(spendProcessorLambda).add('CostCenter', 'user-intel');
+
 // ── Template Manager (loyalty card templates — super_admin CRUD) ──────────────
 const templateManagerLambda = backend.templateManagerFn.resources.lambda as lambda.Function;
 templateManagerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
@@ -1123,6 +1157,19 @@ templateManagerLambda.addToRolePolicy(new iam.PolicyStatement({
 grantTableAccess(templateManagerLambda, 'RefDataEvent', true);
 Tags.of(templateManagerLambda).add('Function', 'template-manager');
 Tags.of(templateManagerLambda).add('CostCenter', 'ops');
+
+// ── P2-2: Campaign Lifecycle Scheduler (every 5 mins sweep) ──────────────────
+const schedulerLambda = backend.campaignSchedulerFn.resources.lambda as lambda.Function;
+schedulerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+grantTableAccess(schedulerLambda, 'RefDataEvent', true);
+
+const schedulerRule = new events.Rule(infraStack, 'CampaignSchedulerRule', {
+  schedule: events.Schedule.rate(Duration.minutes(5)),
+  description: 'Precision lifecycle transition for scheduled brand campaigns (P2-2)',
+});
+schedulerRule.addTarget(new eventsTargets.LambdaFunction(schedulerLambda));
+Tags.of(schedulerLambda).add('Function', 'campaign-scheduler');
+Tags.of(schedulerLambda).add('CostCenter', 'engagement');
 
 /*
 // ── P3-12: Zero-Downtime Blue/Green Deployments (Lambda Aliases + CodeDeploy) ─

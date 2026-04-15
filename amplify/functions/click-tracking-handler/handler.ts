@@ -13,10 +13,10 @@ export const handler: Handler = async (event) => {
 
   // If invoked via AppSync, the arguments are usually in event.arguments
   const args = event.arguments || event;
-  const { offerId, source, affiliateId, permULID } = args;
+  const { eventType, targetId, source, metadata, permULID } = args;
 
-  if (!offerId || !permULID) {
-    return { success: false, message: 'Missing offerId or permULID' };
+  if (!eventType || !targetId || !permULID) {
+    return { success: false, message: 'Missing eventType, targetId, or permULID' };
   }
 
   const trackingId = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -26,11 +26,12 @@ export const handler: Handler = async (event) => {
     await docClient.send(new PutCommand({
       TableName: REPORT_TABLE,
       Item: {
-        pK: `CLICK#${permULID}`,
-        sK: `OFFER#${offerId}#${trackingId}`,
-        offerId,
+        pK: `ENGAGEMENT#${permULID}`,
+        sK: `${eventType}#${targetId}#${trackingId}`,
+        eventType,
+        targetId,
         source: source || 'app',
-        affiliateId: affiliateId || 'NONE',
+        metadata: metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : null,
         timestamp: new Date().toISOString(),
       }
     }));
@@ -38,10 +39,10 @@ export const handler: Handler = async (event) => {
     return { 
       success: true, 
       trackingId,
-      message: 'Click tracked successfully' 
+      message: 'Engagement tracked successfully' 
     };
   } catch (error) {
-    console.error('Error tracking click:', error);
+    console.error('Error tracking engagement:', error);
     throw new Error('Failed to track click');
   }
 };

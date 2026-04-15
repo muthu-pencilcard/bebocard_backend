@@ -46,8 +46,13 @@ export const handler: DynamoDBStreamHandler = async (event) => {
       if (!brandId) continue;
 
       try {
-        await recomputeSegment(permULID, brandId);
-        await recomputeGlobalSegment(permULID);
+        const owner = image['owner']?.S ?? await getOwner(permULID);
+        if (!owner) {
+          console.warn('[segment-processor] Skipping recompute: owner not found', { permULID });
+          continue;
+        }
+        await recomputeSegment(permULID, brandId, owner);
+        await recomputeGlobalSegment(permULID, owner);
       } catch (err) {
         console.error('[segment-processor] recompute failed', { permULID, brandId, err });
         // Do not rethrow — one failed record must not block the rest of the batch
@@ -77,7 +82,7 @@ export const handler: DynamoDBStreamHandler = async (event) => {
 
 // ── Segment recomputation ─────────────────────────────────────────────────────
 
-async function recomputeSegment(permULID: string, brandId: string): Promise<void> {
+async function recomputeSegment(permULID: string, brandId: string, owner: string): Promise<void> {
   // 1. Query all receipts for this user + brand
   const receipts: Array<{ amount: number; purchaseDate: string }> = [];
   let lastKey: Record<string, unknown> | undefined;
@@ -149,6 +154,7 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
       status: 'ACTIVE',
       primaryCat: 'segment',
       subCategory: brandId,
+      owner,
       desc: JSON.stringify(desc),
       updatedAt: new Date().toISOString(),
     },
@@ -158,7 +164,7 @@ async function recomputeSegment(permULID: string, brandId: string): Promise<void
 // ── Global Segment recomputation ─────────────────────────────────────────────
 // Aggregates across ALL brands to create a cross-brand persona
 
-async function recomputeGlobalSegment(permULID: string): Promise<void> {
+async function recomputeGlobalSegment(permULID: string, owner: string): Promise<void> {
   const receipts: Array<{ amount: number; purchaseDate: string; category?: string }> = [];
   let lastKey: Record<string, unknown> | undefined;
 
@@ -230,6 +236,8 @@ async function recomputeGlobalSegment(permULID: string): Promise<void> {
       eventType: 'SEGMENT',
       status: 'ACTIVE',
       primaryCat: 'segment',
+      subCategory: 'global',
+      owner,
       desc: JSON.stringify(desc),
       updatedAt: new Date().toISOString(),
     },
@@ -294,4 +302,17 @@ function toVisitFrequency(
   if (count < 3) return 'new';
   if (count >= 12 && lastVisitDaysAgo <= 90) return 'frequent';
   return 'occasional';
+}
+
+async function getOwner(permULID: string): Promise<string | null> {
+  try {
+    const res = await dynamo.send(new GetCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+    }));
+    return res.Item?.owner as string ?? null;
+  } catch (err) {
+    console.error('[segment-processor] Failed to fetch owner', { permULID, err });
+    return null;
+  }
 }

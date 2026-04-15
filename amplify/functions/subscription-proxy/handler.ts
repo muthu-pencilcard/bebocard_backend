@@ -102,6 +102,7 @@ interface RegisterBody {
   frequency: string;
   nextBillingDate: string;  // ISO 8601 date
   category?: string;
+  paymentUrl?: string;      // optional hosted payment/checkout link
 }
 
 async function handleRegister(event: Parameters<APIGatewayProxyHandler>[0]) {
@@ -436,7 +437,7 @@ async function handleInvoice(
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const body: Partial<InvoiceBody> = JSON.parse(event.body ?? '{}');
-  const { amount, currency, dueDate, billingPeriod, invoiceNumber } = body;
+  const { amount, currency, dueDate, billingPeriod, invoiceNumber, paymentUrl } = body;
 
   if (amount === undefined || !dueDate) {
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing required fields: amount, dueDate' }) };
@@ -499,6 +500,7 @@ async function handleInvoice(
         billingPeriod:        billingPeriod ?? null,
         attachmentKey:        null,
         createdAt:            now,
+          paymentUrl:           paymentUrl ?? null,
       }),
       createdAt: now,
       updatedAt: now,

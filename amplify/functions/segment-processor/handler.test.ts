@@ -139,7 +139,12 @@ describe('segment-processor handler', () => {
           Items: makeReceiptItems('woolworths', [{ amount: 50, purchaseDate: '2026-03-20' }]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -164,7 +169,12 @@ describe('segment-processor handler', () => {
           Items: makeReceiptItems('woolworths', [{ amount: 75, purchaseDate: '2026-03-20' }]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -191,7 +201,12 @@ describe('segment-processor handler', () => {
           ]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -218,7 +233,12 @@ describe('segment-processor handler', () => {
           ]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -245,7 +265,12 @@ describe('segment-processor handler', () => {
           ]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -275,7 +300,12 @@ describe('segment-processor handler', () => {
           ]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -303,7 +333,12 @@ describe('segment-processor handler', () => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({ Items: makeReceiptItems('woolworths', entries) });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -331,7 +366,12 @@ describe('segment-processor handler', () => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({ Items: makeReceiptItems('woolworths', entries) });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -358,7 +398,12 @@ describe('segment-processor handler', () => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({ Items: makeReceiptItems('woolworths', entries) });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -389,6 +434,9 @@ describe('segment-processor handler', () => {
       }
       if (cmd.__type === 'GetCommand') {
         const sk = cmd.input?.Key?.sK ?? '';
+        if (sk === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
         if (sk === 'SUBSCRIPTION#woolworths') {
           return Promise.resolve({ Item: { pK: 'USER#PERM-001', sK: sk, status: 'ACTIVE' } });
         }
@@ -419,7 +467,12 @@ describe('segment-processor handler', () => {
           Items: makeReceiptItems('woolworths', [{ amount: 50, purchaseDate: recentDate }]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });
@@ -562,7 +615,12 @@ describe('segment-processor handler', () => {
           Items: makeReceiptItems('coles', [{ amount: 60, purchaseDate: recentDate }]),
         });
       }
-      if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
+      if (cmd.__type === 'GetCommand') {
+        if (cmd.input?.Key?.sK === 'IDENTITY') {
+          return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
+        }
+        return Promise.resolve({ Item: null });
+      }
       if (cmd.__type === 'PutCommand') return Promise.resolve({});
       return Promise.resolve({});
     });

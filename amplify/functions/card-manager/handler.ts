@@ -34,6 +34,7 @@ type Args = {
   // Manual Subscriptions
   productName?: string;
   nextBillingDate?: string;
+  status?: string;
   // Enrollment marketplace
   enrollmentId?: string;
   accepted?: boolean;
@@ -63,7 +64,7 @@ type Args = {
   category?: string;
   notes?: string;
   invoiceSK?: string;
-  status?: string;
+  invoiceStatus?: string;
   paidDate?: string;
   linkedSubscriptionSk?: string;
   billingPeriod?: string;
@@ -136,29 +137,29 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
   switch (operation) {
     // Loyalty cards
     case 'addLoyaltyCard': return addCard(permULID, owner, args);
-    case 'removeLoyaltyCard': return removeCard(permULID, args.cardSK!);
+    case 'removeLoyaltyCard': return removeCard(permULID, owner, args.cardSK!);
     case 'setDefaultCard': return setDefaultCard(permULID, args.cardSK!, args.brandId!);
     case 'updateIdentity':
-      return await updateIdentityHandler(permULID, args);
+      return await updateIdentityHandler(permULID, owner, args);
     case 'rotateQR': return rotateQR(permULID);
-    case 'getOrRefreshIdentity': return getOrRefreshIdentity(permULID);
+    case 'getOrRefreshIdentity': return getOrRefreshIdentity(permULID, owner);
     // Subscriptions (legacy single-toggle + new granular)
     case 'subscribeToOffers': return setSubscription(permULID, owner, args.brandId!, true);
     case 'unsubscribeFromOffers': return setSubscription(permULID, owner, args.brandId!, false);
     case 'updateSubscription': return updateGranularSubscription(permULID, owner, args.brandId!, args);
     case 'updatePreferences': return updateUserPreferences(permULID, owner, (args as any).reminders as Record<string, boolean>);
-    case 'snoozeOffers': return snoozeOffers(permULID, args.brandId, args.until ?? null);
+    case 'snoozeOffers': return snoozeOffers(permULID, owner, args.brandId, args.until ?? null);
     // Gift cards
     case 'addGiftCard': return addGiftCard(permULID, owner, args);
-    case 'removeGiftCard': return archiveRecord(permULID, args.cardSK!);
+    case 'removeGiftCard': return archiveRecord(permULID, owner, args.cardSK!);
     case 'updateGiftCardBalance': return updateBalance(permULID, args.cardSK!, args.balance!);
     // Invoices
     case 'addInvoice': return addInvoice(permULID, owner, args);
-    case 'updateInvoiceStatus': return updateInvoiceStatus(permULID, args.invoiceSK!, args.status!, args.paidDate);
-    case 'removeInvoice': return archiveRecord(permULID, args.invoiceSK!);
+    case 'updateInvoiceStatus': return updateInvoiceStatus(permULID, args.invoiceSK!, args.invoiceStatus!, args.paidDate);
+    case 'removeInvoice': return archiveRecord(permULID, owner, args.invoiceSK!);
     // Receipts
     case 'addReceipt': return addReceipt(permULID, owner, args);
-    case 'removeReceipt': return archiveRecord(permULID, args.receiptSK!);
+    case 'removeReceipt': return archiveRecord(permULID, owner, args.receiptSK!);
     // Newsletters + catalogues + offers engagement
     case 'markNewsletterRead': return markNewsletterRead(permULID, args.newsletterSK!);
     case 'markCatalogueViewed': return markCatalogueViewed(permULID, (args as any).catalogueSK!);
@@ -272,9 +273,9 @@ async function addCard(permULID: string, owner: string, args: Args) {
 
 // ── Remove loyalty card ───────────────────────────────────────────────────────
 
-async function removeCard(permULID: string, cardSK: string) {
+async function removeCard(permULID: string, owner: string, cardSK: string) {
   // Soft-delete the card record
-  await archiveRecord(permULID, cardSK);
+  await archiveRecord(permULID, owner, cardSK);
 
   // Remove card from SCAN index so POS can no longer route to it
   const identity = await dynamo.send(new GetCommand({
@@ -338,7 +339,7 @@ function rotatesAtForFrequency(frequency: RotationFrequency): string {
 //
 // Always returns serverTime so the client can detect and correct clock skew.
 
-async function getOrRefreshIdentity(permULID: string) {
+async function getOrRefreshIdentity(permULID: string, owner: string) {
   const now = new Date();
   const serverTime = now.toISOString();
 
@@ -375,7 +376,7 @@ async function getOrRefreshIdentity(permULID: string) {
 
   // No IDENTITY record — post-confirmation Lambda didn't run or account was erased.
   // Create atomically so concurrent first-opens don't produce two live SCAN# entries.
-  return createFreshIdentity(permULID, serverTime);
+  return createFreshIdentity(permULID, owner, serverTime);
 }
 
 // ── Create identity from scratch (first-open / post-erasure) ──────────────────
@@ -384,7 +385,7 @@ async function getOrRefreshIdentity(permULID: string) {
 // Race-safe: attribute_not_exists conditions on both writes. If two devices race,
 // one wins and the other reads back the winner's values.
 
-async function createFreshIdentity(permULID: string, serverTime: string) {
+async function createFreshIdentity(permULID: string, owner: string, serverTime: string) {
   const newSecondaryULID = ulid();
   const rotatesAt = rotatesAtForFrequency('every_24h');
 
@@ -401,6 +402,7 @@ async function createFreshIdentity(permULID: string, serverTime: string) {
               status: 'ACTIVE',
               primaryCat: 'identity',
               subCategory: 'wallet',
+              owner,
               secondaryULID: newSecondaryULID,
               rotatesAt,
               desc: JSON.stringify({ rotationFrequency: 'every_24h' }),
@@ -606,14 +608,14 @@ async function setRotationFrequency(permULID: string, frequency: string) {
 
 // ── Archive (soft-delete for loyalty + gift cards) ────────────────────────────
 
-async function archiveRecord(permULID: string, sK: string) {
+async function archiveRecord(permULID: string, owner: string, sK: string) {
   const now = new Date().toISOString();
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK },
-    UpdateExpression: 'SET #s = :archived, updatedAt = :now',
-    ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: { ':archived': 'ARCHIVED', ':now': now },
+    UpdateExpression: 'SET #s = :archived, updatedAt = :now, #ow = if_not_exists(#ow, :owner)',
+    ExpressionAttributeNames: { '#s': 'status', '#ow': 'owner' },
+    ExpressionAttributeValues: { ':archived': 'ARCHIVED', ':now': now, ':owner': owner },
   }));
   return { success: true };
 }
@@ -673,11 +675,12 @@ async function updateBalance(permULID: string, cardSK: string, newBalance: numbe
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: cardSK },
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now, owner = :owner',
     ConditionExpression: 'updatedAt = :prev OR attribute_not_exists(updatedAt)',
     ExpressionAttributeValues: {
       ':desc': JSON.stringify({ ...currentDesc, balance: newBalance }),
       ':now': now,
+      ':owner': (record.Item?.owner as string) ?? '',
       ':prev': currentUpdatedAt,
     },
   }));
@@ -920,7 +923,7 @@ async function updateGranularSubscription(permULID: string, owner: string, brand
     ':et': 'SUBSCRIPTION',
     ':cat': 'subscription',
     ':brand': brandId,
-    ':active': 'ACTIVE',
+    ':active': args.status || 'ACTIVE',
     ':owner': owner,
   };
 
@@ -981,7 +984,7 @@ async function updateUserPreferences(permULID: string, owner: string, reminders:
   return { success: true };
 }
 
-async function snoozeOffers(permULID: string, brandId?: string, until?: string | null) {
+async function snoozeOffers(permULID: string, owner: string, brandId?: string, until?: string | null) {
   const now = new Date().toISOString();
   const expiresAt = until && until.trim().length > 0 ? until : null;
   if (expiresAt && Number.isNaN(Date.parse(expiresAt))) {
@@ -1003,8 +1006,8 @@ async function snoozeOffers(permULID: string, brandId?: string, until?: string |
     await dynamo.send(new UpdateCommand({
       TableName: USER_TABLE,
       Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${brandId}` },
-      UpdateExpression: 'SET #d = :desc, eventType = :et, primaryCat = :cat, subCategory = :brand, #s = :active, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)',
-      ExpressionAttributeNames: { '#s': 'status', '#d': 'desc' },
+      UpdateExpression: 'SET #d = :desc, eventType = :et, primaryCat = :cat, subCategory = :brand, #s = :active, updatedAt = :now, createdAt = if_not_exists(createdAt, :now), #ow = if_not_exists(#ow, :owner)',
+      ExpressionAttributeNames: { '#s': 'status', '#d': 'desc', '#ow': 'owner' },
       ExpressionAttributeValues: {
         ':desc': JSON.stringify(desc),
         ':et': 'SUBSCRIPTION',
@@ -1012,6 +1015,7 @@ async function snoozeOffers(permULID: string, brandId?: string, until?: string |
         ':brand': brandId,
         ':active': 'ACTIVE',
         ':now': now,
+        ':owner': owner,
       },
     }));
     writeAuditLog(dynamo, {
@@ -1040,11 +1044,13 @@ async function snoozeOffers(permULID: string, brandId?: string, until?: string |
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: 'PREFERENCES' },
-    UpdateExpression: 'SET desc = :desc, eventType = :et, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)',
+    UpdateExpression: 'SET desc = :desc, eventType = :et, updatedAt = :now, createdAt = if_not_exists(createdAt, :now), #ow = if_not_exists(#ow, :owner)',
+    ExpressionAttributeNames: { '#ow': 'owner' },
     ExpressionAttributeValues: {
       ':desc': JSON.stringify(desc),
       ':et': 'PREFERENCES',
       ':now': now,
+      ':owner': owner,
     },
   }));
   return { success: true, offersGlobalSnoozeUntil: expiresAt };
@@ -1604,16 +1610,16 @@ async function syncGiftCardBalance(permULID: string, cardSK: string, brandId: st
     Key: { pK: `BRAND#${brandId}`, sK: 'PROFILE' },
   }));
   const brandDesc = JSON.parse(brandRef.Item?.desc ?? '{}') as Record<string, unknown>;
-  const balanceWebhookUrl = brandDesc.balanceWebhookUrl as string | undefined;
-  const balanceWebhookSecret = brandDesc.balanceWebhookSecret as string | undefined;
+  const balanceWebhookUrl = (brandDesc.balanceWebhookUrl ?? brandDesc.webhookUrl) as string | undefined;
+  const balanceWebhookSecret = brandDesc.balanceWebhookSecret as string | undefined; // Deprecated Phase 1
 
   if (!balanceWebhookUrl) {
     // Brand has no balance webhook — return current stored balance unchanged
     return { balance: cardDesc.balance, currency: cardDesc.currency, synced: false };
   }
 
-  // Call brand's balance webhook
-  const payload = JSON.stringify({ cardNumber });
+  // Call brand's global webhook with the standardized event shape
+  const payload = JSON.stringify({ event: 'giftcard.sync.requested', data: { cardNumber } });
   let responseBody = '';
 
   await new Promise<void>((resolve) => {
@@ -1779,7 +1785,7 @@ function safeJsonParse(value: unknown): Record<string, unknown> {
   catch { return {}; }
 }
 
-async function updateIdentityHandler(permULID: string, args: Args) {
+async function updateIdentityHandler(permULID: string, owner: string, args: Args) {
   const { globalSnoozeStart, globalSnoozeEnd, lastActiveHour, displayName, email, phone } = args;
   const now = new Date().toISOString();
 
@@ -1804,10 +1810,11 @@ async function updateIdentityHandler(permULID: string, args: Args) {
   await dynamo.send(new UpdateCommand({
     TableName: USER_TABLE,
     Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
+    UpdateExpression: 'SET desc = :desc, updatedAt = :now, owner = :owner',
     ExpressionAttributeValues: {
       ':desc': JSON.stringify(updatedDesc),
-      ':now': now
+      ':now': now,
+      ':owner': owner
     }
   }));
 

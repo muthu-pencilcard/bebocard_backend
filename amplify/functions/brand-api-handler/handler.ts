@@ -76,6 +76,11 @@ function err(event: APIGatewayProxyEvent, status: number, message: string) {
   };
 }
 
+function isConditionalCheckFailed(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'ConditionalCheckFailedException';
+}
+
 // Admin API key — only for BeboCard ops endpoints (e.g. /admin/subscription-catalog).
 // Read from process.env at call time so Lambda env updates and test overrides take effect.
 function verifyAdminKey(event: APIGatewayProxyEvent): boolean {
@@ -200,6 +205,23 @@ const _handler: APIGatewayProxyHandler = async (event) => {
     if (method === 'DELETE') return archiveStore(event, auth.brandId);
   }
 
+  // ── Tenant invoice state sync ─────────────────────────────────────────────
+  // Allows brands to push invoice lifecycle transitions in an idempotent,
+  // out-of-order-safe way (e.g. paid, overdue, cancelled).
+  if (path.includes('/invoice-status')) {
+    const auth = await authGuard(event, 'recurring');
+    if (!auth) return err(event, 401, 'Unauthorized');
+    if (method === 'POST') return upsertInvoiceStatus(event, auth.brandId);
+  }
+
+  // ── Tenant invoice payment session ───────────────────────────────────────
+  // Generates a payable URL for linked tenant invoices.
+  if (path.includes('/invoice-payment-session')) {
+    const auth = await authGuard(event, 'recurring');
+    if (!auth) return err(event, 401, 'Unauthorized');
+    if (method === 'POST') return createInvoicePaymentSession(event, auth.brandId);
+  }
+
   // ── API key self-management (brand rotates own key) ─────────────────────────
   if (path.includes('/api-keys/rotate')) {
     const auth = await authGuard(event, 'scan'); // any scope allows rotation
@@ -292,6 +314,291 @@ async function handleReceiptStatus(event: APIGatewayProxyEvent, brandId: string)
   return ok(event, { saved: true, receiptSK: rawSK, savedAt: item.createdAt, fcmStatus: desc.fcmStatus ?? 'sent' });
 }
 
+function normalizeInvoiceTopLevelStatus(status: string): string {
+  switch (status) {
+    case 'paid':
+      return 'PAID';
+    case 'cancelled':
+      return 'CANCELLED';
+    case 'overdue':
+      return 'OVERDUE';
+    default:
+      return 'ACTIVE';
+  }
+}
+
+async function upsertInvoiceStatus(event: APIGatewayProxyEvent, brandId: string) {
+  const body = JSON.parse(event.body ?? '{}') as {
+    invoiceSK?: string;
+    status?: string;
+    paidDate?: string;
+    eventTime?: string;
+    idempotencyKey?: string;
+    reason?: string;
+    externalInvoiceId?: string;
+  };
+
+  const invoiceSK = body.invoiceSK;
+  const incomingStatus = (body.status ?? '').toLowerCase();
+  const idempotencyKey = body.idempotencyKey
+    ?? event.headers['x-idempotency-key']
+    ?? event.headers['X-Idempotency-Key'];
+
+  if (!invoiceSK) return err(event, 400, 'Missing invoiceSK');
+  if (!incomingStatus) return err(event, 400, 'Missing status');
+  if (!['issued', 'unpaid', 'due_soon', 'overdue', 'paid', 'cancelled'].includes(incomingStatus)) {
+    return err(event, 400, 'Invalid status');
+  }
+
+  if (idempotencyKey) {
+    try {
+      await dynamo.send(new PutCommand({
+        TableName: ADMIN_TABLE,
+        Item: {
+          pK: `IDEMP#INVOICE_STATUS#${brandId}#${idempotencyKey}`,
+          sK: 'EVENT',
+          eventType: 'IDEMPOTENCY',
+          status: 'PROCESSED',
+          primaryCat: 'idempotency',
+          createdAt: new Date().toISOString(),
+        },
+        ConditionExpression: 'attribute_not_exists(pK)',
+      }));
+    } catch (e) {
+      if (isConditionalCheckFailed(e)) {
+        return ok(event, {
+          invoiceSK,
+          status: incomingStatus,
+          updated: false,
+          idempotent: true,
+          staleIgnored: false,
+        });
+      }
+      throw e;
+    }
+  }
+
+  const queryRes = await dynamo.send(new QueryCommand({
+    TableName: USER_TABLE,
+    IndexName: 'sK-pK-index',
+    KeyConditionExpression: 'sK = :sk',
+    ExpressionAttributeValues: { ':sk': invoiceSK },
+    Limit: 1,
+  }));
+
+  const invoiceItem = queryRes.Items?.[0];
+  if (!invoiceItem) return err(event, 404, 'Invoice not found');
+
+  const desc = parseRecord(invoiceItem.desc);
+  const itemBrandId = typeof desc.brandId === 'string' ? desc.brandId : null;
+  if (itemBrandId && itemBrandId !== brandId) return err(event, 403, 'Forbidden');
+
+  const stateEventAt = body.eventTime ?? new Date().toISOString();
+  const previousEventAt = typeof desc.lastStateEventAt === 'string' ? desc.lastStateEventAt : null;
+  if (previousEventAt) {
+    const prevTs = Date.parse(previousEventAt);
+    const incomingTs = Date.parse(stateEventAt);
+    if (!Number.isNaN(prevTs) && !Number.isNaN(incomingTs) && incomingTs < prevTs) {
+      return ok(event, {
+        invoiceSK,
+        status: incomingStatus,
+        updated: false,
+        idempotent: false,
+        staleIgnored: true,
+      });
+    }
+  }
+
+  desc.status = incomingStatus;
+  if (body.paidDate) desc.paidDate = body.paidDate;
+  if (body.reason) desc.statusReason = body.reason;
+  if (body.externalInvoiceId) desc.externalInvoiceId = body.externalInvoiceId;
+  desc.lastStateEventAt = stateEventAt;
+  desc.stateSource = 'tenant_push';
+
+  const now = new Date().toISOString();
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: invoiceItem.pK, sK: invoiceSK },
+    UpdateExpression: 'SET #status = :status, #desc = :desc, updatedAt = :now',
+    ExpressionAttributeNames: {
+      '#status': 'status',
+      '#desc': 'desc',
+    },
+    ExpressionAttributeValues: {
+      ':status': normalizeInvoiceTopLevelStatus(incomingStatus),
+      ':desc': JSON.stringify(desc),
+      ':now': now,
+    },
+  }));
+
+  return ok(event, {
+    invoiceSK,
+    status: incomingStatus,
+    updated: true,
+    idempotent: false,
+    staleIgnored: false,
+  });
+}
+
+function applyInvoiceTemplate(template: string, invoice: {
+  invoiceSK: string;
+  invoiceNumber?: string | null;
+  amount: number;
+  currency: string;
+}): string {
+  return template
+    .replaceAll('{invoiceSK}', encodeURIComponent(invoice.invoiceSK))
+    .replaceAll('{invoiceNumber}', encodeURIComponent(invoice.invoiceNumber ?? ''))
+    .replaceAll('{amount}', encodeURIComponent(String(invoice.amount)))
+    .replaceAll('{currency}', encodeURIComponent(invoice.currency));
+}
+
+async function createStripeConnectInvoiceSession(input: {
+  stripeSecretKey: string;
+  connectedAccountId: string;
+  successUrl: string;
+  cancelUrl: string;
+  brandId: string;
+  invoiceSK: string;
+  invoiceNumber?: string | null;
+  supplier: string;
+  amount: number;
+  currency: string;
+}): Promise<string> {
+  const lineItemLabel = input.invoiceNumber
+    ? `${input.supplier} invoice ${input.invoiceNumber}`
+    : `${input.supplier} invoice`;
+
+  const params = new URLSearchParams({
+    mode: 'payment',
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+    'line_items[0][quantity]': '1',
+    'line_items[0][price_data][currency]': input.currency.toLowerCase(),
+    'line_items[0][price_data][unit_amount]': String(Math.round(input.amount * 100)),
+    'line_items[0][price_data][product_data][name]': lineItemLabel,
+    'metadata[invoiceSK]': input.invoiceSK,
+    'metadata[brandId]': input.brandId,
+  });
+
+  const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${input.stripeSecretKey}`,
+      'Stripe-Account': input.connectedAccountId,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Stripe checkout session failed: ${response.status} ${text}`);
+  }
+
+  const payload = await response.json() as { url?: string };
+  if (!payload.url) throw new Error('Stripe checkout session returned no url');
+  return payload.url;
+}
+
+async function createInvoicePaymentSession(event: APIGatewayProxyEvent, brandId: string) {
+  const body = JSON.parse(event.body ?? '{}') as { invoiceSK?: string };
+  const invoiceSK = body.invoiceSK;
+  if (!invoiceSK) return err(event, 400, 'Missing invoiceSK');
+
+  const invoiceRes = await dynamo.send(new QueryCommand({
+    TableName: USER_TABLE,
+    IndexName: 'sK-pK-index',
+    KeyConditionExpression: 'sK = :sk',
+    ExpressionAttributeValues: { ':sk': invoiceSK },
+    Limit: 1,
+  }));
+
+  const invoiceItem = invoiceRes.Items?.[0];
+  if (!invoiceItem) return err(event, 404, 'Invoice not found');
+
+  const invoiceDesc = parseRecord(invoiceItem.desc);
+  const invoiceBrandId = typeof invoiceDesc.brandId === 'string' ? invoiceDesc.brandId : null;
+  if (invoiceBrandId && invoiceBrandId !== brandId) return err(event, 403, 'Forbidden');
+
+  const invoiceStatus = typeof invoiceDesc.status === 'string' ? invoiceDesc.status.toLowerCase() : 'unpaid';
+  if (invoiceStatus !== 'unpaid') return err(event, 409, 'Invoice is not payable');
+
+  const amount = typeof invoiceDesc.amount === 'number' ? invoiceDesc.amount : Number(invoiceDesc.amount ?? 0);
+  const currency = typeof invoiceDesc.currency === 'string' ? invoiceDesc.currency : 'AUD';
+  const supplier = typeof invoiceDesc.supplier === 'string' ? invoiceDesc.supplier : brandId;
+  const invoiceNumber = typeof invoiceDesc.invoiceNumber === 'string' ? invoiceDesc.invoiceNumber : null;
+  if (!Number.isFinite(amount) || amount <= 0) return err(event, 400, 'Invoice amount is invalid');
+
+  if (typeof invoiceDesc.paymentUrl === 'string' && invoiceDesc.paymentUrl.startsWith('http')) {
+    return ok(event, {
+      invoiceSK,
+      paymentMode: 'hosted_link',
+      checkoutUrl: invoiceDesc.paymentUrl,
+    });
+  }
+
+  const brandRes = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: 'profile' },
+  }));
+  const brandDesc = parseRecord(brandRes.Item?.desc);
+
+  const paymentMode = typeof brandDesc.invoicePaymentMode === 'string'
+    ? brandDesc.invoicePaymentMode
+    : 'none';
+
+  if (paymentMode === 'hosted_link') {
+    const baseUrl = typeof brandDesc.invoicePaymentBaseUrl === 'string' ? brandDesc.invoicePaymentBaseUrl : '';
+    if (!baseUrl.startsWith('http')) return err(event, 400, 'Brand hosted link payment is not configured');
+
+    const checkoutUrl = applyInvoiceTemplate(baseUrl, { invoiceSK, invoiceNumber, amount, currency });
+    return ok(event, {
+      invoiceSK,
+      paymentMode,
+      checkoutUrl,
+    });
+  }
+
+  if (paymentMode === 'stripe_connect') {
+    const connectedAccountId = typeof brandDesc.invoiceStripeConnectedAccountId === 'string'
+      ? brandDesc.invoiceStripeConnectedAccountId
+      : '';
+    const successUrl = typeof brandDesc.invoiceStripeSuccessUrl === 'string'
+      ? brandDesc.invoiceStripeSuccessUrl
+      : 'https://business.bebocard.com.au/payment/success';
+    const cancelUrl = typeof brandDesc.invoiceStripeCancelUrl === 'string'
+      ? brandDesc.invoiceStripeCancelUrl
+      : 'https://business.bebocard.com.au/payment/cancel';
+    const stripeSecretKey = process.env.STRIPE_SECRET_KEY ?? '';
+
+    if (!stripeSecretKey) return err(event, 500, 'Stripe is not configured');
+    if (!connectedAccountId.startsWith('acct_')) return err(event, 400, 'Brand Stripe Connect account is not configured');
+
+    const checkoutUrl = await createStripeConnectInvoiceSession({
+      stripeSecretKey,
+      connectedAccountId,
+      successUrl,
+      cancelUrl,
+      brandId,
+      invoiceSK,
+      invoiceNumber,
+      supplier,
+      amount,
+      currency,
+    });
+
+    return ok(event, {
+      invoiceSK,
+      paymentMode,
+      checkoutUrl,
+    });
+  }
+
+  return err(event, 400, 'Brand invoice payment is not configured');
+}
+
 // ─── Offers ────────────────────────────────────────────────────────────────────
 
 
@@ -318,7 +625,7 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
       pK: `BRAND#${brandId}`,
       sK: `OFFER#${offerId}`,
       eventType: 'OFFER',
-      status: 'ACTIVE',
+      status: body.status || 'ACTIVE',
       primaryCat: 'offer',
       desc: JSON.stringify({ ...body, brandId, offerId, brandName: offerBrandName, brandColor: offerBrandColor, brandRegion: offerBrandRegion }),
       ttl: offerTtl,
@@ -357,7 +664,7 @@ async function createOffer(event: APIGatewayProxyEvent, brandId: string) {
 
   return ok(event, {
     offerId,
-    status: 'ACTIVE',
+    status: body.status || 'ACTIVE',
     billing: buildBillingUsageSnapshot(tenantState, usage),
   });
 }
@@ -401,11 +708,28 @@ async function updateOffer(event: APIGatewayProxyEvent, brandId: string) {
   await dynamo.send(new UpdateCommand({
     TableName: REFDATA_TABLE,
     Key: { pK: `BRAND#${brandId}`, sK: `OFFER#${offerId}` },
-    UpdateExpression: 'SET desc = :desc, updatedAt = :now',
-    ExpressionAttributeValues: { ':desc': JSON.stringify(merged), ':now': now },
+    UpdateExpression: 'SET desc = :desc, #s = :status, updatedAt = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { 
+      ':desc': JSON.stringify(merged), 
+      ':status': body.status ?? existing.Item.status,
+      ':now': now 
+    },
   }));
 
-  return ok(event, { offerId, updated: true });
+  // Log explicit status change if provided
+  if (body.status && body.status !== existing.Item.status) {
+    writeAuditLog(dynamo, {
+      actor: brandId,
+      actorType: 'brand',
+      action: 'offer.status_changed',
+      resource: `OFFER#${offerId}`,
+      outcome: 'success',
+      metadata: { from: existing.Item.status, to: body.status }
+    }).catch(e => console.error('[audit] log failed', e));
+  }
+
+  return ok(event, { offerId, updated: true, status: body.status ?? existing.Item.status });
 }
 
 async function archiveOffer(event: APIGatewayProxyEvent, brandId: string) {

@@ -138,14 +138,17 @@ async function reportGeofenceEntry(args: {
   // 3. Fetch active broadcast offer from the brand (if any)
   const broadcastOffer = await getActiveBroadcastOffer(brandId);
 
-  // 4. Fetch user's device token
+  // 4. Fetch user's segment summary (persona, spend bucket)
+  const segment = await getUserSegment(pK);
+
+  // 5. Fetch user's device token
   const deviceToken = await getDeviceToken(pK);
   if (!deviceToken) return 'NO_TOKEN'; // user hasn't registered a token yet
 
-  // 5. Build personalised notification
-  const notification = buildNotification({ brandId, visitCount, broadcastOffer });
+  // 6. Build personalised notification
+  const notification = buildNotification({ brandId, visitCount, broadcastOffer, segment });
 
-  // 6. Send push via FCM (covers iOS APNs natively)
+  // 7. Send push via FCM (covers iOS APNs natively)
   try {
     const messaging = getFirebaseAdmin();
     await messaging.send({
@@ -174,13 +177,26 @@ function buildNotification(params: {
   brandId: string;
   visitCount: number;
   broadcastOffer: BroadcastOffer | null;
+  segment: any;
 }): { title: string; body: string } {
-  const { visitCount, broadcastOffer } = params;
+  const { visitCount, broadcastOffer, segment } = params;
+
+  // Segment-aware arrival: Personalise based on persona
+  const personas = segment?.persona ?? [];
+  const isHighValue = personas.includes('high_value');
+  const isLapsed = segment?.visitFrequency === 'lapsed';
+
+  if (isLapsed && broadcastOffer) {
+    return {
+      title: `Welcome back to ${broadcastOffer.brandName}!`,
+      body: `We've missed you. ${broadcastOffer.headline}`,
+    };
+  }
 
   // Frequency bonus — more than 2 visits this calendar month
   if (visitCount > 2 && broadcastOffer) {
     return {
-      title: `${broadcastOffer.brandName} — Loyal customer offer 🎁`,
+      title: `${broadcastOffer.brandName} — ${isHighValue ? 'Premium' : 'Loyal'} customer offer 🎁`,
       body: `You're a regular! ${broadcastOffer.headline}`,
     };
   }
@@ -367,3 +383,18 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 }
 
 function toRad(deg: number) { return deg * Math.PI / 180; }
+
+async function getUserSegment(pK: string): Promise<any> {
+  try {
+    const result = await ddb.send(new GetItemCommand({
+      TableName: USER_TABLE,
+      Key: marshall({ pK, sK: 'SEGMENT#global' }),
+    }));
+    if (!result.Item) return null;
+    const row = unmarshall(result.Item);
+    return JSON.parse(row.desc ?? '{}');
+  } catch (err) {
+    console.error('[geofence-handler] failed to fetch segment', err);
+    return null;
+  }
+}

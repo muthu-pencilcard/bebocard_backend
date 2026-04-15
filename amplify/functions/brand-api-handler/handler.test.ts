@@ -556,4 +556,170 @@ describe('brand-api-handler - unit tests', () => {
         expect(result.statusCode).toBe(200);
         expect(JSON.parse(result.body).billing.tier).toBe('engagement');
     });
+
+    it('POST /invoice-status updates invoice status when event is newer', async () => {
+        mockSend
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({
+                Items: [{
+                    pK: 'USER#perm-001',
+                    sK: 'INVOICE#abc',
+                    desc: JSON.stringify({
+                        brandId: 'test-brand',
+                        status: 'unpaid',
+                        lastStateEventAt: '2026-04-15T10:00:00.000Z'
+                    })
+                }]
+            })
+            .mockResolvedValueOnce({});
+
+        const event: any = {
+            httpMethod: 'POST',
+            path: '/invoice-status',
+            headers: { 'x-idempotency-key': 'evt-1' },
+            body: JSON.stringify({
+                invoiceSK: 'INVOICE#abc',
+                status: 'paid',
+                paidDate: '2026-04-16T09:00:00.000Z',
+                eventTime: '2026-04-16T09:00:00.000Z'
+            })
+        };
+
+        const result: any = await handler(event, {} as any, () => {});
+        expect(result.statusCode).toBe(200);
+
+        const body = JSON.parse(result.body);
+        expect(body.updated).toBe(true);
+        expect(body.status).toBe('paid');
+
+        const updateCall = mockSend.mock.calls[2][0];
+        expect(updateCall.input.Key).toEqual({ pK: 'USER#perm-001', sK: 'INVOICE#abc' });
+        expect(updateCall.input.ExpressionAttributeValues[':status']).toBe('PAID');
+    });
+
+    it('POST /invoice-status ignores stale state events', async () => {
+        mockSend
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({
+                Items: [{
+                    pK: 'USER#perm-001',
+                    sK: 'INVOICE#abc',
+                    desc: JSON.stringify({
+                        brandId: 'test-brand',
+                        status: 'unpaid',
+                        lastStateEventAt: '2026-04-16T10:00:00.000Z'
+                    })
+                }]
+            });
+
+        const event: any = {
+            httpMethod: 'POST',
+            path: '/invoice-status',
+            headers: { 'x-idempotency-key': 'evt-2' },
+            body: JSON.stringify({
+                invoiceSK: 'INVOICE#abc',
+                status: 'overdue',
+                eventTime: '2026-04-16T09:00:00.000Z'
+            })
+        };
+
+        const result: any = await handler(event, {} as any, () => {});
+        expect(result.statusCode).toBe(200);
+
+        const body = JSON.parse(result.body);
+        expect(body.updated).toBe(false);
+        expect(body.staleIgnored).toBe(true);
+        expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('POST /invoice-status returns idempotent success on duplicate idempotency key', async () => {
+        const duplicateErr = Object.assign(new Error('duplicate'), { name: 'ConditionalCheckFailedException' });
+        mockSend.mockRejectedValueOnce(duplicateErr);
+
+        const event: any = {
+            httpMethod: 'POST',
+            path: '/invoice-status',
+            headers: { 'x-idempotency-key': 'evt-duplicate' },
+            body: JSON.stringify({
+                invoiceSK: 'INVOICE#abc',
+                status: 'paid'
+            })
+        };
+
+        const result: any = await handler(event, {} as any, () => {});
+        expect(result.statusCode).toBe(200);
+        const body = JSON.parse(result.body);
+        expect(body.idempotent).toBe(true);
+        expect(body.updated).toBe(false);
+        expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('POST /invoice-payment-session returns stored paymentUrl when invoice already has it', async () => {
+        mockSend.mockResolvedValueOnce({
+            Items: [{
+                pK: 'USER#perm-001',
+                sK: 'INVOICE#abc',
+                desc: JSON.stringify({
+                    brandId: 'test-brand',
+                    status: 'unpaid',
+                    amount: 42.5,
+                    currency: 'AUD',
+                    supplier: 'EnergyCo',
+                    paymentUrl: 'https://pay.example.com/invoice/abc',
+                }),
+            }],
+        });
+
+        const event: any = {
+            httpMethod: 'POST',
+            path: '/invoice-payment-session',
+            headers: {},
+            body: JSON.stringify({ invoiceSK: 'INVOICE#abc' }),
+        };
+
+        const result: any = await handler(event, {} as any, () => {});
+        expect(result.statusCode).toBe(200);
+        const body = JSON.parse(result.body);
+        expect(body.paymentMode).toBe('hosted_link');
+        expect(body.checkoutUrl).toBe('https://pay.example.com/invoice/abc');
+    });
+
+    it('POST /invoice-payment-session builds hosted_link URL from brand settings', async () => {
+        mockSend
+            .mockResolvedValueOnce({
+                Items: [{
+                    pK: 'USER#perm-001',
+                    sK: 'INVOICE#abc',
+                    desc: JSON.stringify({
+                        brandId: 'test-brand',
+                        status: 'unpaid',
+                        amount: 99.95,
+                        currency: 'AUD',
+                        supplier: 'WaterCo',
+                        invoiceNumber: 'INV-42',
+                    }),
+                }],
+            })
+            .mockResolvedValueOnce({
+                Item: {
+                    desc: JSON.stringify({
+                        invoicePaymentMode: 'hosted_link',
+                        invoicePaymentBaseUrl: 'https://pay.brand.com/invoice/{invoiceNumber}?amount={amount}&currency={currency}',
+                    }),
+                },
+            });
+
+        const event: any = {
+            httpMethod: 'POST',
+            path: '/invoice-payment-session',
+            headers: {},
+            body: JSON.stringify({ invoiceSK: 'INVOICE#abc' }),
+        };
+
+        const result: any = await handler(event, {} as any, () => {});
+        expect(result.statusCode).toBe(200);
+        const body = JSON.parse(result.body);
+        expect(body.paymentMode).toBe('hosted_link');
+        expect(body.checkoutUrl).toContain('https://pay.brand.com/invoice/INV-42');
+    });
 });

@@ -63,6 +63,7 @@ interface ReceiptTask {
   notes?: string;
   secondaryULID: string;
   isInvoice: boolean;
+  owner?: string;
   idempotencyKey?: string; // Optional brand-supplied key
   supplierTaxId?: string;
   supplierTaxIdType?: string;
@@ -89,6 +90,7 @@ async function processReceipt(task: ReceiptTask) {
     sK: sentinelSK,
     eventType: `${itemTag}_IDEM`,
     status: 'ACTIVE',
+    owner: task.owner,
     createdAt: new Date().toISOString(),
   };
 
@@ -135,6 +137,7 @@ async function processReceipt(task: ReceiptTask) {
       status: 'ACTIVE',
       primaryCat: prefix,
       subCategory: brandId,
+      owner: task.owner,
       desc: JSON.stringify({
         merchant,
         amount,
