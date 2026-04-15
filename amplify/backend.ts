@@ -797,10 +797,9 @@ webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // Secrets for FCM
-const firebaseSecret = ssm.StringParameter.fromSecureStringParameterAttributes(infraStack, 'FirebaseSecretExporter', {
-  parameterName: '/amplify/shared/FIREBASE_SERVICE_ACCOUNT_JSON',
-});
-exporterLambda.addEnvironment('FIREBASE_SERVICE_ACCOUNT_JSON', firebaseSecret.stringValue);
+// Using environment variable with fallback to prevent stack synthesis crashes if the secret isn't pre-configured in SSM.
+const firebaseSecretValue = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '{}';
+exporterLambda.addEnvironment('FIREBASE_SERVICE_ACCOUNT_JSON', firebaseSecretValue);
 
 // ── WAF ──
 const publicWebAcl = new wafv2.CfnWebACL(infraStack, 'PublicApiWebAcl', {
