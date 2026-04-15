@@ -117,6 +117,8 @@ const schema = a.schema({
       customBrandColor: a.string(),
       isDefault: a.boolean(),   // defaults to true if first card for brand, else false
       barcodeType: a.string(),
+      storeId: a.string(),
+      attributionBrandId: a.string(),
     })
     .returns(a.json())
     .handler(a.handler.function(cardManagerFn))
@@ -216,6 +218,11 @@ const schema = a.schema({
       category: a.string(),
       notes: a.string(),
       currency: a.string(),
+      brandId: a.string(),
+      linkedSubscriptionSk: a.string(),
+      providerId: a.string(),
+      billingPeriod: a.string(),
+      invoiceType: a.string(),
     })
     .returns(a.json())
     .handler(a.handler.function(cardManagerFn))
@@ -249,6 +256,7 @@ const schema = a.schema({
       items: a.json(),                  // [{name, price, quantity}]
       photoKey: a.string(),             // local device file path
       loyaltyCardSK: a.string(),
+      currency: a.string(),
     })
     .returns(a.json())
     .handler(a.handler.function(cardManagerFn))
