@@ -459,11 +459,7 @@ new lambda.EventSourceMapping(mappingStack, 'SegmentLambdaDDBSource', {
   retryAttempts: 1,
 });
 grantTableAccess(segmentLambda, 'UserDataEvent', false); // P1-5: Read-only access for segment processing
-// userTable.grantStreamRead(segmentLambda); - removed to break cross-stack circularity
-segmentLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
-  resources: [`arn:aws:dynamodb:*:*:table/${tableNames.USER_TABLE}/stream/*`],
-}));
+userTable.grantStreamRead(segmentLambda);
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
@@ -547,15 +543,8 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaUserSource', {
 });
 grantTableAccess(receiptIcebergLambda, 'UserDataEvent', false); 
 grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
-// userTable.grantStreamRead(receiptIcebergLambda);
-// refDataTable.grantStreamRead(receiptIcebergLambda);
-receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
-  resources: [
-    `arn:aws:dynamodb:*:*:table/${tableNames.USER_TABLE}/stream/*`,
-    `arn:aws:dynamodb:*:*:table/${tableNames.REFDATA_TABLE}/stream/*`
-  ],
-}));
+userTable.grantStreamRead(receiptIcebergLambda);
+refDataTable.grantStreamRead(receiptIcebergLambda);
 new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaRefSource', {
   target: receiptIcebergLambda,
   eventSourceArn: refDataTable.tableStreamArn,
@@ -605,11 +594,7 @@ new lambda.EventSourceMapping(mappingStack, 'TenantProvisionerLambdaRefSource', 
   retryAttempts: 1,
 });
 grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
-// refDataTable.grantStreamRead(tenantProvisionerLambda);
-tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
-  resources: [`arn:aws:dynamodb:*:*:table/${tableNames.REFDATA_TABLE}/stream/*`],
-}));
+refDataTable.grantStreamRead(tenantProvisionerLambda);
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
@@ -895,7 +880,7 @@ const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
 
 // Schedule: Nightly at 2:00 AM UTC
 const cronRule = new events.Rule(infraStack, 'NightlyCompactionRule', {
-  schedule: events.Schedule.cron({ hour: '2', minute: '0' }),
+  schedule: events.Schedule.cron({ day: '*', weekDay: '?', hour: '2', minute: '0' }),
 });
 cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
 
@@ -907,7 +892,7 @@ grantTableAccess(aggregatorLambda, 'RefDataEvent', false);
 grantTableAccess(aggregatorLambda, 'ReportDataEvent', true);
 
 const aggregatorRule = new events.Rule(infraStack, 'NightlyAggregationRule', {
-  schedule: events.Schedule.cron({ hour: '1', minute: '0' }),
+  schedule: events.Schedule.cron({ day: '*', weekDay: '?', hour: '1', minute: '0' }),
 });
 aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
 
@@ -932,7 +917,7 @@ customSegmentLambda.addEnvironment('CUSTOM_SEGMENT_DLQ_URL', customSegmentDLQ.qu
 grantSqsAccess(customSegmentLambda, customSegmentDLQ, ['sqs:SendMessage']);
 
 const customSegmentRule = new events.Rule(infraStack, 'NightlyCustomSegmentRule', {
-  schedule: events.Schedule.cron({ hour: '0', minute: '30' }),
+  schedule: events.Schedule.cron({ day: '*', weekDay: '?', hour: '0', minute: '30' }),
   description: 'Nightly end-of-day custom segment evaluation at 00:30 UTC',
 });
 customSegmentRule.addTarget(new eventsTargets.LambdaFunction(customSegmentLambda));
@@ -946,7 +931,7 @@ affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 
 const affiliateSyncRule = new events.Rule(infraStack, 'NightlyAffiliateSyncRule', {
-  schedule: events.Schedule.cron({ hour: '5', minute: '0' }),
+  schedule: events.Schedule.cron({ day: '*', weekDay: '?', hour: '5', minute: '0' }),
   description: 'Nightly sync of affiliate offers from Commission Factory / Impact',
 });
 affiliateSyncRule.addTarget(new eventsTargets.LambdaFunction(affiliateSyncLambda));
@@ -1069,7 +1054,7 @@ cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 const cognitoExportRule = new events.Rule(infraStack, 'WeeklyCognitoExportRule', {
-  schedule: events.Schedule.cron({ weekDay: 'SUN', hour: '2', minute: '0' }),
+  schedule: events.Schedule.cron({ day: '?', weekDay: 'SUN', hour: '2', minute: '0' }),
   description: 'Weekly Cognito user pool export for DR (P0-6)',
 });
 cognitoExportRule.addTarget(new eventsTargets.LambdaFunction(cognitoExportLambda));
@@ -1119,7 +1104,7 @@ grantTableAccess(brandHealthLambda, 'RefDataEvent', false);
 grantTableAccess(brandHealthLambda, 'UserDataEvent', false);
 
 const brandHealthRule = new events.Rule(infraStack, 'WeeklyBrandHealthRule', {
-  schedule: events.Schedule.cron({ weekDay: 'MON', hour: '8', minute: '0' }),
+  schedule: events.Schedule.cron({ day: '?', weekDay: 'MON', hour: '8', minute: '0' }),
   description: 'Weekly brand health check — alerts CSM when scan volume drops >50% (P3-16)',
 });
 brandHealthRule.addTarget(new eventsTargets.LambdaFunction(brandHealthLambda));
