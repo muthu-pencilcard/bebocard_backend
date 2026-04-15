@@ -694,7 +694,6 @@ const make301 = (v1Path: string) => {
       integrationResponses: [{
         statusCode: '301',
         responseParameters: {
-          'method.header.Location': `'${redirectUrl}'`,
           'method.response.header.Location': `'${redirectUrl}'`,
           'method.response.header.Deprecation': "'true'",
           'method.response.header.Sunset': "'Wed, 01 Jul 2026 00:00:00 GMT'",
