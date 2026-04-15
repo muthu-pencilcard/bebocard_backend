@@ -120,13 +120,14 @@ const backend = defineBackend({
 const userTable = backend.data.resources.tables['UserDataEvent'];
 const refDataTable = backend.data.resources.tables['RefDataEvent'];
 const adminTable = backend.data.resources.tables['AdminDataEvent'];
+const reportTable = backend.data.resources.tables['ReportDataEvent'];
 
-// ── String-literal table names (no CDK tokens — breaks functions→data synthesis link) ──
+// ── Injected table names (using CDK tokens to resolve physical names) ──
 const tableNames = {
-  USER_TABLE: 'UserDataEvent',
-  REFDATA_TABLE: 'RefDataEvent',
-  ADMIN_TABLE: 'AdminDataEvent',
-  REPORT_TABLE: 'ReportDataEvent',
+  USER_TABLE: userTable.tableName,
+  REFDATA_TABLE: refDataTable.tableName,
+  ADMIN_TABLE: adminTable.tableName,
+  REPORT_TABLE: reportTable.tableName,
 };
 
 const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
@@ -304,8 +305,8 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
   resources: [
-    `arn:aws:dynamodb:*:*:table/UserDataEvent-*`, 
-    `arn:aws:dynamodb:*:*:table/AdminDataEvent-*`
+    `arn:aws:dynamodb:*:*:table/UserDataEvent*`, 
+    `arn:aws:dynamodb:*:*:table/AdminDataEvent*`
   ],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -327,8 +328,8 @@ const grantTableAccess = (fn: lambda.Function, tableNamePrefix: string, write: b
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions: write ? ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem'] : ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchGetItem'],
     resources: [
-      `arn:aws:dynamodb:*:*:table/${tableNamePrefix}-*`,
-      `arn:aws:dynamodb:*:*:table/${tableNamePrefix}-*/index/*`
+      `arn:aws:dynamodb:*:*:table/${tableNamePrefix}*`,
+      `arn:aws:dynamodb:*:*:table/${tableNamePrefix}*/index/*`
     ],
   }));
 };
@@ -420,8 +421,8 @@ grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
 
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
-tenantLinkerLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
-tenantLinkerLambda.addEnvironment('ADMIN_TABLE', 'AdminDataEvent');
+tenantLinkerLambda.addEnvironment('USER_TABLE', userTable.tableName);
+tenantLinkerLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
 grantTableAccess(tenantLinkerLambda, 'UserDataEvent', true);
 grantTableAccess(tenantLinkerLambda, 'AdminDataEvent', true);
 
@@ -441,7 +442,7 @@ grantTableAccess(consentLambda, 'AdminDataEvent', true);
 
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
-segmentLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
 segmentLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 grantTableAccess(segmentLambda, 'UserDataEvent', true);
 if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
@@ -483,7 +484,7 @@ billingRunRule.addTarget(new eventsTargets.LambdaFunction(billingRunLambda));
 
 // ── Billing Webhook Handler (P1-8) ──
 const billingWebhookLambda = backend.billingWebhookHandlerFn.resources.lambda as lambda.Function;
-billingWebhookLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+billingWebhookLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(billingWebhookLambda, 'UserDataEvent', true);
 billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -495,7 +496,7 @@ billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
 
 // ── QR Router (P1-10) ──
 const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Function;
-qrRouterLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+qrRouterLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(qrRouterLambda, 'RefDataEvent', false);
 
 const qrApi = new apigw.RestApi(infraStack, 'QrRouterApi', { 
@@ -515,7 +516,7 @@ const receiptIcebergLambda = backend.receiptIcebergWriterFn.resources.lambda as 
 receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
-receiptIcebergLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
@@ -561,7 +562,7 @@ refDataTable.grantStreamRead(receiptIcebergLambda);
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
 tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
-tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
 grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
 
@@ -598,12 +599,12 @@ refDataTable.grantStreamRead(tenantProvisionerLambda);
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
-analyticsLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
-analyticsLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+analyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
+analyticsLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
-analyticsLambda.addEnvironment('REPORT_TABLE', 'ReportDataEvent');
+analyticsLambda.addEnvironment('REPORT_TABLE', reportTable.tableName);
 
 grantTableAccess(analyticsLambda, 'UserDataEvent', false);
 grantTableAccess(analyticsLambda, 'RefDataEvent', false);
@@ -644,7 +645,7 @@ const parentalRes = consentRes.addResource('parental');
 const approveRes = parentalRes.addResource('approve');
 const parentalConsentLambda = backend.parentalConsentHandlerFn.resources.lambda as lambda.Function;
 approveRes.addMethod('GET', new apigw.LambdaIntegration(parentalConsentLambda), { apiKeyRequired: false });
-parentalConsentLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+parentalConsentLambda.addEnvironment('USER_TABLE', userTable.tableName);
 grantTableAccess(parentalConsentLambda, 'UserDataEvent', true);
 parentalConsentLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -731,8 +732,8 @@ analyticsLegacy.addResource('subscriber-count').addMethod('GET', analyticsIntegr
 
 // ── User Data Exporter (P2-5) ──
 const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
-exporterLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
-exporterLambda.addEnvironment('ADMIN_TABLE', 'AdminDataEvent');
+exporterLambda.addEnvironment('USER_TABLE', userTable.tableName);
+exporterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
 exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucketName);
 // USER_POOL_ID read from SSM at runtime — no synthesis-time auth→data token
 exporterLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
@@ -767,7 +768,7 @@ grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
 exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
-webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
   target: webhookDispatcherLambda,
   eventSourceArn: webhookQueue.queueArn,
@@ -842,8 +843,8 @@ const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambd
 backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
-backfillerLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
-backfillerLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
+backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 backfillerLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
 
 grantS3Access(backfillerLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
@@ -899,8 +900,8 @@ aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
 // ── Custom Segment Evaluator (EOD batch) ──
 // Nightly at 00:30 UTC — after segment-processor stream has caught up, before analytics compaction at 02:00.
 const customSegmentLambda = backend.customSegmentEvaluatorFn.resources.lambda as lambda.Function;
-customSegmentLambda.addEnvironment('USER_TABLE', 'UserDataEvent');
-customSegmentLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+customSegmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+customSegmentLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
 // Read segment defs from RefDataEvent; write membership records to UserDataEvent
 grantTableAccess(customSegmentLambda, 'RefDataEvent', false);
