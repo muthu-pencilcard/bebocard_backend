@@ -12,28 +12,37 @@ import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const athena = new AthenaClient({});
 
-const ANALYTICS_BUCKET = process.env.ANALYTICS_BUCKET!;
-const ATHENA_WORKGROUP = process.env.ATHENA_WORKGROUP!;
-const GLUE_DATABASE    = process.env.GLUE_DATABASE!;
-const REFDATA_TABLE    = process.env.REFDATA_TABLE!;
-const USER_HASH_SALT   = process.env.USER_HASH_SALT!; // Global fallback
+const ANALYTICS_BUCKET      = process.env.ANALYTICS_BUCKET!;
+const ATHENA_WORKGROUP      = process.env.ATHENA_WORKGROUP!;
+const GLUE_DATABASE         = process.env.GLUE_DATABASE!;
+const REFDATA_TABLE         = process.env.REFDATA_TABLE!;
+const USER_HASH_SALT        = process.env.USER_HASH_SALT!;        // per-tenant fallback salt
+const GLOBAL_ANALYTICS_SALT = process.env.GLOBAL_ANALYTICS_SALT!; // BeboCard-global cross-tenant salt
 
 // Cache for tenant metadata
 const tenantCache: Record<string, { salt: string; tenantId: string; tier: string; analyticsBucket?: string }> = {};
 const brandTenantCache: Record<string, string> = {};
 
+// Exported only for test cache teardown — not called in production
+export const _testResetCaches = () => {
+  Object.keys(tenantCache).forEach(k => { delete tenantCache[k]; });
+  Object.keys(brandTenantCache).forEach(k => { delete brandTenantCache[k]; });
+};
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface ReceiptRow {
-  userHash:     string | null;
-  brandId:      string;
-  tenantId:     string;
-  purchaseDate: string;   // YYYY-MM-DD
-  amount:       number;
-  currency:     string;
-  category:     string;
-  merchant:     string;
-  ingestedAt:   string;   // ISO 8601 UTC
+  visitorHash:       string | null;  // HMAC(permULID, GLOBAL_ANALYTICS_SALT) — cross-tenant, never egressed
+  visitorHashTenant: string | null;  // HMAC(permULID, tenantMeta.salt) — per-tenant, safe to export
+  isBebocard:        boolean;
+  brandId:           string;
+  tenantId:          string;
+  purchaseDate:      string;   // YYYY-MM-DD
+  amount:            number;
+  currency:          string;
+  category:          string;
+  merchant:          string;
+  ingestedAt:        string;   // ISO 8601 UTC
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -85,11 +94,15 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     const tenantMeta = await getTenantMetadata(tenantId);
     if (!tenantMeta || tenantMeta.tier === 'ENGAGEMENT') continue;
 
-    // Pseudonymous user identifier — unique PER TENANT (P1-1). NULL for anonymous (P1-9).
-    let userHash: string | null = null;
+    // Dual visitor hash (P1-1, P1-9):
+    //   visitorHash       = HMAC(permULID, GLOBAL_ANALYTICS_SALT) — stable across all tenants, never egressed
+    //   visitorHashTenant = HMAC(permULID, tenantMeta.salt)       — per-tenant pseudonym, safe to export
+    let visitorHash: string | null = null;
+    let visitorHashTenant: string | null = null;
     if (!isAnonymous) {
       const permULID = pk.replace('USER#', '');
-      userHash = createHmac('sha256', tenantMeta.salt).update(permULID).digest('hex');
+      visitorHash       = createHmac('sha256', GLOBAL_ANALYTICS_SALT).update(permULID).digest('hex');
+      visitorHashTenant = createHmac('sha256', tenantMeta.salt).update(permULID).digest('hex');
     }
 
     const rawDate    = sanitizeDate(String(desc['purchaseDate'] ?? '')) ?? new Date().toISOString().substring(0, 10);
@@ -101,7 +114,7 @@ export const handler: DynamoDBStreamHandler = async (event) => {
 
     if (amount === null) continue;
 
-    rows.push({ userHash, brandId, tenantId, purchaseDate: rawDate, amount, currency, category, merchant, ingestedAt });
+    rows.push({ visitorHash, visitorHashTenant, isBebocard: !isAnonymous, brandId, tenantId, purchaseDate: rawDate, amount, currency, category, merchant, ingestedAt });
   }
 
   if (rows.length === 0) return;
@@ -118,12 +131,15 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     const tenantMeta = await getTenantMetadata(tenantId);
     
     const valuesList = tenantRows.map(r =>
-      `(${r.userHash ? `'${r.userHash}'` : 'NULL'}, '${escapeSql(r.brandId)}', DATE '${r.purchaseDate}', ` +
+      `(${r.visitorHash ? `'${r.visitorHash}'` : 'NULL'}, ` +
+      `${r.visitorHashTenant ? `'${r.visitorHashTenant}'` : 'NULL'}, ` +
+      `${r.isBebocard ? 'true' : 'false'}, ` +
+      `'${escapeSql(r.brandId)}', DATE '${r.purchaseDate}', ` +
       `${r.amount}, '${escapeSql(r.currency)}', '${escapeSql(r.category)}', '${escapeSql(r.merchant)}', TIMESTAMP '${r.ingestedAt}')`,
     ).join(',\n      ');
 
     const sql = `INSERT INTO \`${GLUE_DATABASE}\`.\`${tableName}\`
-    (user_hash, brand_id, purchase_date, amount, currency, category, merchant, ingested_at)
+    (visitor_hash, visitor_hash_tenant, is_bebocard, brand_id, purchase_date, amount, currency, category, merchant, ingested_at)
   VALUES
     ${valuesList}`;
 

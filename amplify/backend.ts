@@ -47,6 +47,7 @@ import { templateManagerFn } from './functions/template-manager/resource';
 import { campaignSchedulerFn } from './functions/campaign-scheduler/resource';
 import { pointsExpiryForecastFn } from './functions/points-expiry-forecast/resource';
 import { aggregatedSpendingProcessorFn } from './functions/aggregated-spending-processor/resource';
+import { receiptAnalyticsProcessorFn } from './functions/receipt-analytics-processor/resource';
 import { Stack, Duration, RemovalPolicy, Tags, CfnOutput } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
@@ -120,6 +121,7 @@ const backend = defineBackend({
   campaignSchedulerFn,
   pointsExpiryForecastFn,
   aggregatedSpendingProcessorFn,
+  receiptAnalyticsProcessorFn,
 });
 
 // ── Shared Infrastructure ────────────────────────────────────────────────────
@@ -137,6 +139,12 @@ const tableNames = {
 };
 
 const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
+
+// ── PITR — explicitly enable on all tables (Amplify Gen 2 does not enable by default) ──
+const cfnTables = (backend.data.resources as any).cfnResources?.cfnTables ?? {};
+['UserDataEvent', 'RefDataEvent', 'AdminDataEvent', 'ReportDataEvent'].forEach(tableName => {
+  cfnTables[tableName]?.addPropertyOverride('PointInTimeRecoverySpecification', { PointInTimeRecoveryEnabled: true });
+});
 
 const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
 const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
@@ -329,6 +337,11 @@ const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Funct
 // ── P0-5: Concurrency Reservation ──
 // (cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
+(cardManagerLambda.node.defaultChild as lambda.CfnFunction).addPropertyOverride('TracingConfig', { Mode: 'Active' });
+cardManagerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
+  resources: ['*'],
+}));
 Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
 const grantTableAccess = (fn: lambda.Function, tableNamePrefix: string, write: boolean = false) => {
   fn.addToRolePolicy(new iam.PolicyStatement({
@@ -371,6 +384,11 @@ grantTableAccess(scanLambda, 'UserDataEvent', true);
 grantTableAccess(scanLambda, 'RefDataEvent', false);
 grantTableAccess(scanLambda, 'AdminDataEvent', false);
 grantKmsAccess(scanLambda, receiptSigningKey, ['kms:GetPublicKey']);
+(scanLambda.node.defaultChild as lambda.CfnFunction).addPropertyOverride('TracingConfig', { Mode: 'Active' });
+scanLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
+  resources: ['*'],
+}));
 
 /*
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
@@ -425,6 +443,39 @@ const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.C
 
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
+(receiptProcessorLambda.node.defaultChild as lambda.CfnFunction).addPropertyOverride('TracingConfig', { Mode: 'Active' });
+receiptProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
+  resources: ['*'],
+}));
+
+// ── Receipt Analytics Pipeline (anonymous + BeboCard receipts → S3 analytics lake) ──
+const receiptAnalyticsDLQ = new sqs.Queue(infraStack, 'ReceiptAnalyticsDLQ', { retentionPeriod: Duration.days(14) });
+const receiptAnalyticsQueue = new sqs.Queue(infraStack, 'ReceiptAnalyticsQueue', {
+  visibilityTimeout: Duration.seconds(90),
+  deadLetterQueue: { queue: receiptAnalyticsDLQ, maxReceiveCount: 3 },
+});
+createDlqAlarm(receiptAnalyticsDLQ, 'ReceiptAnalyticsDLQ');
+
+// scan-handler publishes to analytics queue (fire-and-forget — failure is logged, never blocks DynamoDB path)
+grantSqsAccess(scanLambda, receiptAnalyticsQueue, ['sqs:SendMessage']);
+scanLambda.addEnvironment('RECEIPT_ANALYTICS_QUEUE_URL', receiptAnalyticsQueue.queueUrl);
+
+const receiptAnalyticsProcessorLambda = backend.receiptAnalyticsProcessorFn.resources.lambda as lambda.Function;
+receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+receiptAnalyticsProcessorLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', process.env.GLOBAL_ANALYTICS_SALT ?? 'bebo_global_dev_salt_123');
+
+new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource', {
+  target: receiptAnalyticsProcessorLambda,
+  eventSourceArn: receiptAnalyticsQueue.queueArn,
+  batchSize: 10,
+});
+receiptAnalyticsQueue.grantConsumeMessages(receiptAnalyticsProcessorLambda);
+grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucketName, ['s3:PutObject']);
+receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: ['arn:aws:secretsmanager:*:*:secret:bebocard/tenant-analytics-salt/*'],
+}));
 
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
 tenantLinkerLambda.addEnvironment('USER_TABLE', userTable.tableName);
@@ -524,6 +575,7 @@ receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_a
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
+receiptIcebergLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', process.env.GLOBAL_ANALYTICS_SALT ?? 'bebo_global_dev_salt_123');
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
 grantS3Access(receiptIcebergLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
@@ -539,6 +591,10 @@ receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
     `arn:aws:glue:*:*:database/${glueDatabaseName}`,
     `arn:aws:glue:*:*:table/${glueDatabaseName}/receipts_*`,
   ],
+}));
+receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/GLOBAL_ANALYTICS_SALT*`],
 }));
 grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
 new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaUserSource', {

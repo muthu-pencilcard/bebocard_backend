@@ -24,6 +24,7 @@ const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 const USER_TABLE = process.env.USER_TABLE!;
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 const RECEIPT_QUEUE_URL = process.env.RECEIPT_QUEUE_URL!;
+const RECEIPT_ANALYTICS_QUEUE_URL = process.env.RECEIPT_ANALYTICS_QUEUE_URL ?? '';
 const SIGNING_KEY_ID = process.env.RECEIPT_SIGNING_KEY_ID!;
 
 function getFirebaseAdmin() {
@@ -516,7 +517,25 @@ async function handleReceipt(
     }),
   }));
 
-  return { 
+  // Enqueue to analytics pipeline (fire-and-forget — failure never blocks the receipt path)
+  if (RECEIPT_ANALYTICS_QUEUE_URL) {
+    sqs.send(new SendMessageCommand({
+      QueueUrl: RECEIPT_ANALYTICS_QUEUE_URL,
+      MessageBody: JSON.stringify({
+        permULID: permULID.startsWith('ANON#') ? null : permULID,
+        brandId: validKey.brandId,
+        tenantId: validKey.tenantId,
+        merchant: body.merchant,
+        amount: body.amount,
+        currency: body.currency,
+        purchaseDate: body.purchaseDate,
+        category: body.category,
+        items: body.items,
+      }),
+    })).catch(err => console.error('[scan-handler] analytics queue send failed (non-fatal):', err));
+  }
+
+  return {
     statusCode: 202, 
     headers, 
     body: JSON.stringify({ 
