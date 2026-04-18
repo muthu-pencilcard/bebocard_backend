@@ -156,6 +156,8 @@ const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
 
 const userHashSalt = 'bebo_' + (process.env.USER_HASH_SALT ?? 'local_dev_salt_123');
+const globalAnalyticsSalt = process.env.GLOBAL_ANALYTICS_SALT;
+if (!globalAnalyticsSalt) throw new Error('GLOBAL_ANALYTICS_SALT env var is required — set it via: amplify secret set GLOBAL_ANALYTICS_SALT');
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
 const funcStack = backend.auth.resources.userPool.stack.node.scope as Stack; // The root amplify stack
 const infraStack = funcStack; // Storage, Glue, SNS, KMS go in root scope to decouple from data
@@ -463,12 +465,13 @@ scanLambda.addEnvironment('RECEIPT_ANALYTICS_QUEUE_URL', receiptAnalyticsQueue.q
 
 const receiptAnalyticsProcessorLambda = backend.receiptAnalyticsProcessorFn.resources.lambda as lambda.Function;
 receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
-receiptAnalyticsProcessorLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', process.env.GLOBAL_ANALYTICS_SALT ?? 'bebo_global_dev_salt_123');
+receiptAnalyticsProcessorLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', globalAnalyticsSalt);
 
 new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource', {
   target: receiptAnalyticsProcessorLambda,
   eventSourceArn: receiptAnalyticsQueue.queueArn,
   batchSize: 10,
+  reportBatchItemFailures: true,
 });
 receiptAnalyticsQueue.grantConsumeMessages(receiptAnalyticsProcessorLambda);
 grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucketName, ['s3:PutObject']);
@@ -575,7 +578,7 @@ receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_a
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
-receiptIcebergLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', process.env.GLOBAL_ANALYTICS_SALT ?? 'bebo_global_dev_salt_123');
+receiptIcebergLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', globalAnalyticsSalt);
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
 grantS3Access(receiptIcebergLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);

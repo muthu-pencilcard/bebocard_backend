@@ -54,7 +54,9 @@ interface AnalyticsRow {
 }
 
 export const handler: SQSHandler = async (event) => {
+  const batchItemFailures: { itemIdentifier: string }[] = [];
   const rows: AnalyticsRow[] = [];
+  const partitionFirstMessageId: Record<string, string> = {};
   const ingestedAt = new Date().toISOString();
 
   for (const record of event.Records) {
@@ -75,6 +77,9 @@ export const handler: SQSHandler = async (event) => {
         }
       }
 
+      const partitionKey = `${resolvedTenantId}/${brandId}/${purchaseDate.substring(0, 10)}`;
+      partitionFirstMessageId[partitionKey] ??= record.messageId;
+
       rows.push({
         tenant_id: resolvedTenantId,
         brand_id: brandId,
@@ -91,12 +96,11 @@ export const handler: SQSHandler = async (event) => {
       });
     } catch (err) {
       console.error('[receipt-analytics-processor] Failed to parse record:', record.messageId, err);
-      // Rethrow so SQS retries the batch; dead-lettered after maxReceiveCount
-      throw err;
+      batchItemFailures.push({ itemIdentifier: record.messageId });
     }
   }
 
-  if (rows.length === 0) return;
+  if (rows.length === 0) return { batchItemFailures };
 
   // Group rows by tenant + brand + date for partitioned S3 writes
   const partitions: Record<string, AnalyticsRow[]> = {};
@@ -106,10 +110,10 @@ export const handler: SQSHandler = async (event) => {
     partitions[key].push(row);
   }
 
-  const timestamp = Date.now();
   await Promise.all(
     Object.entries(partitions).map(([partition, partRows]) => {
-      const s3Key = `receipts/raw/${partition}/${timestamp}-${Math.random().toString(36).slice(2)}.jsonl`;
+      // Use the first SQS messageId for this partition as the filename — guaranteed unique per SQS
+      const s3Key = `receipts/raw/${partition}/${partitionFirstMessageId[partition]}.jsonl`;
       const body = partRows.map(r => JSON.stringify(r)).join('\n');
       return s3.send(new PutObjectCommand({
         Bucket: ANALYTICS_BUCKET,
@@ -121,4 +125,5 @@ export const handler: SQSHandler = async (event) => {
   );
 
   console.info(`[receipt-analytics-processor] Wrote ${rows.length} rows across ${Object.keys(partitions).length} partitions`);
+  return { batchItemFailures };
 };
