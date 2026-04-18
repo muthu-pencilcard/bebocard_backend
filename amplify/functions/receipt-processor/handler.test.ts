@@ -54,13 +54,13 @@ describe('Receipt Processor Signing (P3-4)', () => {
     // Verify KMS Sign check
     const kmsCall = mockSend.mock.calls.find(c => c[0].__type === 'SignCommand');
     expect(kmsCall).toBeDefined();
-    expect(kmsCall[0].input.KeyId).toBe('test-key-id');
-    expect(kmsCall[0].input.SigningAlgorithm).toBe('RSASSA_PSS_SHA_256');
+    expect(kmsCall![0].input.KeyId).toBe('test-key-id');
+    expect(kmsCall![0].input.SigningAlgorithm).toBe('RSASSA_PSS_SHA_256');
 
     // Verify DynamoDB Put check
     const ddbCall = mockSend.mock.calls.find(c => c[0].__type === 'PutCommand' && c[0].input.Item.sK.startsWith('RECEIPT#'));
     expect(ddbCall).toBeDefined();
-    const desc = JSON.parse(ddbCall[0].input.Item.desc);
+    const desc = JSON.parse(ddbCall![0].input.Item.desc);
     expect(desc.signature).toBe(Buffer.from('test-signature').toString('base64'));
     expect(desc.signingAlgorithm).toBe('RSASSA_PSS_SHA_256');
   });

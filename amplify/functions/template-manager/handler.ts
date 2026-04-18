@@ -294,7 +294,7 @@ async function updateTemplate(
 
   await dynamo.send(new PutCommand({
     TableName: REFDATA_TABLE,
-    Item: { pK: `TEMPLATE#${templateId}`, sK: 'PROFILE', ...updated },
+    Item: { ...(updated as Record<string, unknown>), pK: `TEMPLATE#${templateId}`, sK: 'PROFILE' },
     ConditionExpression: 'attribute_exists(pK)',
   }));
 
@@ -444,7 +444,7 @@ async function deleteTemplate(
   const now = new Date().toISOString();
 
   // Soft-delete: set status to ARCHIVED and remove from discovery index
-  const transactItems: Parameters<typeof TransactWriteCommand>[0]['input']['TransactItems'] = [
+  const transactItems: NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']> = [
     {
       Update: {
         TableName: REFDATA_TABLE,

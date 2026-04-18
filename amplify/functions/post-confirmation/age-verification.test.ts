@@ -46,33 +46,33 @@ describe('Post-Confirmation Age Verification (P2-6)', () => {
 
     // Check Cognito Attribute
     const cognitoCall = mockSend.mock.calls.find(c => c[0].__type === 'AdminUpdateUserAttributesCommand');
-    const ageAttr = cognitoCall[0].input.UserAttributes.find(a => a.Name === 'custom:ageBucket');
-    expect(ageAttr.Value).toBe('<13');
+    const ageAttr = cognitoCall![0].input.UserAttributes.find((a: { Name: string }) => a.Name === 'custom:ageBucket');
+    expect(ageAttr!.Value).toBe('<13');
 
     // Check DynamoDB Identity status
     const ddbCall = mockSend.mock.calls.find(c => c[0].__type === 'PutCommand' && c[0].input.Item.sK === 'IDENTITY');
-    expect(ddbCall[0].input.Item.status).toBe('PENDING_CONSENT');
+    expect(ddbCall![0].input.Item.status).toBe('PENDING_CONSENT');
   });
 
   it('assigns 13-17 bucket and PENDING_CONSENT for a teen', async () => {
     const event = makeEvent('2010-01-01'); // ~16 years old
     await handler(event, {} as any, () => {});
 
-    const ageAttr = mockSend.mock.calls.find(c => c[0].__type === 'AdminUpdateUserAttributesCommand')[0].input.UserAttributes.find(a => a.Name === 'custom:ageBucket');
-    expect(ageAttr.Value).toBe('13-17');
-    
+    const ageAttr = mockSend.mock.calls.find(c => c[0].__type === 'AdminUpdateUserAttributesCommand')![0].input.UserAttributes.find((a: { Name: string }) => a.Name === 'custom:ageBucket');
+    expect(ageAttr!.Value).toBe('13-17');
+
     const ddbCall = mockSend.mock.calls.find(c => c[0].__type === 'PutCommand' && c[0].input.Item.sK === 'IDENTITY');
-    expect(ddbCall[0].input.Item.status).toBe('PENDING_CONSENT');
+    expect(ddbCall![0].input.Item.status).toBe('PENDING_CONSENT');
   });
 
   it('assigns 25-34 bucket and ACTIVE status for an adult', async () => {
     const event = makeEvent('1995-01-01'); // ~31 years old
     await handler(event, {} as any, () => {});
 
-    const ageAttr = mockSend.mock.calls.find(c => c[0].__type === 'AdminUpdateUserAttributesCommand')[0].input.UserAttributes.find(a => a.Name === 'custom:ageBucket');
-    expect(ageAttr.Value).toBe('25-34');
-    
+    const ageAttr = mockSend.mock.calls.find(c => c[0].__type === 'AdminUpdateUserAttributesCommand')![0].input.UserAttributes.find((a: { Name: string }) => a.Name === 'custom:ageBucket');
+    expect(ageAttr!.Value).toBe('25-34');
+
     const ddbCall = mockSend.mock.calls.find(c => c[0].__type === 'PutCommand' && c[0].input.Item.sK === 'IDENTITY');
-    expect(ddbCall[0].input.Item.status).toBe('ACTIVE');
+    expect(ddbCall![0].input.Item.status).toBe('ACTIVE');
   });
 });

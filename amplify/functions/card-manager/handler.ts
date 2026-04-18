@@ -519,14 +519,16 @@ async function rotateQR(permULID: string) {
             },
           },
         },
-        // c. Revoke old Scan Index
+        // c. Revoke old Scan Index — condition prevents double-revoke if two devices
+        //    race and Device B's transaction fires after Device A already revoked it.
         {
           Update: {
             TableName: ADMIN_TABLE,
             Key: { pK: `SCAN#${oldSecondaryULID}`, sK: permULID },
             UpdateExpression: 'SET #s = :revoked, updatedAt = :now',
+            ConditionExpression: '#s = :active',
             ExpressionAttributeNames: { '#s': 'status' },
-            ExpressionAttributeValues: { ':revoked': 'REVOKED', ':now': now },
+            ExpressionAttributeValues: { ':revoked': 'REVOKED', ':now': now, ':active': 'ACTIVE' },
           },
         },
       ],

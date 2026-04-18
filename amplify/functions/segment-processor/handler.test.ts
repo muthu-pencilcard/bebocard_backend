@@ -133,14 +133,14 @@ describe('segment-processor handler', () => {
   });
 
   it('calls recomputeSegment for RECEIPT# INSERT', async () => {
-    mockSend.mockImplementation((cmd: { __type: string; input?: { KeyConditionExpression?: string } }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [{ amount: 50, purchaseDate: '2026-03-20' }]),
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -163,14 +163,14 @@ describe('segment-processor handler', () => {
   // ── spendBucket classification ─────────────────────────────────────────────
 
   it("spendBucket is '<100' for total spend < 100", async () => {
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [{ amount: 75, purchaseDate: '2026-03-20' }]),
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -192,7 +192,7 @@ describe('segment-processor handler', () => {
   });
 
   it("spendBucket is '100-200' for total spend 100–199", async () => {
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [
@@ -202,7 +202,7 @@ describe('segment-processor handler', () => {
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -224,7 +224,7 @@ describe('segment-processor handler', () => {
   });
 
   it("spendBucket is '200-500' for total spend 200–499", async () => {
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [
@@ -234,7 +234,7 @@ describe('segment-processor handler', () => {
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -256,7 +256,7 @@ describe('segment-processor handler', () => {
   });
 
   it("spendBucket is '500+' for total spend >= 500", async () => {
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [
@@ -266,7 +266,7 @@ describe('segment-processor handler', () => {
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -291,7 +291,7 @@ describe('segment-processor handler', () => {
 
   it("visitFrequency is 'new' for fewer than 3 visits", async () => {
     const recentDate = new Date(Date.now() - 10 * 86_400_000).toISOString().substring(0, 10);
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [
@@ -301,7 +301,7 @@ describe('segment-processor handler', () => {
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -329,12 +329,12 @@ describe('segment-processor handler', () => {
       purchaseDate: new Date(Date.now() - (i + 1) * 86_400_000).toISOString().substring(0, 10),
     }));
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({ Items: makeReceiptItems('woolworths', entries) });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -362,12 +362,12 @@ describe('segment-processor handler', () => {
       purchaseDate: new Date(Date.now() - (200 + i) * 86_400_000).toISOString().substring(0, 10),
     }));
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({ Items: makeReceiptItems('woolworths', entries) });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -394,12 +394,12 @@ describe('segment-processor handler', () => {
       purchaseDate: new Date(Date.now() - (i + 1) * 86_400_000).toISOString().substring(0, 10),
     }));
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({ Items: makeReceiptItems('woolworths', entries) });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -433,7 +433,7 @@ describe('segment-processor handler', () => {
         });
       }
       if (cmd.__type === 'GetCommand') {
-        const sk = cmd.input?.Key?.sK ?? '';
+        const sk = (cmd.input?.Key as { sK?: string } | undefined)?.sK ?? '';
         if (sk === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
@@ -461,14 +461,14 @@ describe('segment-processor handler', () => {
   it('sets subscribed=false in desc when no SUBSCRIPTION# record', async () => {
     const recentDate = new Date(Date.now() - 5 * 86_400_000).toISOString().substring(0, 10);
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         return Promise.resolve({
           Items: makeReceiptItems('woolworths', [{ amount: 50, purchaseDate: recentDate }]),
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });
@@ -490,7 +490,7 @@ describe('segment-processor handler', () => {
   });
 
   it('skips recompute and does not write if no receipts found', async () => {
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') return Promise.resolve({ Items: [] });
       return Promise.resolve({});
     });
@@ -518,7 +518,7 @@ describe('segment-processor handler', () => {
       computedAt: '2026-03-01T00:00:00.000Z',
     };
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'GetCommand') {
         return Promise.resolve({
           Item: {
@@ -558,7 +558,7 @@ describe('segment-processor handler', () => {
       computedAt: '2026-03-01T00:00:00.000Z',
     };
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'GetCommand') {
         return Promise.resolve({
           Item: {
@@ -585,7 +585,7 @@ describe('segment-processor handler', () => {
   });
 
   it('is a no-op if no SEGMENT# exists during subscription patch', async () => {
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'GetCommand') return Promise.resolve({ Item: null });
       return Promise.resolve({});
     });
@@ -603,7 +603,7 @@ describe('segment-processor handler', () => {
     let callCount = 0;
     const recentDate = new Date(Date.now() - 3 * 86_400_000).toISOString().substring(0, 10);
 
-    mockSend.mockImplementation((cmd: { __type: string }) => {
+    mockSend.mockImplementation((cmd: { __type: string; input?: Record<string, unknown> }) => {
       if (cmd.__type === 'QueryCommand') {
         callCount++;
         if (callCount === 1) {
@@ -616,7 +616,7 @@ describe('segment-processor handler', () => {
         });
       }
       if (cmd.__type === 'GetCommand') {
-        if (cmd.input?.Key?.sK === 'IDENTITY') {
+        if ((cmd.input?.Key as { sK?: string } | undefined)?.sK === 'IDENTITY') {
           return Promise.resolve({ Item: { owner: 'test-user', status: 'ACTIVE' } });
         }
         return Promise.resolve({ Item: null });

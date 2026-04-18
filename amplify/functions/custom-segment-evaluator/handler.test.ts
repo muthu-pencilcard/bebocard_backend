@@ -69,7 +69,7 @@ describe('custom-segment-evaluator handler', () => {
     await handler(undefined);
 
     // Only the initial scan — no BatchWrite calls
-    const batchWriteCalls = mockSend.mock.calls.filter(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchWriteCalls = mockSend.mock.calls.filter(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     expect(batchWriteCalls).toHaveLength(0);
   });
 
@@ -89,7 +89,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchWriteCalls = mockSend.mock.calls.filter(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchWriteCalls = mockSend.mock.calls.filter(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     expect(batchWriteCalls).toHaveLength(0);
   });
 
@@ -108,7 +108,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     expect(batchCall).toBeDefined();
     const items = (batchCall![0] as { input: { RequestItems: Record<string, Array<{ PutRequest: { Item: Record<string, unknown> } }>> } }).input.RequestItems['UserDataEvent-test'];
     expect(items[0].PutRequest.Item.sK).toBe('SEGMENT#woolworths#CUSTOM#seg-abc');
@@ -130,7 +130,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     expect(batchCall).toBeDefined();
     const items = (batchCall![0] as { input: { RequestItems: Record<string, Array<{ PutRequest: { Item: Record<string, unknown> } }>> } }).input.RequestItems['UserDataEvent-test'];
     expect(items[0].PutRequest.Item.status).toBe('INACTIVE');
@@ -166,7 +166,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     const items = (batchCall![0] as { input: { RequestItems: Record<string, Array<{ PutRequest: { Item: Record<string, unknown> } }>> } }).input.RequestItems['UserDataEvent-test'];
     expect(items[0].PutRequest.Item.status).toBe('ACTIVE');
   });
@@ -200,7 +200,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     const items = (batchCall![0] as { input: { RequestItems: Record<string, Array<{ PutRequest: { Item: Record<string, unknown> } }>> } }).input.RequestItems['UserDataEvent-test'];
     // visit_count = 1 but threshold is 3 → fails AND logic
     expect(items[0].PutRequest.Item.status).toBe('INACTIVE');
@@ -227,7 +227,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     const items = (batchCall![0] as { input: { RequestItems: Record<string, Array<{ PutRequest: { Item: Record<string, unknown> } }>> } }).input.RequestItems['UserDataEvent-test'];
     expect(items[0].PutRequest.Item.status).toBe('ACTIVE');
   });
@@ -256,7 +256,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const batchCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'BatchWriteCommand');
+    const batchCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'BatchWriteCommand');
     const items = (batchCall![0] as { input: { RequestItems: Record<string, Array<{ PutRequest: { Item: Record<string, unknown> } }>> } }).input.RequestItems['UserDataEvent-test'];
     // sK should use brandId=bebocard for global segments
     expect(items[0].PutRequest.Item.sK).toBe('SEGMENT#bebocard#CUSTOM#global-seg');
@@ -273,7 +273,7 @@ describe('custom-segment-evaluator handler', () => {
 
     await handler(undefined);
 
-    const updateCall = mockSend.mock.calls.find(([cmd]: [Record<string, unknown>]) => cmd.__type === 'UpdateCommand');
+    const updateCall = mockSend.mock.calls.find(([cmd]: unknown[]) => (cmd as Record<string, unknown>).__type === 'UpdateCommand');
     expect(updateCall).toBeDefined();
     const updateInput = (updateCall![0] as { input: { Key: Record<string, string>; ExpressionAttributeValues: Record<string, unknown> } }).input;
     expect(updateInput.Key.pK).toBe('TENANT#tenant-1');

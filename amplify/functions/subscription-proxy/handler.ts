@@ -426,6 +426,7 @@ interface InvoiceBody {
   dueDate: string;          // ISO 8601 date
   billingPeriod?: string;   // '2026-04-01/2026-04-30'
   invoiceNumber?: string;
+  paymentUrl?: string;
 }
 
 async function handleInvoice(
