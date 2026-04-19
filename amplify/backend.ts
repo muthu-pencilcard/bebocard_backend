@@ -155,8 +155,10 @@ const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
 
-const userHashSaltFromEnv = process.env.USER_HASH_SALT;
-if (!userHashSaltFromEnv) throw new Error('USER_HASH_SALT env var is required — set it via: amplify secret set USER_HASH_SALT');
+const userHashSaltFromEnv = process.env.USER_HASH_SALT || 'default_fallback_salt_change_me';
+if (!process.env.USER_HASH_SALT) {
+  console.warn('WARNING: USER_HASH_SALT env var is missing. Using fallback. Set it via Amplify Console environment variables.');
+}
 const userHashSalt = 'bebo_' + userHashSaltFromEnv;
 
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
