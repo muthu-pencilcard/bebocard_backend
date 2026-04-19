@@ -1980,12 +1980,19 @@ async function adminActOnCardConfig(
     action === 'reject'  ? 'REJECTED' :
     'REVOKED';
 
+  const body = JSON.parse(event.body ?? '{}') as { rejectionReason?: string };
+  const rejectionReason = action === 'reject' ? (body.rejectionReason?.trim() ?? '') : undefined;
+
   await dynamo.send(new UpdateCommand({
     TableName: REFDATA_TABLE,
     Key: { pK: `BRAND#${brandId}`, sK: `CARD_CONFIG#${templateId}` },
-    UpdateExpression: 'SET #status = :status, updatedAt = :now',
+    UpdateExpression: rejectionReason
+      ? 'SET #status = :status, updatedAt = :now, rejectionReason = :reason'
+      : 'SET #status = :status, updatedAt = :now',
     ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: { ':status': newStatus, ':now': now },
+    ExpressionAttributeValues: rejectionReason
+      ? { ':status': newStatus, ':now': now, ':reason': rejectionReason }
+      : { ':status': newStatus, ':now': now },
   }));
 
   // If approving: write to the DISCOVERY index so the Flutter app can find it.
@@ -2030,6 +2037,6 @@ async function adminActOnCardConfig(
     Key: { pK: 'CARDCONFIG#PENDING', sK: `BRAND#${brandId}#${templateId}` },
   })).catch(() => null);
 
-  console.info('[brand-api-handler] admin card config action', { brandId, templateId, action, newStatus });
+  console.info('[brand-api-handler] admin card config action', { brandId, templateId, action, newStatus, hasRejectionReason: !!rejectionReason });
   return ok(event, { brandId, templateId, status: newStatus, updatedAt: now });
 }
