@@ -459,9 +459,6 @@ webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/webhook-signing/*`],
 }));
 
-grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
-exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
-
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
 receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
 new lambda.EventSourceMapping(mappingStack, 'ReceiptProcessorSQSSource', {
@@ -850,6 +847,9 @@ exporterLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminDisableUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:AdminDeleteUser'],
   resources: ['arn:aws:cognito-idp:*:*:userpool/*'],
 }));
+
+grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
+exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 
 
 // Secrets for FCM
