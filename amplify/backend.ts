@@ -433,6 +433,35 @@ createDlqAlarm(receiptProcessingDLQ, 'ReceiptProcessingDLQ'); // Zero tolerance 
 grantSqsAccess(scanLambda, receiptProcessingQueue, ['sqs:SendMessage']);
 scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
 
+// ── Webhook Reliability Queue (P2-12) ──
+const webhookDLQ = new sqs.Queue(infraStack, 'WebhookReliabilityDLQ', { retentionPeriod: Duration.days(14) });
+const webhookQueue = new sqs.Queue(infraStack, 'WebhookReliabilityQueue', {
+  visibilityTimeout: Duration.seconds(60), // Match Lambda timeout + headroom
+  deadLetterQueue: {
+    queue: webhookDLQ,
+    maxReceiveCount: 5,
+  },
+});
+createDlqAlarm(webhookDLQ, 'WebhookReliabilityDLQ');
+
+const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
+webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
+  target: webhookDispatcherLambda,
+  eventSourceArn: webhookQueue.queueArn,
+  batchSize: 5,
+});
+webhookQueue.grantConsumeMessages(webhookDispatcherLambda);
+grantTableAccess(webhookDispatcherLambda, 'RefDataEvent', false);
+// Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
+webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/webhook-signing/*`],
+}));
+
+grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
+exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
+
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
 receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
 new lambda.EventSourceMapping(mappingStack, 'ReceiptProcessorSQSSource', {
@@ -822,34 +851,6 @@ exporterLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: ['arn:aws:cognito-idp:*:*:userpool/*'],
 }));
 
-// ── Webhook Reliability Queue (P2-12) ──
-const webhookDLQ = new sqs.Queue(infraStack, 'WebhookReliabilityDLQ', { retentionPeriod: Duration.days(14) });
-const webhookQueue = new sqs.Queue(infraStack, 'WebhookReliabilityQueue', {
-  visibilityTimeout: Duration.seconds(60), // Match Lambda timeout + headroom
-  deadLetterQueue: {
-    queue: webhookDLQ,
-    maxReceiveCount: 5,
-  },
-});
-createDlqAlarm(webhookDLQ, 'WebhookReliabilityDLQ');
-
-grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
-exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
-
-const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
-webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
-  target: webhookDispatcherLambda,
-  eventSourceArn: webhookQueue.queueArn,
-  batchSize: 5,
-});
-webhookQueue.grantConsumeMessages(webhookDispatcherLambda);
-grantTableAccess(webhookDispatcherLambda, 'RefDataEvent', false);
-// Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
-webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['secretsmanager:GetSecretValue'],
-  resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/webhook-signing/*`],
-}));
 
 // Secrets for FCM
 // Using environment variable with fallback to prevent stack synthesis crashes if the secret isn't pre-configured in SSM.
