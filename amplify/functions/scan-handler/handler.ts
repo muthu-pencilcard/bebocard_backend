@@ -77,9 +77,9 @@ const _handler: APIGatewayProxyHandler = async (event) => {
 
   try {
     if (path.endsWith('/scan')) return handleLoyaltyCheck(event, headers);
-    if (path.endsWith('/receipt')) {
+    if (path.endsWith('/receipt') || path.endsWith('/invoice')) {
       if (event.httpMethod === 'GET') return handleGetReceipt(event, headers);
-      return handleReceipt(event, headers, false);
+      return handleReceipt(event, headers, path.endsWith('/invoice'));
     }
     if (path.endsWith('/health')) return handleHealthCheck(headers);
     if (path.endsWith('/security/receipt-public-key')) return handleGetPublicKey(headers);
@@ -238,17 +238,12 @@ async function handleLoyaltyCheck(
       TableName: ADMIN_TABLE,
       IndexName: 'GSI1', 
       KeyConditionExpression: 'GSI1PK = :bpk AND GSI1SK = :bsk',
-      FilterExpression: '#s = :approved',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: {
-        ':bpk': `CONSENT#${validKey.brandId}`,
-        ':bsk': permULID,
-        ':approved': 'APPROVED'
-      },
-      Limit: 1,
+      ScanIndexForward: false, // Get most recent first
+      Limit: 10, // Check recent history
     })).catch(() => ({ Items: [] }));
 
-    const activeConsent = consentQuery.Items?.[0];
+    const activeConsent = consentQuery.Items?.find(i => i.status === 'APPROVED');
+    const pendingConsent = consentQuery.Items?.find(i => i.status === 'PENDING');
 
     if (activeConsent) {
       const approvedFields: string[] = JSON.parse(activeConsent.desc ?? '{}').approvedFields ?? [];
@@ -299,6 +294,10 @@ async function handleLoyaltyCheck(
           await incrementTenantUsageCounter(dynamo, REFDATA_TABLE, tenantState.tenantId, validKey.brandId, 'consent');
         }
       }
+    } else if (pendingConsent) {
+      // Already a request in flight — return that requestId but don't spam another push
+      consentRequired = true;
+      requestId = (pendingConsent.pK as string).split('#')[1];
     } else {
       // Create a NEW consent request and notify the user
       consentRequired = true;

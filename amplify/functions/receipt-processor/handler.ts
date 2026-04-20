@@ -5,17 +5,20 @@ import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createHash } from 'crypto';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { monotonicFactory } from 'ulid';
 import { idempotentPut } from '../shared/idempotency';
 import { enrichReceipt } from './receipt-enricher';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const kms = new KMSClient({});
+const sqs = new SQSClient({});
 const ulid = monotonicFactory();
 
 const USER_TABLE = process.env.USER_TABLE!;
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 const SIGNING_KEY_ID = process.env.RECEIPT_SIGNING_KEY_ID!;
+const WEBHOOK_QUEUE_URL = process.env.WEBHOOK_QUEUE_URL;
 
 async function signReceipt(data: string): Promise<string> {
   const res = await kms.send(new SignCommand({
@@ -199,6 +202,33 @@ async function processReceipt(task: ReceiptTask) {
       });
     } catch (e) {
       console.error('[receipt-processor] FCM send failed:', e);
+    }
+  }
+
+  // 6. Deliver Webhook (P2-12 Reliability Layer)
+  if (WEBHOOK_QUEUE_URL) {
+    try {
+      await sqs.send(new SendMessageCommand({
+        QueueUrl: WEBHOOK_QUEUE_URL,
+        MessageBody: JSON.stringify({
+          brandId,
+          type: isInvoice ? 'INVOICE' : 'RECEIPT',
+          deliveryId: receiptSK,
+          data: {
+            receiptId: receiptSK,
+            merchant,
+            amount,
+            purchaseDate,
+            loyaltyCardId: task.loyaltyCardId,
+            pointsEarned: task.pointsEarned,
+            isAnonymous
+          },
+        }),
+      }));
+      console.info(`[receipt-processor] Enqueued webhook for ${brandId} (${receiptSK})`);
+    } catch (err) {
+      console.error('[receipt-processor] Failed to enqueue webhook:', err);
+      // Non-fatal to the receipt ingestion path
     }
   }
 }

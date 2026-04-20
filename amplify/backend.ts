@@ -440,7 +440,10 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptProcessorSQSSource', {
   eventSourceArn: receiptProcessingQueue.queueArn,
   batchSize: 10,
 });
+grantSqsAccess(receiptProcessorLambda, receiptProcessingQueue, ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
 receiptProcessingQueue.grantConsumeMessages(receiptProcessorLambda);
+grantSqsAccess(receiptProcessorLambda, webhookQueue, ['sqs:SendMessage']);
+receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
