@@ -168,13 +168,12 @@ const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
 
 // ── Concurrency Reservations (P0-5) ──
 // Scaled down drastically to prevent account limit exhaustion during early phases
-const isProd = stage === 'prod';
 const reservations = {
-  postConfirm: isProd ? 5 : undefined,
-  cardManager: isProd ? 10 : undefined,
-  scanHandler: isProd ? 20 : undefined,
-  receiptProcessor: isProd ? 10 : undefined,
-  backfiller: isProd ? 5 : undefined,
+  postConfirm: undefined,
+  cardManager: undefined,
+  scanHandler: undefined,
+  receiptProcessor: undefined,
+  backfiller: undefined,
 };
 
 const dataStack = Stack.of(userTable);
