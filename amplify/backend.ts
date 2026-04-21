@@ -147,6 +147,19 @@ const cfnTables = (backend.data.resources as any).cfnResources?.cfnTables ?? {};
   cfnTables[tableName]?.addPropertyOverride('PointInTimeRecoverySpecification', { PointInTimeRecoveryEnabled: true });
 });
 
+// ── Auth Overrides — Password Policy (moved from defineAuth due to schema change) ──
+const { cfnUserPool } = backend.auth.resources.cfnResources;
+cfnUserPool.policies = {
+  passwordPolicy: {
+    minimumLength: 12,
+    requireLowercase: true,
+    requireUppercase: true,
+    requireNumbers: true,
+    requireSymbols: true,
+    temporaryPasswordValidityDays: 7,
+  },
+};
+
 const amplifyAppId = process.env.AWS_APP_ID ?? 'local';
 const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
 

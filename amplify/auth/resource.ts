@@ -14,13 +14,6 @@ export const auth = defineAuth({
     mode: 'OPTIONAL',
     totp: true,
   },
-  passwordPolicy: {
-    minLength: 12,
-    requireUppercase: true,
-    requireLowercase: true,
-    requireDigits: true,
-    requireSymbols: true,
-  },
   userAttributes: {
     email: { required: true, mutable: true },
     // birthdate cannot be set required on an existing UserPool (standard attributes are immutable after creation).
