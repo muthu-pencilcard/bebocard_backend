@@ -254,8 +254,8 @@ const alertsTopic = new sns.Topic(authStack, 'InfrastructureAlerts', {
   displayName: `BeboCard ${stage.toUpperCase()} Infrastructure Alerts`,
 });
 
-const opsWebhookUrl = ssm.StringParameter.valueForStringParameter(infraStack, '/bebocard/ops/alert-webhook-url');
-alertsTopic.addSubscription(new snsSubscriptions.UrlSubscription(opsWebhookUrl, { protocol: sns.SubscriptionProtocol.HTTPS }));
+// Subscription wired manually once a real ops webhook URL (PagerDuty/Slack) is provisioned.
+// SNS validates HTTPS endpoints on creation — placeholder URLs will fail at deploy time.
 
 const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
   const alarm = new cloudwatch.Alarm(Stack.of(queue), `${name}Alarm`, {
