@@ -153,6 +153,17 @@ const amplifyBranch = process.env.AWS_BRANCH ?? 'sandbox';
 const stage = amplifyBranch === 'main' ? 'prod' : 'dev';
 const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
 
+// ── Concurrency Reservations (P0-5) ──
+// Scaled down for non-prod to prevent account limit exhaustion
+const isProd = stage === 'prod';
+const reservations = {
+  postConfirm: isProd ? 10 : 2,
+  cardManager: isProd ? 50 : 5,
+  scanHandler: isProd ? 200 : 10,
+  receiptProcessor: isProd ? 100 : 5,
+  backfiller: isProd ? 10 : 2,
+};
+
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
 
@@ -282,7 +293,7 @@ const receiptSigningKey = new kms.Key(infraStack, 'ReceiptSigningKey', {
 // ── Post-confirmation ──
 const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-(postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
+(postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.postConfirm;
 
 const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
   const alarm = new cloudwatch.Alarm(Stack.of(fn), `${name}UtilizationAlarm`, {
@@ -337,7 +348,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 // ── Card manager ──
 const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-(cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
+(cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.cardManager;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 (cardManagerLambda.node.defaultChild as lambda.CfnFunction).addPropertyOverride('TracingConfig', { Mode: 'Active' });
 cardManagerLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -393,7 +404,7 @@ scanLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
-(scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 200;
+(scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
 const scanAlias = scanLambda.addAlias('prod');
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
@@ -469,7 +480,7 @@ receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
-cfnReceiptProcessor.reservedConcurrentExecutions = 100;
+cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
 
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
@@ -943,7 +954,7 @@ grantTableAccess(backfillerLambda, 'UserDataEvent', false);
  
 // Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
 const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
-cfnBackfiller.reservedConcurrentExecutions = 10;
+cfnBackfiller.reservedConcurrentExecutions = reservations.backfiller;
 
 // Schedule: Nightly at 2:00 AM UTC
 const cronRule = new events.Rule(infraStack, 'NightlyCompactionRule', {
