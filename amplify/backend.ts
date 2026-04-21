@@ -254,7 +254,7 @@ const alertsTopic = new sns.Topic(authStack, 'InfrastructureAlerts', {
   displayName: `BeboCard ${stage.toUpperCase()} Infrastructure Alerts`,
 });
 
-const opsWebhookUrl = ssm.StringParameter.valueFromLookup(infraStack, '/bebocard/ops/alert-webhook-url');
+const opsWebhookUrl = ssm.StringParameter.valueForStringParameter(infraStack, '/bebocard/ops/alert-webhook-url');
 alertsTopic.addSubscription(new snsSubscriptions.UrlSubscription(opsWebhookUrl));
 
 const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
