@@ -156,9 +156,7 @@ const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
 
-const userHashSaltFromEnv = process.env.USER_HASH_SALT;
-if (!userHashSaltFromEnv) throw new Error('USER_HASH_SALT is required — set it via Amplify Console environment variables before deploying');
-const userHashSalt = 'bebo_' + userHashSaltFromEnv;
+const userHashSalt = `{{resolve:ssm-secure:/amplify/${amplifyAppId}/${amplifyBranch}/USER_HASH_SALT:2}}`;
 
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
 const funcStack = backend.auth.resources.userPool.stack.node.scope as Stack; // The root amplify stack
