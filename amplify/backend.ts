@@ -175,9 +175,12 @@ const reservations = {
   receiptProcessor: undefined,
   backfiller: undefined,
 };
-
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
+
+// ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
+const funcStack = backend.auth.resources.userPool.stack.node.scope as Stack; // The root amplify stack
+const infraStack = funcStack; // Storage, Glue, SNS, KMS go in root scope to decouple from data
 
 const userHashSaltPath = `/amplify/${amplifyAppId}/${amplifyBranch}/USER_HASH_SALT`;
 const userHashSaltSsmArn = infraStack.formatArn({
@@ -186,9 +189,6 @@ const userHashSaltSsmArn = infraStack.formatArn({
   resourceName: userHashSaltPath.substring(1)
 });
 
-// ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
-const funcStack = backend.auth.resources.userPool.stack.node.scope as Stack; // The root amplify stack
-const infraStack = funcStack; // Storage, Glue, SNS, KMS go in root scope to decouple from data
 const mappingStack = funcStack; // Event sources pointing to lambdas MUST be in root scope to break circularity
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
