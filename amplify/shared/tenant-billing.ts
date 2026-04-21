@@ -28,6 +28,9 @@ const TIER_ORDER: Record<TenantTier, number> = { base: 0, engagement: 1, intelli
 
 /** Minimum tier required to meter or access this usage type. Absent = all tiers. */
 export const USAGE_TYPE_MIN_TIER: Partial<Record<UsageType, TenantTier>> = {
+  offers:               'engagement',
+  newsletters:          'engagement',
+  catalogues:           'engagement',
   newsletter_reads:     'engagement',
   offer_engagements:    'engagement',
   catalogue_views:      'engagement',
@@ -178,6 +181,9 @@ export async function checkTenantQuota(
   tenantState: { tenantId: string | null; tier: TenantTier; includedEventsPerMonth: number | null },
   type: UsageType,
 ): Promise<{ allowed: boolean; message?: string; currentTotal?: number; usageRatio?: number }> {
+  if (!canAccessUsageType(tenantState.tier, type)) {
+    return { allowed: false, message: `Engagement tier required to send ${type}. Upgrade to continue.` };
+  }
   if (!tenantState.tenantId) return { allowed: true };
 
   const included = tenantState.includedEventsPerMonth;

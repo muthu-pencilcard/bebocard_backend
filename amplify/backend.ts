@@ -71,6 +71,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { DynamoEventSource, SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
 
 const backend = defineBackend({
   auth,
@@ -155,10 +156,8 @@ const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
 
-const userHashSaltFromEnv = process.env.USER_HASH_SALT || 'default_fallback_salt_change_me';
-if (!process.env.USER_HASH_SALT) {
-  console.warn('WARNING: USER_HASH_SALT env var is missing. Using fallback. Set it via Amplify Console environment variables.');
-}
+const userHashSaltFromEnv = process.env.USER_HASH_SALT;
+if (!userHashSaltFromEnv) throw new Error('USER_HASH_SALT is required — set it via Amplify Console environment variables before deploying');
 const userHashSalt = 'bebo_' + userHashSaltFromEnv;
 
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
@@ -257,8 +256,8 @@ const alertsTopic = new sns.Topic(authStack, 'InfrastructureAlerts', {
   displayName: `BeboCard ${stage.toUpperCase()} Infrastructure Alerts`,
 });
 
-// Default engineer contact — in prod this would be an OpsGenie/PagerDuty endpoint
-alertsTopic.addSubscription(new snsSubscriptions.EmailSubscription('farahgalaria@gmail.com'));
+const opsWebhookUrl = ssm.StringParameter.valueFromLookup(infraStack, '/bebocard/ops/alert-webhook-url');
+alertsTopic.addSubscription(new snsSubscriptions.UrlSubscription(opsWebhookUrl));
 
 const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
   const alarm = new cloudwatch.Alarm(Stack.of(queue), `${name}Alarm`, {
@@ -285,7 +284,7 @@ const receiptSigningKey = new kms.Key(infraStack, 'ReceiptSigningKey', {
 // ── Post-confirmation ──
 const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-// (postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
+(postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 10;
 
 const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
   const alarm = new cloudwatch.Alarm(Stack.of(fn), `${name}UtilizationAlarm`, {
@@ -340,7 +339,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 // ── Card manager ──
 const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-// (cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
+(cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 50;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 (cardManagerLambda.node.defaultChild as lambda.CfnFunction).addPropertyOverride('TracingConfig', { Mode: 'Active' });
 cardManagerLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -395,8 +394,8 @@ scanLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: ['*'],
 }));
 
-/*
 // Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
+(scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 200;
 const scanAlias = scanLambda.addAlias('prod');
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
@@ -408,17 +407,16 @@ const scanThrottleAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandle
   treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 });
 scanThrottleAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
- 
-// Utilization Alarm — scan-handler: fires when concurrent executions exceed 75% of reservation (37/50)
+
+// Utilization Alarm — scan-handler: fires when concurrent executions exceed 75% of reservation (150/200)
 const scanUtilizationAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerUtilizationAlarm', {
   metric: scanLambda.metric('ConcurrentExecutions', { period: Duration.minutes(1) }),
-  threshold: 37,
+  threshold: 150,
   evaluationPeriods: 2,
   alarmDescription: 'Scan handler concurrency is exceeding 75% of reserved capacity. Scaling ceiling approached.',
   treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 });
 scanUtilizationAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
-*/
 
 const receiptProcessingDLQ = new sqs.Queue(infraStack, 'ReceiptProcessingDLQ', { retentionPeriod: Duration.days(14) });
 const receiptProcessingQueue = new sqs.Queue(infraStack, 'ReceiptProcessingQueue', {
@@ -473,7 +471,7 @@ receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
-// cfnReceiptProcessor.reservedConcurrentExecutions = 100;
+cfnReceiptProcessor.reservedConcurrentExecutions = 100;
 
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
@@ -947,7 +945,7 @@ grantTableAccess(backfillerLambda, 'UserDataEvent', false);
  
 // Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
 const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
-// cfnBackfiller.reservedConcurrentExecutions = 10;
+cfnBackfiller.reservedConcurrentExecutions = 10;
 
 // Schedule: Nightly at 2:00 AM UTC
 const cronRule = new events.Rule(infraStack, 'NightlyCompactionRule', {
@@ -1235,10 +1233,7 @@ schedulerRule.addTarget(new eventsTargets.LambdaFunction(schedulerLambda));
 Tags.of(schedulerLambda).add('Function', 'campaign-scheduler');
 Tags.of(schedulerLambda).add('CostCenter', 'engagement');
 
-/*
 // ── P3-12: Zero-Downtime Blue/Green Deployments (Lambda Aliases + CodeDeploy) ─
-import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
-
 const blueGreenTargets: Array<{ lambda: lambda.Function; name: string }> = [
   { lambda: scanLambda, name: 'ScanHandler' },
   { lambda: receiptProcessorLambda, name: 'ReceiptProcessor' },
@@ -1267,4 +1262,3 @@ for (const { lambda: fn, name } of blueGreenTargets) {
     alarms: [errorAlarm],
   });
 }
-*/

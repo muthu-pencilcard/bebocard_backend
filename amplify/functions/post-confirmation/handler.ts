@@ -37,12 +37,21 @@ async function getTableNames() {
 }
 
 export const handler: PostConfirmationTriggerHandler = async (event) => {
+  const attrs = event.request.userAttributes;
+  const userId = event.userName;
+
+  // Gap 1 fix — Idempotency: Cognito may retry on network failure.
+  // If custom:permULID is already present, the trigger already ran — return early.
+  if (attrs['custom:permULID']) {
+    console.log(`[post-confirmation] Already processed — user=${userId} permULID=${attrs['custom:permULID']}`);
+    event.response = {};
+    return event;
+  }
+
   const permULID = ulid();
   const secondaryULID = ulid();
   const now = new Date().toISOString();
   const rotatesAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-  const userId = event.userName;
-  const attrs = event.request.userAttributes;
 
   console.log(`[post-confirmation] START user=${userId}`);
 
@@ -51,7 +60,21 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
   const birthdate = attrs['birthdate'] ?? '';
   const parentEmail = attrs['custom:parentEmail'] ?? '';
   const ageBucket = calculateAgeBucket(birthdate);
-  const status = ageBucket === '<13' || ageBucket === '13-17' ? 'PENDING_CONSENT' : 'ACTIVE';
+
+  const isMinor = ageBucket === '<13' || ageBucket === '13-17';
+
+  // Gap 4 fix — UNKNOWN birthdate: require age verification before activation.
+  // Gap 2 fix — Minor with no parentEmail: block sign-up entirely.
+  //   Cognito surfaces this as a sign-up failure; the client should prompt for parentEmail.
+  if (isMinor && !parentEmail) {
+    throw new Error(`[post-confirmation] Minor account (${ageBucket}) requires parentEmail — sign-up blocked for user=${userId}`);
+  }
+
+  const status = isMinor
+    ? 'PENDING_CONSENT'
+    : ageBucket === 'UNKNOWN'
+      ? 'PENDING_AGE_VERIFICATION'
+      : 'ACTIVE';
 
   let USER_TABLE: string;
   let ADMIN_TABLE: string;
@@ -64,7 +87,9 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 
   event.response = {};
 
-  // 1. Update Cognito: set permULID + ageBucket
+  // 1. Update Cognito: set permULID + ageBucket.
+  //    This must happen before the DynamoDB writes so that a retry sees
+  //    custom:permULID set and skips re-generation (idempotency guard above).
   await cognito.send(new AdminUpdateUserAttributesCommand({
     UserPoolId: event.userPoolId,
     Username: userId,
@@ -74,39 +99,53 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
     ],
   }));
 
-  // 2. Write IDENTITY record (P2-6 status check)
-  await dynamo.send(new PutCommand({
-    TableName: USER_TABLE,
-    Item: {
-      pK: `USER#${permULID}`,
-      sK: 'IDENTITY',
-      eventType: 'IDENTITY',
-      status,
-      primaryCat: 'identity',
-      subCategory: 'wallet',
-      secondaryULID,
-      rotatesAt,
-      owner: userId,
-      desc: JSON.stringify({
-        permULID,
-        cognitoUserId: userId,
-        birthdate,
-        ageBucket,
-        parentEmail,
+  // 2. Write IDENTITY record.
+  //    ConditionExpression prevents a double-write if the Cognito update above
+  //    succeeded on a prior attempt but the DynamoDB write did not.
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: USER_TABLE,
+      ConditionExpression: 'attribute_not_exists(pK)',
+      Item: {
+        pK: `USER#${permULID}`,
+        sK: 'IDENTITY',
+        eventType: 'IDENTITY',
+        status,
+        primaryCat: 'identity',
+        subCategory: 'wallet',
+        secondaryULID,
+        rotatesAt,
+        owner: userId,
+        desc: JSON.stringify({
+          permULID,
+          cognitoUserId: userId,
+          birthdate,
+          ageBucket,
+          parentEmail,
+          createdAt: now,
+        }),
         createdAt: now,
-      }),
-      createdAt: now,
-      updatedAt: now,
-    },
-  }));
+        updatedAt: now,
+      },
+    }));
+  } catch (err: any) {
+    if (err.name === 'ConditionalCheckFailedException') {
+      console.log(`[post-confirmation] IDENTITY already exists for permULID=${permULID} — skipping`);
+    } else {
+      throw err;
+    }
+  }
 
-  // 3. If minor, trigger parental consent email (P2-6)
+  // 3. If minor, send parental consent email.
+  //    Gap 3 fix — consent secret failure is separated from SES failure:
+  //    a missing SSM secret re-throws (blocks return), keeping the account
+  //    in PENDING_CONSENT rather than silently succeeding with no email path.
   if (status === 'PENDING_CONSENT' && parentEmail) {
-    try {
-      const secret = await getConsentSecret();
-      const token = generateConsentToken(permULID, secret);
-      const approvalLink = `${SCAN_API_URL}/v1/consent/parental/approve?token=${token}`;
+    const secret = await getConsentSecret();
+    const token = generateConsentToken(permULID, secret);
+    const approvalLink = `${SCAN_API_URL}/v1/consent/parental/approve?token=${token}`;
 
+    try {
       await ses.send(new SendEmailCommand({
         Source: 'no-reply@bebocard.com',
         Destination: { ToAddresses: [parentEmail] },
@@ -131,24 +170,36 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       }));
       console.log(`[post-confirmation] Consent email sent to ${parentEmail}`);
     } catch (err) {
-      console.error('[post-confirmation] FAILED to send email:', err);
+      // SES transient failure is non-fatal: account stays PENDING_CONSENT and support
+      // can re-trigger. Consent-secret failure is already separated out above.
+      console.error('[post-confirmation] FAILED to send consent email (SES):', err);
     }
   }
 
-  // 4. Pre-create scan index
-  await dynamo.send(new PutCommand({
-    TableName: ADMIN_TABLE,
-    Item: {
-      pK: `SCAN#${secondaryULID}`,
-      sK: permULID,
-      eventType: 'SCAN_INDEX',
-      status: 'ACTIVE',
-      owner: userId,
-      desc: JSON.stringify({ cards: [], createdAt: now }),
-      createdAt: now,
-      updatedAt: now,
-    },
-  }));
+  // 4. Pre-create scan index.
+  //    ConditionExpression prevents duplicate SCAN# entries on retry.
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: ADMIN_TABLE,
+      ConditionExpression: 'attribute_not_exists(pK)',
+      Item: {
+        pK: `SCAN#${secondaryULID}`,
+        sK: permULID,
+        eventType: 'SCAN_INDEX',
+        status: 'ACTIVE',
+        owner: userId,
+        desc: JSON.stringify({ cards: [], createdAt: now }),
+        createdAt: now,
+        updatedAt: now,
+      },
+    }));
+  } catch (err: any) {
+    if (err.name === 'ConditionalCheckFailedException') {
+      console.log(`[post-confirmation] SCAN# already exists for secondaryULID=${secondaryULID} — skipping`);
+    } else {
+      throw err;
+    }
+  }
 
   return event;
 };
@@ -172,11 +223,13 @@ function calculateAgeBucket(birthdate: string): string {
 }
 
 async function getConsentSecret(): Promise<string> {
-  const res = await ssm.send(new GetParameterCommand({ 
+  const res = await ssm.send(new GetParameterCommand({
     Name: '/amplify/shared/PARENTAL_CONSENT_SECRET',
     WithDecryption: true
   }));
-  return res.Parameter?.Value ?? 'default_fallback_secret_change_me';
+  const secret = res.Parameter?.Value;
+  if (!secret) throw new Error('PARENTAL_CONSENT_SECRET not found in SSM — cannot generate consent token');
+  return secret;
 }
 
 function generateConsentToken(permULID: string, secret: string): string {

@@ -49,7 +49,6 @@ function parseRecord(value: unknown): Record<string, unknown> {
 const _handler: APIGatewayProxyHandler = async (event) => {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
   };
 
   const path = event.path ?? '';
