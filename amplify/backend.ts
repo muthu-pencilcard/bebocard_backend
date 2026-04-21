@@ -179,7 +179,12 @@ const reservations = {
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
 
-const userHashSalt = `{{resolve:ssm-secure:/amplify/${amplifyAppId}/${amplifyBranch}/USER_HASH_SALT:2}}`;
+const userHashSaltPath = `/amplify/${amplifyAppId}/${amplifyBranch}/USER_HASH_SALT`;
+const userHashSaltSsmArn = infraStack.formatArn({
+  service: 'ssm',
+  resource: 'parameter',
+  resourceName: userHashSaltPath.substring(1)
+});
 
 // ── Infrastructure Stacks (Decoupled to prevent circular deps) ────────────────
 const funcStack = backend.auth.resources.userPool.stack.node.scope as Stack; // The root amplify stack
@@ -553,7 +558,7 @@ grantTableAccess(consentLambda, 'AdminDataEvent', true);
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
 segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-segmentLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
+// USER_HASH_SALT environment removed as it is not used in the segment-processor code
 grantTableAccess(segmentLambda, 'UserDataEvent', true);
 if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
 
@@ -627,7 +632,11 @@ receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-receiptIcebergLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
+receiptIcebergLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
+receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [userHashSaltSsmArn]
+}));
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
 grantS3Access(receiptIcebergLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
@@ -934,7 +943,11 @@ backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
-backfillerLambda.addEnvironment('USER_HASH_SALT', userHashSalt);
+backfillerLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
+backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [userHashSaltSsmArn]
+}));
 
 grantS3Access(backfillerLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({

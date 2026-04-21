@@ -8,6 +8,7 @@ import {
 import { createHmac } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const athena = new AthenaClient({});
@@ -16,8 +17,28 @@ const ANALYTICS_BUCKET      = process.env.ANALYTICS_BUCKET!;
 const ATHENA_WORKGROUP      = process.env.ATHENA_WORKGROUP!;
 const GLUE_DATABASE         = process.env.GLUE_DATABASE!;
 const REFDATA_TABLE         = process.env.REFDATA_TABLE!;
-const USER_HASH_SALT        = process.env.USER_HASH_SALT!;        // per-tenant fallback salt
+const USER_HASH_SALT_PATH    = process.env.USER_HASH_SALT_PATH;
 const GLOBAL_ANALYTICS_SALT = process.env.GLOBAL_ANALYTICS_SALT!; // BeboCard-global cross-tenant salt
+
+const ssm = new SSMClient({});
+let cachedSalt: string | undefined;
+
+async function getSalt(): Promise<string> {
+  if (cachedSalt) return cachedSalt;
+  if (!USER_HASH_SALT_PATH) return process.env.USER_HASH_SALT || '';
+
+  try {
+    const res = await ssm.send(new GetParameterCommand({
+      Name: USER_HASH_SALT_PATH,
+      WithDecryption: true
+    }));
+    cachedSalt = res.Parameter?.Value;
+    return cachedSalt || '';
+  } catch (err) {
+    console.error('[receipt-iceberg-writer] Failed to fetch salt from SSM', { path: USER_HASH_SALT_PATH, err });
+    return process.env.USER_HASH_SALT || '';
+  }
+}
 
 // Cache for tenant metadata
 const tenantCache: Record<string, { salt: string; tenantId: string; tier: string; analyticsBucket?: string }> = {};
@@ -231,7 +252,7 @@ async function getTenantMetadata(tenantId: string) {
 
   const meta = {
     tenantId,
-    salt: desc.salt as string || USER_HASH_SALT,
+    salt: desc.salt as string || await getSalt(),
     tier: res.Item.tier as string || 'ENGAGEMENT',
     analyticsBucket
   };
