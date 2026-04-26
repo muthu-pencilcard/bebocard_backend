@@ -364,7 +364,8 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminUpdateUserAttributes'],
-  resources: [backend.auth.resources.userPool.userPoolArn],
+  // Break intrinsic authStack cycle (UserPool <-> LambdaTrigger) by using pseudo-parameters
+  resources: [`arn:aws:cognito-idp:${Stack.of(postConfirmLambda).region}:${Stack.of(postConfirmLambda).account}:userpool/*`],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
