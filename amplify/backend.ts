@@ -188,7 +188,7 @@ const userHashSaltSsmArn = infraStack.formatArn({
   resourceName: userHashSaltPath.substring(1)
 });
 
-const mappingStack = funcStack; // Event sources pointing to lambdas MUST be in root scope to break circularity
+const mappingStack = dataStack; // Mappings are placed in dataStack so they don't force Root->Nested references
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
@@ -443,8 +443,10 @@ const scanUtilizationAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHan
 });
 scanUtilizationAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
 
-const receiptProcessingDLQ = new sqs.Queue(infraStack, 'ReceiptProcessingDLQ', { retentionPeriod: Duration.days(14) });
+const receiptProcessingQueueName = `bebo-rpq-${amplifyAppId}-${amplifyBranch}`.substring(0, 80);
+const receiptProcessingDLQ = new sqs.Queue(infraStack, 'ReceiptProcessingDLQ', { queueName: receiptProcessingQueueName + '-dlq', retentionPeriod: Duration.days(14) });
 const receiptProcessingQueue = new sqs.Queue(infraStack, 'ReceiptProcessingQueue', {
+  queueName: receiptProcessingQueueName,
   visibilityTimeout: Duration.seconds(30),
   deadLetterQueue: {
     queue: receiptProcessingDLQ,
@@ -457,8 +459,10 @@ grantSqsAccess(scanLambda, receiptProcessingQueue, ['sqs:SendMessage']);
 scanLambda.addEnvironment('RECEIPT_QUEUE_URL', receiptProcessingQueue.queueUrl);
 
 // ── Webhook Reliability Queue (P2-12) ──
-const webhookDLQ = new sqs.Queue(infraStack, 'WebhookReliabilityDLQ', { retentionPeriod: Duration.days(14) });
+const webhookQueueName = `bebo-whq-${amplifyAppId}-${amplifyBranch}`.substring(0, 80);
+const webhookDLQ = new sqs.Queue(infraStack, 'WebhookReliabilityDLQ', { queueName: webhookQueueName + '-dlq', retentionPeriod: Duration.days(14) });
 const webhookQueue = new sqs.Queue(infraStack, 'WebhookReliabilityQueue', {
+  queueName: webhookQueueName,
   visibilityTimeout: Duration.seconds(60), // Match Lambda timeout + headroom
   deadLetterQueue: {
     queue: webhookDLQ,
@@ -474,7 +478,7 @@ new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
   eventSourceArn: webhookQueue.queueArn,
   batchSize: 5,
 });
-webhookQueue.grantConsumeMessages(webhookDispatcherLambda);
+grantSqsAccess(webhookDispatcherLambda, webhookQueue, ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
 grantTableAccess(webhookDispatcherLambda, 'RefDataEvent', false);
 // Allow dispatcher to read per-brand webhook signing secrets (P2-12 HMAC signature)
 webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -490,7 +494,6 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptProcessorSQSSource', {
   batchSize: 10,
 });
 grantSqsAccess(receiptProcessorLambda, receiptProcessingQueue, ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
-receiptProcessingQueue.grantConsumeMessages(receiptProcessorLambda);
 grantSqsAccess(receiptProcessorLambda, webhookQueue, ['sqs:SendMessage']);
 receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
@@ -507,8 +510,10 @@ receiptProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // ── Receipt Analytics Pipeline (anonymous + BeboCard receipts → S3 analytics lake) ──
-const receiptAnalyticsDLQ = new sqs.Queue(infraStack, 'ReceiptAnalyticsDLQ', { retentionPeriod: Duration.days(14) });
+const receiptAnalyticsQueueName = `bebo-raq-${amplifyAppId}-${amplifyBranch}`.substring(0, 80);
+const receiptAnalyticsDLQ = new sqs.Queue(infraStack, 'ReceiptAnalyticsDLQ', { queueName: receiptAnalyticsQueueName + '-dlq', retentionPeriod: Duration.days(14) });
 const receiptAnalyticsQueue = new sqs.Queue(infraStack, 'ReceiptAnalyticsQueue', {
+  queueName: receiptAnalyticsQueueName,
   visibilityTimeout: Duration.seconds(90),
   deadLetterQueue: { queue: receiptAnalyticsDLQ, maxReceiveCount: 3 },
 });
@@ -528,7 +533,7 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource'
   batchSize: 10,
   reportBatchItemFailures: true,
 });
-receiptAnalyticsQueue.grantConsumeMessages(receiptAnalyticsProcessorLambda);
+grantSqsAccess(receiptAnalyticsProcessorLambda, receiptAnalyticsQueue, ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
 grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucketName, ['s3:PutObject']);
 receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
@@ -598,7 +603,7 @@ billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // Run daily at 02:00 UTC (processes monthly overages on the 1st)
-const billingRunRule = new events.Rule(infraStack, 'MonthlyBillingRunRule', {
+const billingRunRule = new events.Rule(dataStack, 'MonthlyBillingRunRule', {
   schedule: events.Schedule.expression('cron(0 2 * * ? *)'),
 });
 billingRunRule.addTarget(new eventsTargets.LambdaFunction(billingRunLambda));
@@ -620,7 +625,7 @@ const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Func
 qrRouterLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(qrRouterLambda, 'RefDataEvent', false);
 
-const qrApi = new apigw.RestApi(infraStack, 'QrRouterApi', { 
+const qrApi = new apigw.RestApi(dataStack, 'QrRouterApi', { 
   restApiName: `bebo-qr-router-${stage}`,
 });
 const qrIntegration = new apigw.LambdaIntegration(qrRouterLambda);
@@ -837,7 +842,7 @@ const { integration: invoice301, options: invoice301Opts } = make301('/v1/invoic
 scanApi.root.addResource('invoice').addMethod('POST', invoice301, invoice301Opts);
 
 // ── Tenant Analytics API (v1 & Legacy) ──
-const analyticsApi = new apigw.RestApi(infraStack, 'TenantAnalyticsApi', {
+const analyticsApi = new apigw.RestApi(dataStack, 'TenantAnalyticsApi', {
   restApiName: `bebo-tenant-analytics-${stage}`,
   deployOptions: { stageName: stage },
   defaultMethodOptions: { apiKeyRequired: true },
@@ -985,7 +990,7 @@ const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
 cfnBackfiller.reservedConcurrentExecutions = reservations.backfiller;
 
 // Schedule: Nightly at 2:00 AM UTC
-const cronRule = new events.Rule(infraStack, 'NightlyCompactionRule', {
+const cronRule = new events.Rule(dataStack, 'NightlyCompactionRule', {
   schedule: events.Schedule.expression('cron(0 2 * * ? *)'),
 });
 cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
@@ -997,7 +1002,7 @@ grantTableAccess(aggregatorLambda, 'UserDataEvent', false);
 grantTableAccess(aggregatorLambda, 'RefDataEvent', false);
 grantTableAccess(aggregatorLambda, 'ReportDataEvent', true);
 
-const aggregatorRule = new events.Rule(infraStack, 'NightlyAggregationRule', {
+const aggregatorRule = new events.Rule(dataStack, 'NightlyAggregationRule', {
   schedule: events.Schedule.expression('cron(0 1 * * ? *)'),
 });
 aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
@@ -1022,7 +1027,7 @@ createDlqAlarm(customSegmentDLQ, 'CustomSegmentEvaluatorDLQ');
 customSegmentLambda.addEnvironment('CUSTOM_SEGMENT_DLQ_URL', customSegmentDLQ.queueUrl);
 grantSqsAccess(customSegmentLambda, customSegmentDLQ, ['sqs:SendMessage']);
 
-const customSegmentRule = new events.Rule(infraStack, 'NightlyCustomSegmentRule', {
+const customSegmentRule = new events.Rule(dataStack, 'NightlyCustomSegmentRule', {
   schedule: events.Schedule.expression('cron(30 0 * * ? *)'),
   description: 'Nightly end-of-day custom segment evaluation at 00:30 UTC',
 });
@@ -1036,7 +1041,7 @@ const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lamb
 affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 
-const affiliateSyncRule = new events.Rule(infraStack, 'NightlyAffiliateSyncRule', {
+const affiliateSyncRule = new events.Rule(dataStack, 'NightlyAffiliateSyncRule', {
   schedule: events.Schedule.expression('cron(0 5 * * ? *)'),
   description: 'Nightly sync of affiliate offers from Commission Factory / Impact',
 });
@@ -1159,7 +1164,7 @@ cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: ['arn:aws:cognito-idp:*:*:userpool/*'],
 }));
 
-const cognitoExportRule = new events.Rule(infraStack, 'WeeklyCognitoExportRule', {
+const cognitoExportRule = new events.Rule(dataStack, 'WeeklyCognitoExportRule', {
   schedule: events.Schedule.expression('cron(0 2 ? * SUN *)'),
   description: 'Weekly Cognito user pool export for DR (P0-6)',
 });
@@ -1215,7 +1220,7 @@ brandHealthLambda.addEnvironment('USER_TABLE', userTable.tableName);
 grantTableAccess(brandHealthLambda, 'RefDataEvent', false);
 grantTableAccess(brandHealthLambda, 'UserDataEvent', false);
 
-const brandHealthRule = new events.Rule(infraStack, 'WeeklyBrandHealthRule', {
+const brandHealthRule = new events.Rule(dataStack, 'WeeklyBrandHealthRule', {
   schedule: events.Schedule.expression('cron(0 8 ? * MON *)'),
   description: 'Weekly brand health check — alerts CSM when scan volume drops >50% (P3-16)',
 });
@@ -1230,7 +1235,7 @@ pointsForecastLambda.addEnvironment('USER_TABLE', userTable.tableName);
 grantTableAccess(pointsForecastLambda, 'RefDataEvent', false);
 grantTableAccess(pointsForecastLambda, 'UserDataEvent', true);
 
-const pointsForecastRule = new events.Rule(infraStack, 'NightlyPointsForecastRule', {
+const pointsForecastRule = new events.Rule(dataStack, 'NightlyPointsForecastRule', {
   schedule: events.Schedule.expression('cron(15 1 * * ? *)'),
   description: 'Nightly points expiry prediction at 01:15 UTC (P3-1)',
 });
@@ -1243,7 +1248,7 @@ const spendProcessorLambda = backend.aggregatedSpendingProcessorFn.resources.lam
 spendProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
 grantTableAccess(spendProcessorLambda, 'UserDataEvent', true);
 
-const spendProcessorRule = new events.Rule(infraStack, 'NightlySpendProcessorRule', {
+const spendProcessorRule = new events.Rule(dataStack, 'NightlySpendProcessorRule', {
   schedule: events.Schedule.expression('cron(45 1 * * ? *)'),
   description: 'Nightly aggregated spending reports at 01:45 UTC (P3-2)',
 });
@@ -1271,7 +1276,7 @@ const schedulerLambda = backend.campaignSchedulerFn.resources.lambda as lambda.F
 schedulerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(schedulerLambda, 'RefDataEvent', true);
 
-const schedulerRule = new events.Rule(infraStack, 'CampaignSchedulerRule', {
+const schedulerRule = new events.Rule(dataStack, 'CampaignSchedulerRule', {
   schedule: events.Schedule.rate(Duration.minutes(5)),
   description: 'Precision lifecycle transition for scheduled brand campaigns (P2-2)',
 });
