@@ -521,13 +521,6 @@ scanLambda.addEnvironment('RECEIPT_ANALYTICS_QUEUE_URL', receiptAnalyticsQueue.q
 const receiptAnalyticsProcessorLambda = backend.receiptAnalyticsProcessorFn.resources.lambda as lambda.Function;
 receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 
-const globalAnalyticsSalt = process.env.GLOBAL_ANALYTICS_SALT;
-if (!globalAnalyticsSalt && stage === 'prod') {
-  throw new Error('GLOBAL_ANALYTICS_SALT must be set in the deployment environment for prod stage');
-}
-if (globalAnalyticsSalt) {
-  receiptAnalyticsProcessorLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', globalAnalyticsSalt);
-}
 
 new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource', {
   target: receiptAnalyticsProcessorLambda,
