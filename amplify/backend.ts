@@ -1255,8 +1255,9 @@ Tags.of(spendProcessorLambda).add('CostCenter', 'user-intel');
 const templateManagerLambda = backend.templateManagerFn.resources.lambda as lambda.Function;
 templateManagerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 const portalOrigin = process.env.PORTAL_ORIGIN;
-if (!portalOrigin && stage === 'prod') throw new Error('PORTAL_ORIGIN must be set in the deployment environment for prod stage');
-templateManagerLambda.addEnvironment('PORTAL_ORIGIN', portalOrigin ?? '');
+if (portalOrigin) {
+  templateManagerLambda.addEnvironment('PORTAL_ORIGIN', portalOrigin);
+}
 templateManagerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/INTERNAL_SIGNING_SECRET`],
