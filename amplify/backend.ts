@@ -272,7 +272,7 @@ const icebergDLQ = new sqs.Queue(infraStack, 'ReceiptIcebergDLQ', { retentionPer
 Tags.of(icebergDLQ).add('CostCenter', 'tenant-side');
 
 // ── Monitoring & Alarming (P0-1) ─────────────────────────────────────────────
-const alertsTopic = new sns.Topic(authStack, 'InfrastructureAlerts', {
+const alertsTopic = new sns.Topic(infraStack, 'InfrastructureAlerts', {
   displayName: `BeboCard ${stage.toUpperCase()} Infrastructure Alerts`,
 });
 
@@ -280,11 +280,32 @@ if (process.env.ALERTS_EMAIL) {
   alertsTopic.addSubscription(new snsSubscriptions.EmailSubscription(process.env.ALERTS_EMAIL));
 }
 
-new CfnOutput(authStack, 'AlertsTopicArn', {
+new CfnOutput(infraStack, 'AlertsTopicArn', {
   value: alertsTopic.topicArn,
-  description: 'Wire to PagerDuty/Slack via console or add ALERTS_EMAIL env var at deploy time',
 });
 
+// ── Break Circular Dependency in SNS Topic Policies ──
+// By default, cwActions.SnsAction attempts to attach a resource policy directly to the alertsTopic
+// granting the specific cloudwatch alarm SNS:Publish permission. This forces infraStack to import
+// EVERY alarm from the nested stacks (dataStack, scanApiStack), creating a fatal root<->nested cycle.
+// This generic policy allows ANY CloudFormation alarm in the account to publish, breaking the loop.
+alertsTopic.addToResourcePolicy(new iam.PolicyStatement({
+  actions: ['sns:Publish'],
+  principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
+  resources: [alertsTopic.topicArn],
+  conditions: {
+    StringEquals: { 'aws:SourceAccount': Stack.of(infraStack).account }
+  }
+}));
+
+class AcyclicSnsAction implements cloudwatch.IAlarmAction {
+  constructor(private topicArn: string) {}
+  bind(scope: import('constructs').Construct, alarm: cloudwatch.IAlarm): cloudwatch.AlarmActionConfig {
+    return { alarmActionArn: this.topicArn };
+  }
+}
+
+const acyclicAlertAction = new AcyclicSnsAction(alertsTopic.topicArn);
 const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
   const alarm = new cloudwatch.Alarm(Stack.of(queue), `${name}Alarm`, {
     metric: queue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
@@ -293,7 +314,7 @@ const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
     alarmDescription: `Messages detected in ${name}. Critical failure in data pipeline.`,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  alarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+  alarm.addAlarmAction(acyclicAlertAction);
   return alarm;
 };
 
@@ -320,7 +341,7 @@ const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
     alarmDescription: `Concurrency utilization for ${name} exceeded 75%. Consider increasing reservation.`,
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
   });
-  alarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+  alarm.addAlarmAction(acyclicAlertAction);
 };
 createUtilizationAlarm(postConfirmLambda, 'PostConfirmation');
 
@@ -332,7 +353,7 @@ const createHighTrafficUtilizationAlarm = (fn: lambda.Function, name: string) =>
     alarmDescription: `Concurrency utilization for ${name} exceeded 75%. Scale check required.`,
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
   });
-  alarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+  alarm.addAlarmAction(acyclicAlertAction);
 };
 
 postConfirmLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
@@ -431,7 +452,7 @@ const scanThrottleAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandle
   alarmDescription: 'Scan handler is being throttled! Concurrency ceiling reached.',
   treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 });
-scanThrottleAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+scanThrottleAlarm.addAlarmAction(acyclicAlertAction);
 
 // Utilization Alarm — scan-handler: fires when concurrent executions exceed 75% of reservation (150/200)
 const scanUtilizationAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerUtilizationAlarm', {
@@ -441,7 +462,7 @@ const scanUtilizationAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHan
   alarmDescription: 'Scan handler concurrency is exceeding 75% of reserved capacity. Scaling ceiling approached.',
   treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 });
-scanUtilizationAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+scanUtilizationAlarm.addAlarmAction(acyclicAlertAction);
 
 const receiptProcessingQueueName = `bebo-rpq-${amplifyAppId}-${amplifyBranch}`.substring(0, 80);
 const receiptProcessingDLQ = new sqs.Queue(infraStack, 'ReceiptProcessingDLQ', { queueName: receiptProcessingQueueName + '-dlq', retentionPeriod: Duration.days(14) });
@@ -1184,7 +1205,7 @@ const userTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'UserTableSystemErro
   evaluationPeriods: 2,
   alarmDescription: 'UserDataEvent DynamoDB system errors elevated',
 });
-userTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+userTableErrorAlarm.addAlarmAction(acyclicAlertAction);
 
 const refTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'RefTableSystemErrors', {
   metric: refDataTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
@@ -1192,7 +1213,7 @@ const refTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'RefTableSystemErrors
   evaluationPeriods: 2,
   alarmDescription: 'RefDataEvent DynamoDB system errors elevated',
 });
-refTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+refTableErrorAlarm.addAlarmAction(acyclicAlertAction);
 
 const adminTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'AdminTableSystemErrors', {
   metric: adminTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
@@ -1200,7 +1221,7 @@ const adminTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'AdminTableSystemEr
   evaluationPeriods: 2,
   alarmDescription: 'AdminDataEvent DynamoDB system errors elevated',
 });
-adminTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+adminTableErrorAlarm.addAlarmAction(acyclicAlertAction);
 
 // "Any table in error" composite — DR-level signal; if even one table is failing, page on-call
 const drCompositeAlarm = new cloudwatch.CompositeAlarm(dataStack, 'BebocardDRCompositeAlarm', {
@@ -1211,7 +1232,7 @@ const drCompositeAlarm = new cloudwatch.CompositeAlarm(dataStack, 'BebocardDRCom
     cloudwatch.AlarmRule.fromAlarm(adminTableErrorAlarm, cloudwatch.AlarmState.ALARM),
   ),
 });
-drCompositeAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+drCompositeAlarm.addAlarmAction(acyclicAlertAction);
 
 // ── P3-16: Brand Health Monitor Lambda (weekly, 50%-drop CSM alert) ───────────
 const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
