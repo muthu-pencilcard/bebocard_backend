@@ -32,6 +32,7 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { monotonicFactory } from 'ulid';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
+import bwipjs from 'bwip-js';
 
 // ── Clients ───────────────────────────────────────────────────────────────────
 
