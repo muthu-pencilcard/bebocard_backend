@@ -197,8 +197,8 @@ const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TA
 const restApiUrlParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/SCAN_API_URL`;
 const USER_POOL_ID_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_POOL_ID`;
 
-new ssm.StringParameter(infraStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
-new ssm.StringParameter(infraStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
+new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
+new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
 // ── Store Cognito UserPoolId in auth stack's own SSM param (no data→auth token) ──
 new ssm.StringParameter(authStack, 'UserPoolIdParam', {
   parameterName: USER_POOL_ID_PARAM,
@@ -796,7 +796,7 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 const scanApiUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod/`;
 postConfirmLambda.addEnvironment('SCAN_API_URL', scanApiUrl);
 
-new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
+new ssm.StringParameter(scanApiStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
   stringValue: scanApiUrl,
 });
@@ -908,7 +908,7 @@ new wafv2.CfnWebACLAssociation(scanApiStack, 'WafAssocScanApi', {
   webAclArn: publicWebAcl.attrArn,
 });
 // analyticsApi is already in infraStack — no cross-stack reference
-new wafv2.CfnWebACLAssociation(infraStack, 'WafAssocAnalyticsApi', {
+new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocAnalyticsApi', {
   resourceArn: `arn:aws:apigateway:${infraStack.region}::/restapis/${analyticsApi.restApiId}/stages/${analyticsApi.deploymentStage.stageName}`,
   webAclArn: publicWebAcl.attrArn,
 });
@@ -1113,7 +1113,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
         width: 24,
       }),
     ],
-    [
+    /* [
       new cloudwatch.GraphWidget({
         title: 'Scan API Latency (p95)',
         left: [scanLambda.metricDuration({ statistic: 'p95', label: 'Scan Handler' })],
@@ -1127,7 +1127,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
         ],
         width: 12,
       }),
-    ],
+    ], */
     [
       new cloudwatch.GraphWidget({
         title: 'Webhook DLQ Depth (Retries Exhausted)',
@@ -1178,7 +1178,7 @@ new CfnOutput(infraStack, 'CognitoExportBucketName', {
 });
 
 // ── P0-6: Composite DR Alarm (3+ tables in error = infrastructure incident) ──
-const userTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'UserTableSystemErrors', {
+const userTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'UserTableSystemErrors', {
   metric: userTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
   threshold: 5,
   evaluationPeriods: 2,
@@ -1186,7 +1186,7 @@ const userTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'UserTableSystemErr
 });
 userTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
 
-const refTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'RefTableSystemErrors', {
+const refTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'RefTableSystemErrors', {
   metric: refDataTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
   threshold: 5,
   evaluationPeriods: 2,
@@ -1194,7 +1194,7 @@ const refTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'RefTableSystemError
 });
 refTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
 
-const adminTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'AdminTableSystemErrors', {
+const adminTableErrorAlarm = new cloudwatch.Alarm(dataStack, 'AdminTableSystemErrors', {
   metric: adminTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
   threshold: 5,
   evaluationPeriods: 2,
@@ -1203,7 +1203,7 @@ const adminTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'AdminTableSystemE
 adminTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
 
 // "Any table in error" composite — DR-level signal; if even one table is failing, page on-call
-const drCompositeAlarm = new cloudwatch.CompositeAlarm(infraStack, 'BebocardDRCompositeAlarm', {
+const drCompositeAlarm = new cloudwatch.CompositeAlarm(dataStack, 'BebocardDRCompositeAlarm', {
   alarmDescription: 'P0-6: One or more DynamoDB tables in error state — potential infrastructure incident. Initiate DR runbook.',
   alarmRule: cloudwatch.AlarmRule.anyOf(
     cloudwatch.AlarmRule.fromAlarm(userTableErrorAlarm, cloudwatch.AlarmState.ALARM),
