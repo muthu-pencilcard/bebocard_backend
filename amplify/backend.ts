@@ -139,12 +139,12 @@ const tableNames = {
   REPORT_TABLE: reportTable.tableName,
 };
 
-const cfnUserTable = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent'];
+const cfnUserTable = backend.data.resources.tables['UserDataEvent']?.node.defaultChild as dynamodb.CfnTable | undefined;
 
 // ── PITR — explicitly enable on all tables (Amplify Gen 2 does not enable by default) ──
-const cfnTables = (backend.data.resources as any).cfnResources?.cfnTables ?? {};
 ['UserDataEvent', 'RefDataEvent', 'AdminDataEvent', 'ReportDataEvent'].forEach(tableName => {
-  cfnTables[tableName]?.addPropertyOverride('PointInTimeRecoverySpecification', { PointInTimeRecoveryEnabled: true });
+  const cfnTable = backend.data.resources.tables[tableName]?.node.defaultChild as dynamodb.CfnTable | undefined;
+  cfnTable?.addPropertyOverride('PointInTimeRecoverySpecification', { PointInTimeRecoveryEnabled: true });
 });
 
 // ── Auth Overrides — Password Policy (moved from defineAuth due to schema change) ──
@@ -563,8 +563,10 @@ const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Func
 segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
 // USER_HASH_SALT environment removed as it is not used in the segment-processor code
 grantTableAccess(segmentLambda, 'UserDataEvent', true);
-if (!cfnUserTable) throw new Error('UserDataEvent CfnTable not found — DynamoDB Streams cannot be enabled. Check Amplify Gen 2 cfnResources API compatibility.');
-cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
+// Enable NEW_IMAGE streams if not already set by Amplify Gen 2 (needed for segment-processor + receipt-iceberg-writer)
+if (cfnUserTable && !cfnUserTable.streamSpecification) {
+  cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
+}
 
 const segmentDLQ = new sqs.Queue(infraStack, 'SegmentProcessorDLQ', { retentionPeriod: Duration.days(14) });
 createDlqAlarm(segmentDLQ, 'SegmentProcessorDLQ', 5); // Allow small batch jitter before alerting
