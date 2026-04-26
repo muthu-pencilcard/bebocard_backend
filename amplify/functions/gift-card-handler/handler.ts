@@ -32,7 +32,7 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { monotonicFactory } from 'ulid';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
-import bwipjs from 'bwip-js';
+import bwipjs from 'bwip-js/node';
 
 // ── Clients ───────────────────────────────────────────────────────────────────
 
@@ -939,6 +939,22 @@ async function sendGiftEmail(opts: {
   }));
 }
 
+async function generateBarcodeBase64(text: string): Promise<string | null> {
+  try {
+    const png = await bwipjs.toBuffer({
+      bcid:            'code128',
+      text,
+      scale:           3,
+      height:          12,
+      includetext:     false,
+      backgroundcolor: 'ffffff',
+    });
+    return `data:image/png;base64,${Buffer.from(png).toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
 async function sendPurchaseConfirmation(opts: {
   permULID: string;
   buyerEmail: string;
@@ -957,6 +973,9 @@ async function sendPurchaseConfirmation(opts: {
   const expiryFormatted = expiryDate
     ? new Date(expiryDate).toLocaleDateString('en-AU', { month: 'short', year: 'numeric' })
     : null;
+
+  // Generate scannable barcode — fall back gracefully if generation fails
+  const barcodeDataUrl = await generateBarcodeBase64(cardNumber);
 
   const html = `
     <div style="font-family:system-ui,Arial,sans-serif;max-width:520px;margin:0 auto;background:#f9fafb;padding:32px 20px">
@@ -979,6 +998,13 @@ async function sendPurchaseConfirmation(opts: {
         </div>` : ''}
         ${expiryFormatted ? `<div style="font-size:12px;opacity:0.65">Expires ${expiryFormatted}</div>` : ''}
       </div>
+
+      ${barcodeDataUrl ? `
+      <div style="background:white;border-radius:16px;padding:20px 24px;text-align:center;margin-bottom:20px;border:1px solid #e5e7eb">
+        <div style="font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px">Scan in store</div>
+        <img src="${barcodeDataUrl}" alt="Gift card barcode" style="max-width:320px;width:100%;height:auto;display:block;margin:0 auto" />
+        <div style="font-size:13px;color:#374151;font-family:monospace;margin-top:10px;letter-spacing:1.5px">${formattedCardNumber}</div>
+      </div>` : ''}
 
       <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:16px;margin-bottom:20px">
         <p style="color:#92400e;font-size:13px;margin:0;line-height:1.5">
