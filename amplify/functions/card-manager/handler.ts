@@ -155,7 +155,7 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     case 'updateGiftCardBalance': return updateBalance(permULID, args.cardSK!, args.balance!);
     // Invoices
     case 'addInvoice': return addInvoice(permULID, owner, args);
-    case 'updateInvoiceStatus': return updateInvoiceStatus(permULID, args.invoiceSK!, args.invoiceStatus!, args.paidDate);
+    case 'updateInvoiceStatus': return updateInvoiceStatus(permULID, args.invoiceSK!, args.status!, args.paidDate);
     case 'removeInvoice': return archiveRecord(permULID, owner, args.invoiceSK!);
     // Receipts
     case 'addReceipt': return addReceipt(permULID, owner, args);

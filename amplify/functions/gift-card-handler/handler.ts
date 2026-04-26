@@ -45,15 +45,31 @@ const USER_TABLE   = process.env.USER_TABLE!;
 const REF_TABLE    = process.env.REF_TABLE ?? process.env.REFDATA_TABLE!;
 const KMS_KEY_ARN  = process.env.GIFT_CARD_KMS_KEY_ARN!;
 const FROM_EMAIL              = process.env.SES_FROM_EMAIL ?? 'noreply@bebocard.com';
-const IS_SANDBOX              = process.env.AMPLIFY_DATA_STACK_NAME?.toLowerCase().includes('prod') === false;
-if (!IS_SANDBOX && !process.env.STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY is required in production');
-if (!IS_SANDBOX && !process.env.STRIPE_WEBHOOK_SECRET) throw new Error('STRIPE_WEBHOOK_SECRET is required in production');
-const STRIPE_SECRET_KEY       = process.env.STRIPE_SECRET_KEY ?? 'mock';
-const STRIPE_WEBHOOK_SECRET   = process.env.STRIPE_WEBHOOK_SECRET ?? '';
 const GIFT_TOKEN_SECRET       = process.env.GIFT_TOKEN_SECRET ?? 'dev-secret';
 const APP_BASE_URL            = process.env.APP_BASE_URL ?? 'https://app.bebocard.com';
 
 const CORS = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' };
+
+function isProductionRuntime(): boolean {
+  if (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true') return false;
+
+  const stackName = process.env.AMPLIFY_DATA_STACK_NAME?.toLowerCase() ?? '';
+  if (!stackName) return false;
+
+  return stackName.includes('prod');
+}
+
+function getStripeConfig(): { secretKey: string; webhookSecret: string } {
+  const secretKey = process.env.STRIPE_SECRET_KEY ?? 'mock';
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET ?? '';
+
+  if (isProductionRuntime()) {
+    if (!process.env.STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY is required in production');
+    if (!process.env.STRIPE_WEBHOOK_SECRET) throw new Error('STRIPE_WEBHOOK_SECRET is required in production');
+  }
+
+  return { secretKey, webhookSecret };
+}
 
 // ── Entry point — handles both AppSync resolver and REST (API Gateway) ────────
 
@@ -72,12 +88,14 @@ export const handler = async (event: unknown) => {
 async function handleAppSync(event: AppSyncResolverEvent<Record<string, unknown>>) {
   const field    = event.info.fieldName;
   const args     = event.arguments ?? {};
-  const sub      = (event.identity as { sub?: string } | null)?.sub;
+  const identity = event.identity as { sub?: string; claims?: Record<string, unknown> } | null;
+  const sub      = identity?.sub;
+  const email    = identity?.claims?.email as string | undefined;
   const permULID = await resolvePermULID(sub);
 
   switch (field) {
     case 'purchaseForSelf':
-      return handlePurchaseForSelf(args, permULID);
+      return handlePurchaseForSelf(args, permULID, email);
     case 'purchaseAsGift':
       return handlePurchaseAsGift(args, permULID);
     case 'syncGiftCardBalance':
@@ -113,12 +131,17 @@ async function handleRest(event: Parameters<APIGatewayProxyHandler>[0]) {
 async function handlePurchaseForSelf(
   args: Record<string, unknown>,
   permULID: string,
+  buyerEmail?: string,
 ): Promise<{ checkoutUrl: string; sessionId: string }> {
   const { brandId, skuId, denomination, currency } = args as {
     brandId: string; skuId: string; denomination: number; currency: string;
   };
 
+  if (denomination <= 0) throw new Error('Denomination must be greater than 0');
+
   const catalog = await fetchCatalogItem(brandId, skuId);
+  validateDenomination(catalog, denomination);
+
   const sessionId = ulid();
 
   // Store pending session so webhook knows what to fulfil
@@ -129,6 +152,7 @@ async function handlePurchaseForSelf(
       sK:          'metadata',
       type:        'self',
       permULID,
+      buyerEmail:  buyerEmail ?? null,
       brandId,
       skuId,
       denomination,
@@ -152,7 +176,7 @@ async function handlePurchaseForSelf(
     metadata:     { sessionId, type: 'self', permULID },
   });
 
-  if (STRIPE_SECRET_KEY === 'mock') {
+  if (getStripeConfig().secretKey === 'mock') {
     // If mocking, we immediately trigger the fulfillment logic as if Stripe called our webhook
     console.log('[Mock Mode] Triggering immediate fulfillment for self-purchase');
     await handleStripeWebhook({
@@ -182,8 +206,11 @@ async function handlePurchaseAsGift(
   };
 
   if (!recipientEmail?.trim()) throw new Error('recipientEmail is required');
+  if (denomination <= 0) throw new Error('Denomination must be greater than 0');
 
   const catalog   = await fetchCatalogItem(brandId, skuId);
+  validateDenomination(catalog, denomination);
+
   const sessionId = ulid();
 
   await dynamo.send(new PutCommand({
@@ -226,11 +253,12 @@ async function handlePurchaseAsGift(
 // ── Stripe webhook — fulfils after checkout.session.completed ─────────────────
 
 async function handleStripeWebhook(event: Parameters<APIGatewayProxyHandler>[0]) {
+  const { secretKey, webhookSecret } = getStripeConfig();
   const sig  = event.headers?.['stripe-signature'] ?? event.headers?.['Stripe-Signature'];
   const body = event.body ?? '';
 
   // Verify Stripe signature
-  if (STRIPE_SECRET_KEY !== 'mock' && STRIPE_WEBHOOK_SECRET && !verifyStripeSignature(body, sig ?? '', STRIPE_WEBHOOK_SECRET)) {
+  if (secretKey !== 'mock' && webhookSecret && !verifyStripeSignature(body, sig ?? '', webhookSecret)) {
     return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid signature' }) };
   }
 
@@ -343,7 +371,17 @@ async function handleStripeWebhook(event: Parameters<APIGatewayProxyHandler>[0])
     );
 
     // SES purchase confirmation to buyer
-    await sendPurchaseConfirmation(session.permULID as string, session.brandName as string, session.denomination as number, session.currency as string);
+    if (session.buyerEmail) {
+      await sendPurchaseConfirmation(
+        session.permULID as string, 
+        session.buyerEmail as string, 
+        session.brandName as string, 
+        session.denomination as number, 
+        session.currency as string,
+        card.cardNumber,
+        card.pin
+      );
+    }
 
     // Write RECEIPT# so the Finance tab reflects the gift card purchase
     const receiptId = ulid();
@@ -736,7 +774,9 @@ async function createStripeCheckoutSession(opts: {
   cancelUrl: string;
   metadata: Record<string, string>;
 }): Promise<string> {
-  if (STRIPE_SECRET_KEY === 'mock') {
+  const { secretKey } = getStripeConfig();
+
+  if (secretKey === 'mock') {
     console.log('[Stripe Mock] Creating simulated checkout session', opts.sessionId);
     // In mock mode, the "success" url is actually the webhook callback URL 
     // to simulate the asynchronous fulfillment without real Stripe involvement.
@@ -759,7 +799,7 @@ async function createStripeCheckoutSession(opts: {
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${STRIPE_SECRET_KEY}`,
+      'Authorization': `Bearer ${secretKey}`,
       'Content-Type':  'application/x-www-form-urlencoded',
     },
     body: params.toString(),
@@ -895,10 +935,35 @@ async function sendGiftEmail(opts: {
   }));
 }
 
-async function sendPurchaseConfirmation(permULID: string, brandName: string, denomination: number, currency: string): Promise<void> {
-  // Best-effort — fetch user email from Cognito or UserDataEvent
-  // Skipped if not resolvable; the card is already in the wallet
-  console.log(`[gift-card-handler] Purchase confirmed: ${permULID} bought ${brandName} ${currency}${denomination}`);
+async function sendPurchaseConfirmation(permULID: string, buyerEmail: string, brandName: string, denomination: number, currency: string, cardNumber: string, pin: string): Promise<void> {
+  const subject = `Your ${brandName} gift card receipt`;
+  const html = `
+    <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+      <h2 style="color:#6366f1">Receipt: ${brandName} Gift Card</h2>
+      <p>Thank you for purchasing a <strong>${brandName}</strong> gift card worth ${currency} ${denomination}.</p>
+      <div style="background:#f4f4f5;padding:16px;border-radius:8px;margin:24px 0">
+        <p style="margin:0;font-size:14px;color:#555">Card Number</p>
+        <p style="margin:4px 0 16px 0;font-size:18px;font-weight:bold;letter-spacing:1px;color:#000">${cardNumber}</p>
+        <p style="margin:0;font-size:14px;color:#555">PIN</p>
+        <p style="margin:4px 0 0 0;font-size:18px;font-weight:bold;color:#000">${pin}</p>
+      </div>
+      <p>The gift card is now also active in your BeboCard wallet, where your PIN is securely stored on your device.</p>
+      <p style="color:#999;font-size:12px;margin-top:24px">Powered by BeboCard &middot; Privacy-first loyalty wallet</p>
+    </div>`;
+
+  try {
+    await ses.send(new SendEmailCommand({
+      Source: FROM_EMAIL,
+      Destination: { ToAddresses: [buyerEmail] },
+      Message: {
+        Subject: { Data: subject },
+        Body: { Html: { Data: html } },
+      },
+    }));
+    console.log(`[gift-card-handler] Purchase confirmed: ${permULID} bought ${brandName} ${currency}${denomination}`);
+  } catch (err) {
+    console.warn(`[gift-card-handler] Failed to send purchase confirmation to ${buyerEmail}:`, err);
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -916,7 +981,22 @@ async function fetchCatalogItem(brandId: string, skuId: string) {
     currency:       desc.currency as string ?? 'AUD',
     brandName:      desc.brandName as string ?? brandId,
     brandColor:     desc.brandColor as string | undefined,
+    catalogDenomination: desc.denomination as number | undefined,
+    catalogMinDenomination: desc.minDenomination as number | undefined,
+    catalogMaxDenomination: desc.maxDenomination as number | undefined,
   };
+}
+
+function validateDenomination(catalog: Awaited<ReturnType<typeof fetchCatalogItem>>, requested: number) {
+  if (catalog.catalogDenomination !== undefined && catalog.catalogDenomination !== requested) {
+    throw new Error(`Invalid denomination: ${requested}. Expected fixed value of ${catalog.catalogDenomination}`);
+  }
+  if (catalog.catalogMinDenomination !== undefined && requested < catalog.catalogMinDenomination) {
+    throw new Error(`Invalid denomination: ${requested}. Minimum value is ${catalog.catalogMinDenomination}`);
+  }
+  if (catalog.catalogMaxDenomination !== undefined && requested > catalog.catalogMaxDenomination) {
+    throw new Error(`Invalid denomination: ${requested}. Maximum value is ${catalog.catalogMaxDenomination}`);
+  }
 }
 
 async function resolvePermULID(sub: string | undefined): Promise<string> {

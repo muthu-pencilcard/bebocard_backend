@@ -167,13 +167,12 @@ const stage = amplifyBranch === 'main' ? 'prod' : 'dev';
 const branchName = amplifyBranch === 'main' ? 'prod' : amplifyBranch;
 
 // ── Concurrency Reservations (P0-5) ──
-// Scaled down drastically to prevent account limit exhaustion during early phases
 const reservations = {
-  postConfirm: undefined,
-  cardManager: undefined,
-  scanHandler: undefined,
-  receiptProcessor: undefined,
-  backfiller: undefined,
+  postConfirm: 10,
+  cardManager: 50,
+  scanHandler: 200,
+  receiptProcessor: 50,
+  backfiller: 5,
 };
 const dataStack = Stack.of(userTable);
 const authStack = backend.auth.resources.userPool.stack;
@@ -208,11 +207,10 @@ new ssm.StringParameter(authStack, 'UserPoolIdParam', {
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
 const analyticsBucketName = `bebocard-analytics-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
-// Adoption Pattern: Attempt to use existing bucket to prevent CREATE_FAILED collision on failed re-runs
-const analyticsBucket = s3.Bucket.fromBucketName(infraStack, 'AnalyticsLakeImport', analyticsBucketName) || new s3.Bucket(infraStack, 'AnalyticsLake', {
+const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
   bucketName: analyticsBucketName,
   removalPolicy: RemovalPolicy.RETAIN,
-  versioned: true, 
+  versioned: true,
   intelligentTieringConfigurations: [
     { name: 'DefaultTiering', archiveAccessTierTime: Duration.days(90), deepArchiveAccessTierTime: Duration.days(180) }
   ],
@@ -224,9 +222,8 @@ const analyticsBucket = s3.Bucket.fromBucketName(infraStack, 'AnalyticsLakeImpor
 
 // ── Remote Configuration (P2-2) ──
 // Allows instant UI/Feature updates without App Store reviews
-// ── Remote Configuration (P2-2) ──
 const remoteConfigBucketName = `bebocard-config-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
-const remoteConfigBucket = s3.Bucket.fromBucketName(infraStack, 'RemoteConfigImport', remoteConfigBucketName) || new s3.Bucket(infraStack, 'RemoteConfig', {
+const remoteConfigBucket = new s3.Bucket(infraStack, 'RemoteConfig', {
   bucketName: remoteConfigBucketName,
   versioned: true,
   publicReadAccess: true, 
@@ -258,13 +255,10 @@ const exportsBucket = new s3.Bucket(infraStack, 'UserDataExports', {
 const glueDatabaseName = `bebo_analytics_${stage}`;
 const athenaWorkgroupName = `bebo-intel-${stage}`;
 
-const glueDatabase = (backend.data.resources as any).cfnResources?.cfnTables?.['UserDataEvent']
-  ?.stack.node.defaultChild.parent.parent.parent.node.findAll()
-  .find((n: any) => n.cfnResourceType === 'AWS::Glue::Database') 
-  ?? new glue.CfnDatabase(infraStack, 'AnalyticsDatabase', {
-    catalogId: infraStack.account,
-    databaseInput: { name: glueDatabaseName, description: 'BeboCard Intelligence Data Lake' },
-  });
+const glueDatabase = new glue.CfnDatabase(infraStack, 'AnalyticsDatabase', {
+  catalogId: infraStack.account,
+  databaseInput: { name: glueDatabaseName, description: 'BeboCard Intelligence Data Lake' },
+});
 
 const athenaWorkgroup = new athena.CfnWorkGroup(infraStack, 'AnalyticsWorkgroup', {
   name: athenaWorkgroupName,
@@ -282,8 +276,14 @@ const alertsTopic = new sns.Topic(authStack, 'InfrastructureAlerts', {
   displayName: `BeboCard ${stage.toUpperCase()} Infrastructure Alerts`,
 });
 
-// Subscription wired manually once a real ops webhook URL (PagerDuty/Slack) is provisioned.
-// SNS validates HTTPS endpoints on creation — placeholder URLs will fail at deploy time.
+if (process.env.ALERTS_EMAIL) {
+  alertsTopic.addSubscription(new snsSubscriptions.EmailSubscription(process.env.ALERTS_EMAIL));
+}
+
+new CfnOutput(authStack, 'AlertsTopicArn', {
+  value: alertsTopic.topicArn,
+  description: 'Wire to PagerDuty/Slack via console or add ALERTS_EMAIL env var at deploy time',
+});
 
 const createDlqAlarm = (queue: sqs.IQueue, name: string, threshold = 1) => {
   const alarm = new cloudwatch.Alarm(Stack.of(queue), `${name}Alarm`, {
@@ -341,10 +341,9 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
 }));
-postConfirmLambda.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonCognitoPowerUser'));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminUpdateUserAttributes'],
-  resources: [`arn:aws:cognito-idp:*:*:userpool/*`],
+  resources: [backend.auth.resources.userPool.userPoolArn],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
@@ -355,7 +354,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail', 'ses:SendRawEmail'],
-  resources: ['*'], // In production, scope this to the verified domain
+  resources: [`arn:aws:ses:*:${authStack.account}:identity/bebocard.com.au`],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -522,6 +521,14 @@ scanLambda.addEnvironment('RECEIPT_ANALYTICS_QUEUE_URL', receiptAnalyticsQueue.q
 const receiptAnalyticsProcessorLambda = backend.receiptAnalyticsProcessorFn.resources.lambda as lambda.Function;
 receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
 
+const globalAnalyticsSalt = process.env.GLOBAL_ANALYTICS_SALT;
+if (!globalAnalyticsSalt && stage === 'prod') {
+  throw new Error('GLOBAL_ANALYTICS_SALT must be set in the deployment environment for prod stage');
+}
+if (globalAnalyticsSalt) {
+  receiptAnalyticsProcessorLambda.addEnvironment('GLOBAL_ANALYTICS_SALT', globalAnalyticsSalt);
+}
+
 new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource', {
   target: receiptAnalyticsProcessorLambda,
   eventSourceArn: receiptAnalyticsQueue.queueArn,
@@ -532,7 +539,10 @@ receiptAnalyticsQueue.grantConsumeMessages(receiptAnalyticsProcessorLambda);
 grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucketName, ['s3:PutObject']);
 receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
-  resources: ['arn:aws:secretsmanager:*:*:secret:bebocard/tenant-analytics-salt/*'],
+  resources: [
+    'arn:aws:secretsmanager:*:*:secret:bebocard/tenant-analytics-salt/*',
+    'arn:aws:secretsmanager:*:*:secret:bebocard/GLOBAL_ANALYTICS_SALT*',
+  ],
 }));
 
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
@@ -560,7 +570,8 @@ const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Func
 segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
 // USER_HASH_SALT environment removed as it is not used in the segment-processor code
 grantTableAccess(segmentLambda, 'UserDataEvent', true);
-if (cfnUserTable) cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
+if (!cfnUserTable) throw new Error('UserDataEvent CfnTable not found — DynamoDB Streams cannot be enabled. Check Amplify Gen 2 cfnResources API compatibility.');
+cfnUserTable.streamSpecification = { streamViewType: 'NEW_IMAGE' };
 
 const segmentDLQ = new sqs.Queue(infraStack, 'SegmentProcessorDLQ', { retentionPeriod: Duration.days(14) });
 createDlqAlarm(segmentDLQ, 'SegmentProcessorDLQ', 5); // Allow small batch jitter before alerting
@@ -579,11 +590,11 @@ userTable.grantStreamRead(segmentLambda);
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
-billingRunLambda.addEnvironment('REFDATA_TABLE', 'RefDataEvent');
+billingRunLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(billingRunLambda, 'RefDataEvent', true);
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail'],
-  resources: ['*'], // In production, scope to the verified identity
+  resources: [`arn:aws:ses:*:${infraStack.account}:identity/bebocard.com.au`],
 }));
 
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -780,12 +791,10 @@ const billingRes = scanV1.addResource('billing');
 const stripeWebhookRes = billingRes.addResource('stripe-webhook');
 stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLambda), { apiKeyRequired: false });
 
-// We use a decoupled environment variable for the API URL to break the auth -> data circular dependency.
-postConfirmLambda.addEnvironment('SCAN_API_URL', `https://api.bebocard.app/v1/`); // Placeholder pattern for now
-
 // Break Circularity: Store the API URL in the ROOT stack (infraStack), not the scanApiStack.
 // We use a literal ARN pattern — the URL is deterministic given restApiId and stage
 const scanApiUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod/`;
+postConfirmLambda.addEnvironment('SCAN_API_URL', scanApiUrl);
 
 new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
@@ -880,10 +889,7 @@ grantSqsAccess(exporterLambda, webhookQueue, ['sqs:SendMessage']);
 exporterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 
 
-// Secrets for FCM
-// Using environment variable with fallback to prevent stack synthesis crashes if the secret isn't pre-configured in SSM.
-const firebaseSecretValue = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '{}';
-exporterLambda.addEnvironment('FIREBASE_SERVICE_ACCOUNT_JSON', firebaseSecretValue);
+// FIREBASE_SERVICE_ACCOUNT_JSON is declared via secret() in the resource file and injected by Amplify at deploy time.
 
 // ── WAF ──
 const publicWebAcl = new wafv2.CfnWebACL(infraStack, 'PublicApiWebAcl', {
@@ -896,14 +902,16 @@ const publicWebAcl = new wafv2.CfnWebACL(infraStack, 'PublicApiWebAcl', {
   ],
 });
 
-/*
-[scanApi, analyticsApi].forEach((api, idx) => {
-  new wafv2.CfnWebACLAssociation(infraStack, `WafAssoc${idx}`, {
-    resourceArn: `arn:aws:apigateway:*::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
-    webAclArn: publicWebAcl.attrArn,
-  });
+// scanApi is in scanApiStack (nested under infraStack) — place association there to avoid exporting restApiId cross-stack
+new wafv2.CfnWebACLAssociation(scanApiStack, 'WafAssocScanApi', {
+  resourceArn: `arn:aws:apigateway:${Stack.of(scanApiStack).region}::/restapis/${scanApi.restApiId}/stages/${scanApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
 });
-*/
+// analyticsApi is already in infraStack — no cross-stack reference
+new wafv2.CfnWebACLAssociation(infraStack, 'WafAssocAnalyticsApi', {
+  resourceArn: `arn:aws:apigateway:${infraStack.region}::/restapis/${analyticsApi.restApiId}/stages/${analyticsApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
+});
 
 // ── Analytics Compactor (P1-5) ──
 const compactorLambda = backend.analyticsCompactorFn.resources.lambda as lambda.Function;
@@ -1132,7 +1140,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
 
 // ── P0-6: Cognito Export Lambda (weekly DR backup) ───────────────────────────
 const cognitoExportBucketName = `bebocard-cognito-exports-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
-const cognitoExportBucket = s3.Bucket.fromBucketName(infraStack, 'CognitoExportsImport', cognitoExportBucketName) || new s3.Bucket(infraStack, 'CognitoExports', {
+const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
   bucketName: cognitoExportBucketName,
   encryption: s3.BucketEncryption.S3_MANAGED,
   versioned: true,
@@ -1176,21 +1184,26 @@ const userTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'UserTableSystemErr
   evaluationPeriods: 2,
   alarmDescription: 'UserDataEvent DynamoDB system errors elevated',
 });
+userTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+
 const refTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'RefTableSystemErrors', {
   metric: refDataTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
   threshold: 5,
   evaluationPeriods: 2,
   alarmDescription: 'RefDataEvent DynamoDB system errors elevated',
 });
+refTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
+
 const adminTableErrorAlarm = new cloudwatch.Alarm(infraStack, 'AdminTableSystemErrors', {
   metric: adminTable.metric('SystemErrors', { statistic: 'Sum', period: Duration.minutes(5) }),
   threshold: 5,
   evaluationPeriods: 2,
   alarmDescription: 'AdminDataEvent DynamoDB system errors elevated',
 });
+adminTableErrorAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
 
 // "Any table in error" composite — DR-level signal; if even one table is failing, page on-call
-new cloudwatch.CompositeAlarm(infraStack, 'BebocardDRCompositeAlarm', {
+const drCompositeAlarm = new cloudwatch.CompositeAlarm(infraStack, 'BebocardDRCompositeAlarm', {
   alarmDescription: 'P0-6: One or more DynamoDB tables in error state — potential infrastructure incident. Initiate DR runbook.',
   alarmRule: cloudwatch.AlarmRule.anyOf(
     cloudwatch.AlarmRule.fromAlarm(userTableErrorAlarm, cloudwatch.AlarmState.ALARM),
@@ -1198,6 +1211,7 @@ new cloudwatch.CompositeAlarm(infraStack, 'BebocardDRCompositeAlarm', {
     cloudwatch.AlarmRule.fromAlarm(adminTableErrorAlarm, cloudwatch.AlarmState.ALARM),
   ),
 });
+drCompositeAlarm.addAlarmAction(new cwActions.SnsAction(alertsTopic));
 
 // ── P3-16: Brand Health Monitor Lambda (weekly, 50%-drop CSM alert) ───────────
 const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
@@ -1245,7 +1259,9 @@ Tags.of(spendProcessorLambda).add('CostCenter', 'user-intel');
 // ── Template Manager (loyalty card templates — super_admin CRUD) ──────────────
 const templateManagerLambda = backend.templateManagerFn.resources.lambda as lambda.Function;
 templateManagerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-templateManagerLambda.addEnvironment('PORTAL_ORIGIN', process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com.au');
+const portalOrigin = process.env.PORTAL_ORIGIN;
+if (!portalOrigin && stage === 'prod') throw new Error('PORTAL_ORIGIN must be set in the deployment environment for prod stage');
+templateManagerLambda.addEnvironment('PORTAL_ORIGIN', portalOrigin ?? '');
 templateManagerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/INTERNAL_SIGNING_SECRET`],

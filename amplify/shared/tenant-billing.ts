@@ -28,9 +28,6 @@ const TIER_ORDER: Record<TenantTier, number> = { base: 0, engagement: 1, intelli
 
 /** Minimum tier required to meter or access this usage type. Absent = all tiers. */
 export const USAGE_TYPE_MIN_TIER: Partial<Record<UsageType, TenantTier>> = {
-  offers:               'engagement',
-  newsletters:          'engagement',
-  catalogues:           'engagement',
   newsletter_reads:     'engagement',
   offer_engagements:    'engagement',
   catalogue_views:      'engagement',

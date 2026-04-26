@@ -40,8 +40,8 @@ describe('Post-Confirmation Age Verification (P2-6)', () => {
     response: {},
   } as any);
 
-  it('assigns <13 bucket and PENDING_CONSENT status for a child', async () => {
-    const event = makeEvent('2020-01-01'); // 6 years old
+  it('assigns <13 bucket and PENDING_CONSENT status for a child with parent email', async () => {
+    const event = makeEvent('2020-01-01', 'parent@example.com'); // 6 years old
     await handler(event, {} as any, () => {});
 
     // Check Cognito Attribute
@@ -54,8 +54,8 @@ describe('Post-Confirmation Age Verification (P2-6)', () => {
     expect(ddbCall![0].input.Item.status).toBe('PENDING_CONSENT');
   });
 
-  it('assigns 13-17 bucket and PENDING_CONSENT for a teen', async () => {
-    const event = makeEvent('2010-01-01'); // ~16 years old
+  it('assigns 13-17 bucket and PENDING_CONSENT for a teen with parent email', async () => {
+    const event = makeEvent('2010-01-01', 'parent@example.com'); // ~16 years old
     await handler(event, {} as any, () => {});
 
     const ageAttr = mockSend.mock.calls.find(c => c[0].__type === 'AdminUpdateUserAttributesCommand')![0].input.UserAttributes.find((a: { Name: string }) => a.Name === 'custom:ageBucket');
@@ -74,5 +74,11 @@ describe('Post-Confirmation Age Verification (P2-6)', () => {
 
     const ddbCall = mockSend.mock.calls.find(c => c[0].__type === 'PutCommand' && c[0].input.Item.sK === 'IDENTITY');
     expect(ddbCall![0].input.Item.status).toBe('ACTIVE');
+  });
+
+  it('blocks minor sign-up when parent email is missing', async () => {
+    const event = makeEvent('2010-01-01');
+
+    await expect(handler(event, {} as any, () => {})).rejects.toThrow(/requires parentEmail/);
   });
 });
