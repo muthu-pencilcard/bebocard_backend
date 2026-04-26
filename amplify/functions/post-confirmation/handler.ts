@@ -35,6 +35,17 @@ async function getTableNames() {
 
   return { USER_TABLE: userTableCache, ADMIN_TABLE: adminTableCache };
 }
+let scanApiUrlCache = '';
+async function getScanApiUrl() {
+  if (scanApiUrlCache) return scanApiUrlCache;
+  if (process.env.SCAN_API_URL_PARAM) {
+    const res = await ssm.send(new GetParameterCommand({ Name: process.env.SCAN_API_URL_PARAM }));
+    scanApiUrlCache = res.Parameter?.Value ?? 'https://api.bebocard.com';
+  } else {
+    scanApiUrlCache = process.env.SCAN_API_URL ?? 'https://api.bebocard.com';
+  }
+  return scanApiUrlCache;
+}
 
 export const handler: PostConfirmationTriggerHandler = async (event) => {
   const attrs = event.request.userAttributes;
@@ -55,7 +66,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 
   console.log(`[post-confirmation] START user=${userId}`);
 
-  const SCAN_API_URL = process.env.SCAN_API_URL ?? 'https://api.bebocard.com';
+  const SCAN_API_URL = await getScanApiUrl();
 
   const birthdate = attrs['birthdate'] ?? '';
   const parentEmail = attrs['custom:parentEmail'] ?? '';

@@ -815,7 +815,9 @@ stripeWebhookRes.addMethod('POST', new apigw.LambdaIntegration(billingWebhookLam
 // Break Circularity: Store the API URL in the ROOT stack (infraStack), not the scanApiStack.
 // We use a literal ARN pattern — the URL is deterministic given restApiId and stage
 const scanApiUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiStack).region}.amazonaws.com/prod/`;
-postConfirmLambda.addEnvironment('SCAN_API_URL', scanApiUrl);
+// Use SSM param name (plain string) to break auth→scanApi cross-stack CDK token reference.
+// The URL is written to SSM by the scanApi stack; post-confirmation reads it at runtime.
+postConfirmLambda.addEnvironment('SCAN_API_URL_PARAM', restApiUrlParamName);
 
 new ssm.StringParameter(scanApiStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
