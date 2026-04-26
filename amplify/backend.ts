@@ -206,7 +206,7 @@ new ssm.StringParameter(authStack, 'UserPoolIdParam', {
 });
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
-const analyticsBucketName = `bebocard-analytics-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
+const analyticsBucketName = `bebocard-analytics-${amplifyAppId}-${amplifyBranch}-v2`.toLowerCase();
 const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
   bucketName: analyticsBucketName,
   removalPolicy: RemovalPolicy.RETAIN,
@@ -222,7 +222,7 @@ const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
 
 // ── Remote Configuration (P2-2) ──
 // Allows instant UI/Feature updates without App Store reviews
-const remoteConfigBucketName = `bebocard-config-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
+const remoteConfigBucketName = `bebocard-config-${amplifyAppId}-${amplifyBranch}-v2`.toLowerCase();
 const remoteConfigBucket = new s3.Bucket(infraStack, 'RemoteConfig', {
   bucketName: remoteConfigBucketName,
   versioned: true,
@@ -245,7 +245,7 @@ new ssm.StringParameter(infraStack, 'RemoteConfigBucketParam', {
   stringValue: remoteConfigBucket.bucketName,
 });
 
-const exportsBucketName = `bebocard-exports-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
+const exportsBucketName = `bebocard-exports-${amplifyAppId}-${amplifyBranch}-v2`.toLowerCase();
 const exportsBucket = new s3.Bucket(infraStack, 'UserDataExports', {
   bucketName: exportsBucketName,
   removalPolicy: RemovalPolicy.DESTROY, // Exports are temporary
@@ -1136,7 +1136,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
         width: 24,
       }),
     ],
-    /* [
+    [
       new cloudwatch.GraphWidget({
         title: 'Scan API Latency (p95)',
         left: [scanLambda.metricDuration({ statistic: 'p95', label: 'Scan Handler' })],
@@ -1150,7 +1150,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
         ],
         width: 12,
       }),
-    ], */
+    ],
     [
       new cloudwatch.GraphWidget({
         title: 'Webhook DLQ Depth (Retries Exhausted)',
@@ -1162,7 +1162,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
 });
 
 // ── P0-6: Cognito Export Lambda (weekly DR backup) ───────────────────────────
-const cognitoExportBucketName = `bebocard-cognito-exports-${amplifyAppId}-${amplifyBranch}`.toLowerCase();
+const cognitoExportBucketName = `bebocard-cognito-exports-${amplifyAppId}-${amplifyBranch}-v2`.toLowerCase();
 const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
   bucketName: cognitoExportBucketName,
   encryption: s3.BucketEncryption.S3_MANAGED,
