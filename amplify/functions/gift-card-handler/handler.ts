@@ -372,15 +372,18 @@ async function handleStripeWebhook(event: Parameters<APIGatewayProxyHandler>[0])
 
     // SES purchase confirmation to buyer
     if (session.buyerEmail) {
-      await sendPurchaseConfirmation(
-        session.permULID as string, 
-        session.buyerEmail as string, 
-        session.brandName as string, 
-        session.denomination as number, 
-        session.currency as string,
-        card.cardNumber,
-        card.pin
-      );
+      await sendPurchaseConfirmation({
+        permULID:     session.permULID as string,
+        buyerEmail:   session.buyerEmail as string,
+        brandName:    session.brandName as string,
+        denomination: session.denomination as number,
+        currency:     session.currency as string,
+        cardNumber:   card.cardNumber,
+        pin:          card.pin,
+        expiryDate:   card.expiryDate,
+        brandColor:   session.brandColor as string,
+        sessionId,
+      });
     }
 
     // Write RECEIPT# so the Finance tab reflects the gift card purchase
@@ -935,32 +938,84 @@ async function sendGiftEmail(opts: {
   }));
 }
 
-async function sendPurchaseConfirmation(permULID: string, buyerEmail: string, brandName: string, denomination: number, currency: string, cardNumber: string, pin: string): Promise<void> {
-  const subject = `Your ${brandName} gift card receipt`;
+async function sendPurchaseConfirmation(opts: {
+  permULID: string;
+  buyerEmail: string;
+  brandName: string;
+  denomination: number;
+  currency: string;
+  cardNumber: string;
+  pin: string;
+  expiryDate: string | null;
+  brandColor: string;
+  sessionId: string;
+}): Promise<void> {
+  const { permULID, buyerEmail, brandName, denomination, currency, cardNumber, pin, expiryDate, brandColor, sessionId } = opts;
+
+  const formattedCardNumber = cardNumber.replace(/(.{4})/g, '$1 ').trim();
+  const expiryFormatted = expiryDate
+    ? new Date(expiryDate).toLocaleDateString('en-AU', { month: 'short', year: 'numeric' })
+    : null;
+
   const html = `
-    <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
-      <h2 style="color:#6366f1">Receipt: ${brandName} Gift Card</h2>
-      <p>Thank you for purchasing a <strong>${brandName}</strong> gift card worth ${currency} ${denomination}.</p>
-      <div style="background:#f4f4f5;padding:16px;border-radius:8px;margin:24px 0">
-        <p style="margin:0;font-size:14px;color:#555">Card Number</p>
-        <p style="margin:4px 0 16px 0;font-size:18px;font-weight:bold;letter-spacing:1px;color:#000">${cardNumber}</p>
-        <p style="margin:0;font-size:14px;color:#555">PIN</p>
-        <p style="margin:4px 0 0 0;font-size:18px;font-weight:bold;color:#000">${pin}</p>
+    <div style="font-family:system-ui,Arial,sans-serif;max-width:520px;margin:0 auto;background:#f9fafb;padding:32px 20px">
+      <div style="text-align:center;margin-bottom:24px">
+        <img src="${APP_BASE_URL}/logo.png" width="40" height="40" alt="BeboCard" style="border-radius:10px;margin-bottom:12px" />
+        <h1 style="color:#111827;font-size:20px;font-weight:800;margin:0">Your gift card is ready</h1>
+        <p style="color:#6b7280;font-size:14px;margin:6px 0 0">Here are your ${brandName} gift card details</p>
       </div>
-      <p>The gift card is now also active in your BeboCard wallet, where your PIN is securely stored on your device.</p>
-      <p style="color:#999;font-size:12px;margin-top:24px">Powered by BeboCard &middot; Privacy-first loyalty wallet</p>
+
+      <div style="background:linear-gradient(135deg,${brandColor} 0%,${brandColor}bb 100%);border-radius:20px;padding:28px 24px;color:white;margin-bottom:20px">
+        <div style="font-size:11px;font-weight:700;opacity:0.75;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px">${brandName}</div>
+        <div style="font-size:30px;font-weight:900;margin:0 0 20px">${currency} ${denomination.toFixed(2)}</div>
+        <div style="margin-bottom:14px">
+          <div style="font-size:10px;opacity:0.7;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Card Number</div>
+          <div style="font-size:17px;font-weight:700;letter-spacing:2px;font-family:monospace,monospace">${formattedCardNumber}</div>
+        </div>
+        ${pin ? `<div style="margin-bottom:14px">
+          <div style="font-size:10px;opacity:0.7;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">PIN</div>
+          <div style="font-size:22px;font-weight:900;letter-spacing:4px;font-family:monospace,monospace">${pin}</div>
+        </div>` : ''}
+        ${expiryFormatted ? `<div style="font-size:12px;opacity:0.65">Expires ${expiryFormatted}</div>` : ''}
+      </div>
+
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:16px;margin-bottom:20px">
+        <p style="color:#92400e;font-size:13px;margin:0;line-height:1.5">
+          <strong>Keep this email safe.</strong> Anyone with the card number and PIN can spend this gift card.
+          Your PIN is also stored securely in the BeboCard app — only you can access it there.
+        </p>
+      </div>
+
+      <div style="text-align:center;margin-bottom:24px">
+        <a href="${APP_BASE_URL}/gift-cards" style="display:inline-block;background:#4f46e5;color:white;padding:14px 32px;border-radius:12px;text-decoration:none;font-weight:700;font-size:15px">
+          Open in BeboCard App
+        </a>
+      </div>
+
+      <p style="color:#9ca3af;font-size:12px;text-align:center;margin:0;line-height:1.6">
+        Powered by <strong>BeboCard</strong> · Privacy-first loyalty wallet<br>
+        Questions? <a href="https://bebocard.com/support" style="color:#6366f1;text-decoration:none">Visit our support page</a>
+      </p>
     </div>`;
 
   try {
     await ses.send(new SendEmailCommand({
-      Source: FROM_EMAIL,
+      Source:      FROM_EMAIL,
       Destination: { ToAddresses: [buyerEmail] },
       Message: {
-        Subject: { Data: subject },
-        Body: { Html: { Data: html } },
+        Subject: { Data: `Your ${brandName} Gift Card — ${currency} ${denomination.toFixed(2)}` },
+        Body:    { Html: { Data: html } },
       },
     }));
-    console.log(`[gift-card-handler] Purchase confirmed: ${permULID} bought ${brandName} ${currency}${denomination}`);
+
+    // Remove buyerEmail from session — only needed for this send
+    await dynamo.send(new UpdateCommand({
+      TableName: ADMIN_TABLE,
+      Key: { pK: `GIFT_SESSION#${sessionId}`, sK: 'metadata' },
+      UpdateExpression: 'REMOVE buyerEmail',
+    })).catch(e => console.warn('[gift-card-handler] Failed to clear buyerEmail from session', e));
+
+    console.log(`[gift-card-handler] Purchase confirmation sent for ${permULID}`);
   } catch (err) {
     console.warn(`[gift-card-handler] Failed to send purchase confirmation to ${buyerEmail}:`, err);
   }
