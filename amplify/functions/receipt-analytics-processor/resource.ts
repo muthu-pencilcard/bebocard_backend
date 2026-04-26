@@ -1,6 +1,7 @@
 import { defineFunction, secret } from '@aws-amplify/backend';
 
 export const receiptAnalyticsProcessorFn = defineFunction({
+  resourceGroupName: "data",
   name: 'receipt-analytics-processor',
   entry: './handler.ts',
   timeoutSeconds: 60,
