@@ -131,14 +131,6 @@ const refDataTable = backend.data.resources.tables['RefDataEvent'];
 const adminTable = backend.data.resources.tables['AdminDataEvent'];
 const reportTable = backend.data.resources.tables['ReportDataEvent'];
 
-// ── Injected table names (using CDK tokens to resolve physical names) ──
-const tableNames = {
-  USER_TABLE: userTable.tableName,
-  REFDATA_TABLE: refDataTable.tableName,
-  ADMIN_TABLE: adminTable.tableName,
-  REPORT_TABLE: reportTable.tableName,
-};
-
 const cfnUserTable = backend.data.resources.tables['UserDataEvent']?.node.defaultChild as dynamodb.CfnTable | undefined;
 
 // ── PITR — explicitly enable on all tables (Amplify Gen 2 does not enable by default) ──
@@ -404,7 +396,10 @@ cardManagerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
   resources: ['*'],
 }));
-Object.entries(tableNames).forEach(([k, v]) => cardManagerLambda.addEnvironment(k, v));
+cardManagerLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+cardManagerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+cardManagerLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
+cardManagerLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
 const grantTableAccess = (fn: lambda.Function, tableNamePrefix: string, write: boolean = false) => {
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions: write ? ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem'] : ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchGetItem'],
@@ -594,14 +589,20 @@ grantTableAccess(tenantLinkerLambda, 'AdminDataEvent', true);
 
 // ── Geofence handler ──
 const geofenceLambda = backend.geofenceHandlerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => geofenceLambda.addEnvironment(k, v));
+geofenceLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+geofenceLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+geofenceLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
+geofenceLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
 grantTableAccess(geofenceLambda, 'UserDataEvent', true);
 grantTableAccess(geofenceLambda, 'RefDataEvent', false);
 grantTableAccess(geofenceLambda, 'AdminDataEvent', false);
 
 // ── Consent handler ──
 const consentLambda = backend.consentHandlerFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => consentLambda.addEnvironment(k, v));
+consentLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+consentLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+consentLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
+consentLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
 grantTableAccess(consentLambda, 'UserDataEvent', true);
 grantTableAccess(consentLambda, 'RefDataEvent', false);
 grantTableAccess(consentLambda, 'AdminDataEvent', true);
@@ -629,7 +630,11 @@ new lambda.EventSourceMapping(mappingStack, 'SegmentLambdaDDBSource', {
   retryAttempts: 1,
 });
 grantTableAccess(segmentLambda, 'UserDataEvent', false); // P1-5: Read-only access for segment processing
-userTable.grantStreamRead(segmentLambda);
+// grantStreamRead replaced with wildcard IAM to break cycle (stream ARN token → nested stack)
+segmentLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
+  resources: ['arn:aws:dynamodb:*:*:table/UserDataEvent*/stream/*'],
+}));
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
@@ -721,8 +726,11 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaUserSource', {
 });
 grantTableAccess(receiptIcebergLambda, 'UserDataEvent', false); 
 grantTableAccess(receiptIcebergLambda, 'RefDataEvent', false);
-userTable.grantStreamRead(receiptIcebergLambda);
-refDataTable.grantStreamRead(receiptIcebergLambda);
+// grantStreamRead replaced with wildcard IAM to break cycle
+receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
+  resources: ['arn:aws:dynamodb:*:*:table/UserDataEvent*/stream/*', 'arn:aws:dynamodb:*:*:table/RefDataEvent*/stream/*'],
+}));
 new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaRefSource', {
   target: receiptIcebergLambda,
   eventSourceArn: refDataTable.tableStreamArn,
@@ -733,7 +741,7 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptIcebergLambdaRefSource', {
   })],
   retryAttempts: 1,
 });
-refDataTable.grantStreamRead(receiptIcebergLambda);
+// duplicate grantStreamRead removed — covered by wildcard IAM above
 
 // ── Tenant provisioner (P1-2) ──
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
@@ -776,7 +784,11 @@ new lambda.EventSourceMapping(mappingStack, 'TenantProvisionerLambdaRefSource', 
   retryAttempts: 1,
 });
 grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
-refDataTable.grantStreamRead(tenantProvisionerLambda);
+// grantStreamRead replaced with wildcard IAM to break cycle
+tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams'],
+  resources: ['arn:aws:dynamodb:*:*:table/RefDataEvent*/stream/*'],
+}));
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
@@ -1062,7 +1074,10 @@ cronRule.addTarget(new eventsTargets.LambdaFunction(compactorLambda));
 
 // Analytics Aggregator Schedule: Nightly at 1:00 AM UTC (before compaction)
 const aggregatorLambda = backend.analyticsAggregatorFn.resources.lambda as lambda.Function;
-Object.entries(tableNames).forEach(([k, v]) => aggregatorLambda.addEnvironment(k, v));
+aggregatorLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+aggregatorLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+aggregatorLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
+aggregatorLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
 grantTableAccess(aggregatorLambda, 'UserDataEvent', false);
 grantTableAccess(aggregatorLambda, 'RefDataEvent', false);
 grantTableAccess(aggregatorLambda, 'ReportDataEvent', true);
