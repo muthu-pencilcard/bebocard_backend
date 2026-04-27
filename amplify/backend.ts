@@ -196,6 +196,9 @@ const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABL
 const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
 const restApiUrlParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/SCAN_API_URL`;
 const USER_POOL_ID_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_POOL_ID`;
+const ANALYTICS_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/ANALYTICS_BUCKET`;
+const EXPORTS_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/EXPORTS_BUCKET`;
+const COGNITO_EXPORT_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/COGNITO_EXPORT_BUCKET`;
 
 new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
 new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
@@ -216,6 +219,11 @@ const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
     { expiration: Duration.days(7), prefix: 'athena-results/' },
     { transitions: [{ storageClass: s3.StorageClass.GLACIER, transitionAfter: Duration.days(365) }], prefix: 'receipts/' }
   ],
+});
+
+new ssm.StringParameter(infraStack, 'AnalyticsBucketParam', {
+  parameterName: ANALYTICS_BUCKET_PARAM,
+  stringValue: analyticsBucket.bucketName,
 });
 
 // ── Remote Configuration (P2-2) ──
@@ -244,6 +252,11 @@ new ssm.StringParameter(infraStack, 'RemoteConfigBucketParam', {
 const exportsBucket = new s3.Bucket(infraStack, 'UserDataExports', {
   removalPolicy: RemovalPolicy.DESTROY, // Exports are temporary
   lifecycleRules: [{ expiration: Duration.days(1) }], // Auto-delete after 24 hours
+});
+
+new ssm.StringParameter(infraStack, 'ExportsBucketParam', {
+  parameterName: EXPORTS_BUCKET_PARAM,
+  stringValue: exportsBucket.bucketName,
 });
 
 const glueDatabaseName = `bebo_analytics_${stage}`;
@@ -398,12 +411,18 @@ const grantTableAccess = (fn: lambda.Function, tableNamePrefix: string, write: b
   }));
 };
 
-const grantS3Access = (fn: lambda.Function, bucketName: string, actions: string[]) => {
+// S3 IAM helper — uses wildcard prefix to avoid CDK cross-stack token references
+// that would create circular dependencies between infraStack and dataStack.
+const grantS3Access = (fn: lambda.Function, bucketNameOrPrefix: string, actions: string[]) => {
   fn.addToRolePolicy(new iam.PolicyStatement({
     actions,
-    resources: [`arn:aws:s3:::${bucketName}`, `arn:aws:s3:::${bucketName}/*`],
+    resources: [`arn:aws:s3:::${bucketNameOrPrefix}`, `arn:aws:s3:::${bucketNameOrPrefix}/*`],
   }));
 };
+// Wildcard prefixes for S3 IAM policies — plain strings, no CDK tokens
+const analyticsBucketArnPrefix = `bebocard-*-analyticslake*`;
+const exportsBucketArnPrefix = `bebocard-*-userdataexports*`;
+const cognitoExportBucketArnPrefix = `bebocard-*-cognitoexports*`;
 
 const grantSqsAccess = (fn: lambda.Function, queue: sqs.IQueue, actions: string[]) => {
   fn.addToRolePolicy(new iam.PolicyStatement({
@@ -540,7 +559,7 @@ grantSqsAccess(scanLambda, receiptAnalyticsQueue, ['sqs:SendMessage']);
 scanLambda.addEnvironment('RECEIPT_ANALYTICS_QUEUE_URL', receiptAnalyticsQueue.queueUrl);
 
 const receiptAnalyticsProcessorLambda = backend.receiptAnalyticsProcessorFn.resources.lambda as lambda.Function;
-receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 
 
 new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource', {
@@ -550,13 +569,17 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource'
   reportBatchItemFailures: true,
 });
 grantSqsAccess(receiptAnalyticsProcessorLambda, receiptAnalyticsQueue, ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
-grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucket.bucketName, ['s3:PutObject']);
+grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucketArnPrefix, ['s3:PutObject']);
 receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
   resources: [
     'arn:aws:secretsmanager:*:*:secret:bebocard/tenant-analytics-salt/*',
     'arn:aws:secretsmanager:*:*:secret:bebocard/GLOBAL_ANALYTICS_SALT*',
   ],
+}));
+receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
 }));
 
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
@@ -655,18 +678,18 @@ wellKnown.addResource('assetlinks.json').addMethod('GET', qrIntegration);
 
 // ── Receipt Iceberg writer ──
 const receiptIcebergLambda = backend.receiptIcebergWriterFn.resources.lambda as lambda.Function;
-receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [userHashSaltSsmArn]
+  resources: [userHashSaltSsmArn, `arn:aws:ssm:*:*:parameter/bebocard/*`]
 }));
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
-grantS3Access(receiptIcebergLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(receiptIcebergLambda, analyticsBucketArnPrefix, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 grantSqsAccess(receiptIcebergLambda, icebergDLQ, ['sqs:SendMessage']);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
@@ -711,10 +734,14 @@ refDataTable.grantStreamRead(receiptIcebergLambda);
 // ── Tenant provisioner (P1-2) ──
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
 tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
-tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
 grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
+tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
+}));
 
 tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['glue:GetTable', 'glue:CreateTable', 'glue:UpdateTable'],
@@ -751,7 +778,7 @@ refDataTable.grantStreamRead(tenantProvisionerLambda);
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
 analyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
 analyticsLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+analyticsLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 analyticsLambda.addEnvironment('REPORT_TABLE', reportTable.tableName);
@@ -759,7 +786,7 @@ analyticsLambda.addEnvironment('REPORT_TABLE', reportTable.tableName);
 grantTableAccess(analyticsLambda, 'UserDataEvent', false);
 grantTableAccess(analyticsLambda, 'RefDataEvent', false);
 grantTableAccess(analyticsLambda, 'ReportDataEvent', false);
-grantS3Access(analyticsLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(analyticsLambda, analyticsBucketArnPrefix, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
   resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroupName}`],
@@ -771,6 +798,10 @@ analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
     `arn:aws:glue:*:*:database/${glueDatabaseName}`,
     `arn:aws:glue:*:*:table/${glueDatabaseName}/receipts`,
   ],
+}));
+analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
 }));
 
 // ── Scan API (v1 & Legacy) ──
@@ -884,7 +915,7 @@ analyticsLegacy.addResource('subscriber-count').addMethod('GET', analyticsIntegr
 const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
 exporterLambda.addEnvironment('USER_TABLE', userTable.tableName);
 exporterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucket.bucketName);
+exporterLambda.addEnvironment('EXPORTS_BUCKET_PARAM', EXPORTS_BUCKET_PARAM);
 // USER_POOL_ID read from SSM at runtime — no synthesis-time auth→data token
 exporterLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -896,7 +927,11 @@ exporterLambda.addToRolePolicy(new iam.PolicyStatement({
 
 grantTableAccess(exporterLambda, 'UserDataEvent', true);
 grantTableAccess(exporterLambda, 'AdminDataEvent', true);
-grantS3Access(exporterLambda, exportsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(exporterLambda, exportsBucketArnPrefix, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+exporterLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
+}));
 
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminDisableUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:AdminDeleteUser'],
@@ -935,14 +970,18 @@ new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocAnalyticsApi', {
 const compactorLambda = backend.analyticsCompactorFn.resources.lambda as lambda.Function;
 compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 compactorLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
-compactorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+compactorLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 
-grantS3Access(compactorLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:DeleteObject']);
+grantS3Access(compactorLambda, analyticsBucketArnPrefix, ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:DeleteObject']);
+compactorLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
+}));
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
   resources: [
-    `arn:aws:s3:::${analyticsBucket.bucketName}`,
-    `arn:aws:s3:::${analyticsBucket.bucketName}/*`,
+    `arn:aws:s3:::${analyticsBucketArnPrefix}`,
+    `arn:aws:s3:::${analyticsBucketArnPrefix}/*`,
     'arn:aws:s3:::bebocard-enterprise-*',
     'arn:aws:s3:::bebocard-enterprise-*/*',
   ],
@@ -966,7 +1005,7 @@ compactorLambda.addToRolePolicy(new iam.PolicyStatement({
 const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambda.Function;
 backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
-backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
+backfillerLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 backfillerLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
@@ -975,12 +1014,16 @@ backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: [userHashSaltSsmArn]
 }));
 
-grantS3Access(backfillerLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(backfillerLambda, analyticsBucketArnPrefix, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/bebocard/*`],
+}));
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
   resources: [
-    `arn:aws:s3:::${analyticsBucket.bucketName}`,
-    `arn:aws:s3:::${analyticsBucket.bucketName}/*`,
+    `arn:aws:s3:::${analyticsBucketArnPrefix}`,
+    `arn:aws:s3:::${analyticsBucketArnPrefix}/*`,
     'arn:aws:s3:::bebocard-enterprise-*',
     'arn:aws:s3:::bebocard-enterprise-*/*',
   ],
@@ -1165,14 +1208,22 @@ const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
   blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
 });
 
+new ssm.StringParameter(infraStack, 'CognitoExportBucketParam', {
+  parameterName: COGNITO_EXPORT_BUCKET_PARAM,
+  stringValue: cognitoExportBucket.bucketName,
+});
+
 const cognitoExportLambda = backend.cognitoExportFn.resources.lambda as lambda.Function;
 // USER_POOL_ID read from SSM at runtime — no functions→auth token
 cognitoExportLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
-cognitoExportLambda.addEnvironment('EXPORT_BUCKET', cognitoExportBucket.bucketName);
-grantS3Access(cognitoExportLambda, cognitoExportBucket.bucketName, ['s3:PutObject']);
+cognitoExportLambda.addEnvironment('EXPORT_BUCKET_PARAM', COGNITO_EXPORT_BUCKET_PARAM);
+grantS3Access(cognitoExportLambda, cognitoExportBucketArnPrefix, ['s3:PutObject']);
 cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:*:*:parameter${USER_POOL_ID_PARAM}`],
+  resources: [
+    `arn:aws:ssm:*:*:parameter${USER_POOL_ID_PARAM}`,
+    `arn:aws:ssm:*:*:parameter${COGNITO_EXPORT_BUCKET_PARAM}`,
+  ],
 }));
 
 cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
