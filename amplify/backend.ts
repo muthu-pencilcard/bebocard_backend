@@ -194,6 +194,8 @@ const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.no
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
 const userTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_TABLE`;
 const adminTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/ADMIN_TABLE`;
+const refDataTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/REFDATA_TABLE`;
+const reportTableParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/REPORT_TABLE`;
 const restApiUrlParamName = `/bebocard/${amplifyAppId}/${amplifyBranch}/SCAN_API_URL`;
 const USER_POOL_ID_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/USER_POOL_ID`;
 const ANALYTICS_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/ANALYTICS_BUCKET`;
@@ -202,6 +204,8 @@ const COGNITO_EXPORT_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/
 
 new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
 new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
+new ssm.StringParameter(dataStack, 'RefDataTableNameParam', { parameterName: refDataTableParamName, stringValue: refDataTable.tableName });
+new ssm.StringParameter(dataStack, 'ReportTableNameParam', { parameterName: reportTableParamName, stringValue: reportTable.tableName });
 // ── Store Cognito UserPoolId in auth stack's own SSM param (no data→auth token) ──
 new ssm.StringParameter(authStack, 'UserPoolIdParam', {
   parameterName: USER_POOL_ID_PARAM,
@@ -507,7 +511,7 @@ const webhookQueue = new sqs.Queue(infraStack, 'WebhookReliabilityQueue', {
 createDlqAlarm(webhookDLQ, 'WebhookReliabilityDLQ');
 
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
-webhookDispatcherLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+webhookDispatcherLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
   target: webhookDispatcherLambda,
   eventSourceArn: webhookQueue.queueArn,
@@ -522,7 +526,7 @@ webhookDispatcherLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 const receiptProcessorLambda = backend.receiptProcessorFn.resources.lambda as lambda.Function;
-receiptProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
+receiptProcessorLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 new lambda.EventSourceMapping(mappingStack, 'ReceiptProcessorSQSSource', {
   target: receiptProcessorLambda,
   eventSourceArn: receiptProcessingQueue.queueArn,
@@ -583,8 +587,8 @@ receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 const tenantLinkerLambda = backend.tenantLinker.resources.lambda as lambda.Function;
-tenantLinkerLambda.addEnvironment('USER_TABLE', userTable.tableName);
-tenantLinkerLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+tenantLinkerLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+tenantLinkerLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 grantTableAccess(tenantLinkerLambda, 'UserDataEvent', true);
 grantTableAccess(tenantLinkerLambda, 'AdminDataEvent', true);
 
@@ -604,7 +608,7 @@ grantTableAccess(consentLambda, 'AdminDataEvent', true);
 
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
-segmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+segmentLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 // USER_HASH_SALT environment removed as it is not used in the segment-processor code
 grantTableAccess(segmentLambda, 'UserDataEvent', true);
 // Enable NEW_IMAGE streams if not already set by Amplify Gen 2 (needed for segment-processor + receipt-iceberg-writer)
@@ -629,7 +633,7 @@ userTable.grantStreamRead(segmentLambda);
 
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
-billingRunLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+billingRunLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(billingRunLambda, 'RefDataEvent', true);
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail'],
@@ -649,7 +653,7 @@ billingRunRule.addTarget(new eventsTargets.LambdaFunction(billingRunLambda));
 
 // ── Billing Webhook Handler (P1-8) ──
 const billingWebhookLambda = backend.billingWebhookHandlerFn.resources.lambda as lambda.Function;
-billingWebhookLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+billingWebhookLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(billingWebhookLambda, 'UserDataEvent', true);
 billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -661,7 +665,7 @@ billingWebhookLambda.addToRolePolicy(new iam.PolicyStatement({
 
 // ── QR Router (P1-10) ──
 const qrRouterLambda = backend.qrRouterHandlerFn.resources.lambda as lambda.Function;
-qrRouterLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+qrRouterLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(qrRouterLambda, 'RefDataEvent', false);
 
 const qrApi = new apigw.RestApi(dataStack, 'QrRouterApi', { 
@@ -681,7 +685,7 @@ const receiptIcebergLambda = backend.receiptIcebergWriterFn.resources.lambda as 
 receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
-receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+receiptIcebergLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 receiptIcebergLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -735,7 +739,7 @@ refDataTable.grantStreamRead(receiptIcebergLambda);
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
 tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
-tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+tenantProvisionerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 
 grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
 tenantProvisionerLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -776,12 +780,12 @@ refDataTable.grantStreamRead(tenantProvisionerLambda);
 
 // ── Tenant analytics ──
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
-analyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
-analyticsLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+analyticsLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+analyticsLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 analyticsLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
 analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
-analyticsLambda.addEnvironment('REPORT_TABLE', reportTable.tableName);
+analyticsLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
 
 grantTableAccess(analyticsLambda, 'UserDataEvent', false);
 grantTableAccess(analyticsLambda, 'RefDataEvent', false);
@@ -826,7 +830,7 @@ const parentalRes = consentRes.addResource('parental');
 const approveRes = parentalRes.addResource('approve');
 const parentalConsentLambda = backend.parentalConsentHandlerFn.resources.lambda as lambda.Function;
 approveRes.addMethod('GET', new apigw.LambdaIntegration(parentalConsentLambda), { apiKeyRequired: false });
-parentalConsentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+parentalConsentLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 grantTableAccess(parentalConsentLambda, 'UserDataEvent', true);
 parentalConsentLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -913,8 +917,8 @@ analyticsLegacy.addResource('subscriber-count').addMethod('GET', analyticsIntegr
 
 // ── User Data Exporter (P2-5) ──
 const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
-exporterLambda.addEnvironment('USER_TABLE', userTable.tableName);
-exporterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+exporterLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+exporterLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
 exporterLambda.addEnvironment('EXPORTS_BUCKET_PARAM', EXPORTS_BUCKET_PARAM);
 // USER_POOL_ID read from SSM at runtime — no synthesis-time auth→data token
 exporterLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
@@ -1006,8 +1010,8 @@ const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambd
 backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 backfillerLambda.addEnvironment('ANALYTICS_BUCKET_PARAM', ANALYTICS_BUCKET_PARAM);
-backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
+backfillerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+backfillerLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 backfillerLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -1071,8 +1075,8 @@ aggregatorRule.addTarget(new eventsTargets.LambdaFunction(aggregatorLambda));
 // ── Custom Segment Evaluator (EOD batch) ──
 // Nightly at 00:30 UTC — after segment-processor stream has caught up, before analytics compaction at 02:00.
 const customSegmentLambda = backend.customSegmentEvaluatorFn.resources.lambda as lambda.Function;
-customSegmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
-customSegmentLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+customSegmentLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+customSegmentLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 
 // Read segment defs from RefDataEvent; write membership records to UserDataEvent
 grantTableAccess(customSegmentLambda, 'RefDataEvent', false);
@@ -1099,7 +1103,7 @@ Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
 
 // ── Affiliate Feed Sync (Nightly at 05:00 UTC) ──
 const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
-affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+affiliateSyncLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 
 const affiliateSyncRule = new events.Rule(dataStack, 'NightlyAffiliateSyncRule', {
@@ -1136,20 +1140,20 @@ for (const [fn, name, cost] of functionTags) {
 
 // ── Receipt Claim Handler Setup ──
 const receiptClaimLambda = backend.receiptClaimHandlerFn.resources.lambda as lambda.Function;
-receiptClaimLambda.addEnvironment('USER_TABLE', userTable.tableName);
-receiptClaimLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+receiptClaimLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
+receiptClaimLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(receiptClaimLambda, 'UserDataEvent', true);
 grantTableAccess(receiptClaimLambda, 'RefDataEvent', true);
 
 // ── Remote Config Wiring (P2-21) ──
 const remoteConfigLambda = backend.remoteConfigHandlerFn.resources.lambda as lambda.Function;
-remoteConfigLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+remoteConfigLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(remoteConfigLambda, 'RefDataEvent', false);
 
 // ── Click Tracking (P2-19) ──
 const clickTrackingLambda = backend.clickTrackingHandlerFn.resources.lambda as lambda.Function;
-clickTrackingLambda.addEnvironment('REPORT_TABLE', tableNames.REPORT_TABLE);
-clickTrackingLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+clickTrackingLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
+clickTrackingLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(clickTrackingLambda, 'ReportDataEvent', true);
 grantTableAccess(clickTrackingLambda, 'RefDataEvent', false);
 
@@ -1282,8 +1286,8 @@ drCompositeAlarm.addAlarmAction(acyclicAlertAction);
 
 // ── P3-16: Brand Health Monitor Lambda (weekly, 50%-drop CSM alert) ───────────
 const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
-brandHealthLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-brandHealthLambda.addEnvironment('USER_TABLE', userTable.tableName);
+brandHealthLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+brandHealthLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 grantTableAccess(brandHealthLambda, 'RefDataEvent', false);
 grantTableAccess(brandHealthLambda, 'UserDataEvent', false);
 
@@ -1297,8 +1301,8 @@ Tags.of(brandHealthLambda).add('CostCenter', 'ops');
 
 // ── P3-1: Points Expiry Forecast (Predictive engine) ─────────────────────────
 const pointsForecastLambda = backend.pointsExpiryForecastFn.resources.lambda as lambda.Function;
-pointsForecastLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-pointsForecastLambda.addEnvironment('USER_TABLE', userTable.tableName);
+pointsForecastLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+pointsForecastLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 grantTableAccess(pointsForecastLambda, 'RefDataEvent', false);
 grantTableAccess(pointsForecastLambda, 'UserDataEvent', true);
 
@@ -1312,7 +1316,7 @@ Tags.of(pointsForecastLambda).add('CostCenter', 'user-intel');
 
 // ── P3-2: Aggregated Spending Processor (Private user intel) ─────────────────
 const spendProcessorLambda = backend.aggregatedSpendingProcessorFn.resources.lambda as lambda.Function;
-spendProcessorLambda.addEnvironment('USER_TABLE', userTable.tableName);
+spendProcessorLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 grantTableAccess(spendProcessorLambda, 'UserDataEvent', true);
 
 const spendProcessorRule = new events.Rule(dataStack, 'NightlySpendProcessorRule', {
@@ -1325,7 +1329,7 @@ Tags.of(spendProcessorLambda).add('CostCenter', 'user-intel');
 
 // ── Template Manager (loyalty card templates — super_admin CRUD) ──────────────
 const templateManagerLambda = backend.templateManagerFn.resources.lambda as lambda.Function;
-templateManagerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+templateManagerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 const portalOrigin = process.env.PORTAL_ORIGIN;
 if (portalOrigin) {
   templateManagerLambda.addEnvironment('PORTAL_ORIGIN', portalOrigin);
@@ -1340,7 +1344,7 @@ Tags.of(templateManagerLambda).add('CostCenter', 'ops');
 
 // ── P2-2: Campaign Lifecycle Scheduler (every 5 mins sweep) ──────────────────
 const schedulerLambda = backend.campaignSchedulerFn.resources.lambda as lambda.Function;
-schedulerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+schedulerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(schedulerLambda, 'RefDataEvent', true);
 
 const schedulerRule = new events.Rule(dataStack, 'CampaignSchedulerRule', {
