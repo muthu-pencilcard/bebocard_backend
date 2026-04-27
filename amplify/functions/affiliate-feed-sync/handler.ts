@@ -8,7 +8,7 @@ const docClient = DynamoDBDocumentClient.from(client);
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 
 // Simulated affiliate offers for demonstration
-// In production, this would use fetch() with an API key from Secrets Manager
+// In  production, this would use fetch() with an API key from Secrets Manager
 const MOCK_AFFILIATE_OFFERS = [
   {
     offerId: 'cf_woolworths_10pct',
@@ -102,7 +102,7 @@ export const handler: Handler = async (event) => {
   try {
     // 1. Fetch real feed data (Simulated here)
     const offers = MOCK_AFFILIATE_OFFERS;
-    
+
     // 2. Map to RefDataEvent records
     const chunks = [];
     for (let i = 0; i < offers.length; i += 25) {
