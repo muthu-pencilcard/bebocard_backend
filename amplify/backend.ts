@@ -849,7 +849,7 @@ const scanApiUrl = `https://${scanApi.restApiId}.execute-api.${Stack.of(scanApiS
 // The URL is written to SSM by the scanApi stack; post-confirmation reads it at runtime.
 postConfirmLambda.addEnvironment('SCAN_API_URL_PARAM', restApiUrlParamName);
 
-new ssm.StringParameter(scanApiStack, 'ScanApiUrlParam', {
+new ssm.StringParameter(infraStack, 'ScanApiUrlParam', {
   parameterName: restApiUrlParamName,
   stringValue: scanApiUrl,
 });
