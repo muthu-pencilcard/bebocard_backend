@@ -206,9 +206,7 @@ new ssm.StringParameter(authStack, 'UserPoolIdParam', {
 });
 
 // ── Bebo Intelligence: Data Lake (P1-1 Architecture) ─────────────────────────
-const analyticsBucketName = `bebocard-analytics-${amplifyAppId}-${amplifyBranch}-v3`.toLowerCase();
 const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
-  bucketName: analyticsBucketName,
   removalPolicy: RemovalPolicy.RETAIN,
   versioned: true,
   intelligentTieringConfigurations: [
@@ -222,9 +220,7 @@ const analyticsBucket = new s3.Bucket(infraStack, 'AnalyticsLake', {
 
 // ── Remote Configuration (P2-2) ──
 // Allows instant UI/Feature updates without App Store reviews
-const remoteConfigBucketName = `bebocard-config-${amplifyAppId}-${amplifyBranch}-v3`.toLowerCase();
 const remoteConfigBucket = new s3.Bucket(infraStack, 'RemoteConfig', {
-  bucketName: remoteConfigBucketName,
   versioned: true,
   publicReadAccess: true, 
   blockPublicAccess: {
@@ -245,9 +241,7 @@ new ssm.StringParameter(infraStack, 'RemoteConfigBucketParam', {
   stringValue: remoteConfigBucket.bucketName,
 });
 
-const exportsBucketName = `bebocard-exports-${amplifyAppId}-${amplifyBranch}-v3`.toLowerCase();
 const exportsBucket = new s3.Bucket(infraStack, 'UserDataExports', {
-  bucketName: exportsBucketName,
   removalPolicy: RemovalPolicy.DESTROY, // Exports are temporary
   lifecycleRules: [{ expiration: Duration.days(1) }], // Auto-delete after 24 hours
 });
@@ -264,7 +258,7 @@ const athenaWorkgroup = new athena.CfnWorkGroup(infraStack, 'AnalyticsWorkgroup'
   name: athenaWorkgroupName,
   description: 'Intelligence tier analytics queries',
   workGroupConfiguration: {
-    resultConfiguration: { outputLocation: `s3://${analyticsBucketName}/athena-results/` },
+    resultConfiguration: { outputLocation: `s3://${analyticsBucket.bucketName}/athena-results/` },
   },
 });
 
@@ -1163,9 +1157,7 @@ new cloudwatch.Dashboard(infraStack, 'BeboCardOpsDashboard', {
 });
 
 // ── P0-6: Cognito Export Lambda (weekly DR backup) ───────────────────────────
-const cognitoExportBucketName = `bebocard-cognito-exports-${amplifyAppId}-${amplifyBranch}-v3`.toLowerCase();
 const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
-  bucketName: cognitoExportBucketName,
   encryption: s3.BucketEncryption.S3_MANAGED,
   versioned: true,
   lifecycleRules: [{ expiration: Duration.days(90), id: 'expire-old-exports' }],
@@ -1176,8 +1168,8 @@ const cognitoExportBucket = new s3.Bucket(infraStack, 'CognitoExports', {
 const cognitoExportLambda = backend.cognitoExportFn.resources.lambda as lambda.Function;
 // USER_POOL_ID read from SSM at runtime — no functions→auth token
 cognitoExportLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
-cognitoExportLambda.addEnvironment('EXPORT_BUCKET', cognitoExportBucketName);
-grantS3Access(cognitoExportLambda, cognitoExportBucketName, ['s3:PutObject']);
+cognitoExportLambda.addEnvironment('EXPORT_BUCKET', cognitoExportBucket.bucketName);
+grantS3Access(cognitoExportLambda, cognitoExportBucket.bucketName, ['s3:PutObject']);
 cognitoExportLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
   resources: [`arn:aws:ssm:*:*:parameter${USER_POOL_ID_PARAM}`],
