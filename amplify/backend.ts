@@ -180,7 +180,7 @@ const userHashSaltSsmArn = infraStack.formatArn({
   resourceName: userHashSaltPath.substring(1)
 });
 
-const mappingStack = dataStack; // Mappings are placed in dataStack so they don't force Root->Nested references
+const mappingStack = infraStack; // Mappings moved to infraStack to resolve Nested->Root circularity and EventSourceMapping collisions
 const rootStack = (dataStack.node.scope as any) instanceof Stack ? (dataStack.node.scope as Stack) : dataStack;
 
 // ── SSM Parameters (Circular Dep Break) ──────────────────────────────────────
