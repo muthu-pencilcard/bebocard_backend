@@ -1352,31 +1352,33 @@ Tags.of(schedulerLambda).add('Function', 'campaign-scheduler');
 Tags.of(schedulerLambda).add('CostCenter', 'engagement');
 
 // ── P3-12: Zero-Downtime Blue/Green Deployments (Lambda Aliases + CodeDeploy) ─
-const blueGreenTargets: Array<{ lambda: lambda.Function; name: string }> = [
-  { lambda: scanLambda, name: 'ScanHandler' },
-  { lambda: receiptProcessorLambda, name: 'ReceiptProcessor' },
-  { lambda: cardManagerLambda, name: 'CardManager' },
-];
-
-for (const { lambda: fn, name } of blueGreenTargets) {
-  const version = fn.currentVersion;
-
-  const fnStack = Stack.of(fn);
-  const liveAlias = new lambda.Alias(fnStack, `${name}LiveAlias`, {
-    aliasName: 'live',
-    version,
-  });
-
-  const errorAlarm = new cloudwatch.Alarm(fnStack, `${name}CanaryErrorAlarm`, {
-    metric: liveAlias.metricErrors({ period: Duration.minutes(1) }),
-    threshold: 1,
-    evaluationPeriods: 3,
-    alarmDescription: `P3-12: ${name} canary error rate elevated — auto-rollback triggered`,
-  });
-
-  new codedeploy.LambdaDeploymentGroup(fnStack, `${name}DeploymentGroup`, {
-    alias: liveAlias,
-    deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
-    alarms: [errorAlarm],
-  });
-}
+// DEFERRED: fn.currentVersion creates implicit dependencies on every Lambda env var
+// and IAM policy. Combined with DeploymentGroup → Alias → CurrentVersion chains,
+// this causes circular dependencies within the data stack. Re-enable in a dedicated
+// deployment stack once the base infrastructure is stable.
+//
+// const blueGreenTargets: Array<{ lambda: lambda.Function; name: string }> = [
+//   { lambda: scanLambda, name: 'ScanHandler' },
+//   { lambda: receiptProcessorLambda, name: 'ReceiptProcessor' },
+//   { lambda: cardManagerLambda, name: 'CardManager' },
+// ];
+//
+// for (const { lambda: fn, name } of blueGreenTargets) {
+//   const version = fn.currentVersion;
+//   const fnStack = Stack.of(fn);
+//   const liveAlias = new lambda.Alias(fnStack, `${name}LiveAlias`, {
+//     aliasName: 'live',
+//     version,
+//   });
+//   const errorAlarm = new cloudwatch.Alarm(fnStack, `${name}CanaryErrorAlarm`, {
+//     metric: liveAlias.metricErrors({ period: Duration.minutes(1) }),
+//     threshold: 1,
+//     evaluationPeriods: 3,
+//     alarmDescription: `P3-12: ${name} canary error rate elevated — auto-rollback triggered`,
+//   });
+//   new codedeploy.LambdaDeploymentGroup(fnStack, `${name}DeploymentGroup`, {
+//     alias: liveAlias,
+//     deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
+//     alarms: [errorAlarm],
+//   });
+// }
