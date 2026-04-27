@@ -194,10 +194,10 @@ const ANALYTICS_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/ANALY
 const EXPORTS_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/EXPORTS_BUCKET`;
 const COGNITO_EXPORT_BUCKET_PARAM = `/bebocard/${amplifyAppId}/${amplifyBranch}/COGNITO_EXPORT_BUCKET`;
 
-new ssm.StringParameter(dataStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
-new ssm.StringParameter(dataStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
-new ssm.StringParameter(dataStack, 'RefDataTableNameParam', { parameterName: refDataTableParamName, stringValue: refDataTable.tableName });
-new ssm.StringParameter(dataStack, 'ReportTableNameParam', { parameterName: reportTableParamName, stringValue: reportTable.tableName });
+new ssm.StringParameter(infraStack, 'UserTableNameParam', { parameterName: userTableParamName, stringValue: userTable.tableName });
+new ssm.StringParameter(infraStack, 'AdminTableNameParam', { parameterName: adminTableParamName, stringValue: adminTable.tableName });
+new ssm.StringParameter(infraStack, 'RefDataTableNameParam', { parameterName: refDataTableParamName, stringValue: refDataTable.tableName });
+new ssm.StringParameter(infraStack, 'ReportTableNameParam', { parameterName: reportTableParamName, stringValue: reportTable.tableName });
 // ── Store Cognito UserPoolId in auth stack's own SSM param (no data→auth token) ──
 new ssm.StringParameter(authStack, 'UserPoolIdParam', {
   parameterName: USER_POOL_ID_PARAM,
