@@ -540,7 +540,7 @@ grantSqsAccess(scanLambda, receiptAnalyticsQueue, ['sqs:SendMessage']);
 scanLambda.addEnvironment('RECEIPT_ANALYTICS_QUEUE_URL', receiptAnalyticsQueue.queueUrl);
 
 const receiptAnalyticsProcessorLambda = backend.receiptAnalyticsProcessorFn.resources.lambda as lambda.Function;
-receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+receiptAnalyticsProcessorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 
 
 new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource', {
@@ -550,7 +550,7 @@ new lambda.EventSourceMapping(mappingStack, 'ReceiptAnalyticsProcessorSQSSource'
   reportBatchItemFailures: true,
 });
 grantSqsAccess(receiptAnalyticsProcessorLambda, receiptAnalyticsQueue, ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
-grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucketName, ['s3:PutObject']);
+grantS3Access(receiptAnalyticsProcessorLambda, analyticsBucket.bucketName, ['s3:PutObject']);
 receiptAnalyticsProcessorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
   resources: [
@@ -655,7 +655,7 @@ wellKnown.addResource('assetlinks.json').addMethod('GET', qrIntegration);
 
 // ── Receipt Iceberg writer ──
 const receiptIcebergLambda = backend.receiptIcebergWriterFn.resources.lambda as lambda.Function;
-receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+receiptIcebergLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 receiptIcebergLambda.addEnvironment('GLUE_DATABASE', glueDatabase.ref ?? `bebo_analytics_${stage}`);
 receiptIcebergLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroup.name);
 receiptIcebergLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
@@ -666,7 +666,7 @@ receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 receiptIcebergLambda.addEnvironment('ICEBERG_DLQ_URL', icebergDLQ.queueUrl);
 
-grantS3Access(receiptIcebergLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(receiptIcebergLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 grantSqsAccess(receiptIcebergLambda, icebergDLQ, ['sqs:SendMessage']);
 receiptIcebergLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
@@ -711,7 +711,7 @@ refDataTable.grantStreamRead(receiptIcebergLambda);
 // ── Tenant provisioner (P1-2) ──
 const tenantProvisionerLambda = backend.tenantProvisionerFn.resources.lambda as lambda.Function;
 tenantProvisionerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
-tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+tenantProvisionerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 tenantProvisionerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 
 grantTableAccess(tenantProvisionerLambda, 'RefDataEvent', true);
@@ -751,7 +751,7 @@ refDataTable.grantStreamRead(tenantProvisionerLambda);
 const analyticsLambda = backend.tenantAnalyticsFn.resources.lambda as lambda.Function;
 analyticsLambda.addEnvironment('USER_TABLE', userTable.tableName);
 analyticsLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
-analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+analyticsLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 analyticsLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 analyticsLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
 analyticsLambda.addEnvironment('REPORT_TABLE', reportTable.tableName);
@@ -759,7 +759,7 @@ analyticsLambda.addEnvironment('REPORT_TABLE', reportTable.tableName);
 grantTableAccess(analyticsLambda, 'UserDataEvent', false);
 grantTableAccess(analyticsLambda, 'RefDataEvent', false);
 grantTableAccess(analyticsLambda, 'ReportDataEvent', false);
-grantS3Access(analyticsLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(analyticsLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 analyticsLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['athena:StartQueryExecution', 'athena:GetQueryExecution', 'athena:GetQueryResults'],
   resources: [`arn:aws:athena:*:*:workgroup/${athenaWorkgroupName}`],
@@ -884,7 +884,7 @@ analyticsLegacy.addResource('subscriber-count').addMethod('GET', analyticsIntegr
 const exporterLambda = backend.exporterFn.resources.lambda as lambda.Function;
 exporterLambda.addEnvironment('USER_TABLE', userTable.tableName);
 exporterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
-exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucketName);
+exporterLambda.addEnvironment('EXPORTS_BUCKET', exportsBucket.bucketName);
 // USER_POOL_ID read from SSM at runtime — no synthesis-time auth→data token
 exporterLambda.addEnvironment('USER_POOL_ID_PARAM', USER_POOL_ID_PARAM);
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -896,7 +896,7 @@ exporterLambda.addToRolePolicy(new iam.PolicyStatement({
 
 grantTableAccess(exporterLambda, 'UserDataEvent', true);
 grantTableAccess(exporterLambda, 'AdminDataEvent', true);
-grantS3Access(exporterLambda, exportsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(exporterLambda, exportsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 
 exporterLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['cognito-idp:AdminDisableUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:AdminDeleteUser'],
@@ -935,14 +935,14 @@ new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocAnalyticsApi', {
 const compactorLambda = backend.analyticsCompactorFn.resources.lambda as lambda.Function;
 compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 compactorLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
-compactorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+compactorLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 
-grantS3Access(compactorLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:DeleteObject']);
+grantS3Access(compactorLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:DeleteObject']);
 compactorLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
   resources: [
-    `arn:aws:s3:::${analyticsBucketName}`,
-    `arn:aws:s3:::${analyticsBucketName}/*`,
+    `arn:aws:s3:::${analyticsBucket.bucketName}`,
+    `arn:aws:s3:::${analyticsBucket.bucketName}/*`,
     'arn:aws:s3:::bebocard-enterprise-*',
     'arn:aws:s3:::bebocard-enterprise-*/*',
   ],
@@ -966,7 +966,7 @@ compactorLambda.addToRolePolicy(new iam.PolicyStatement({
 const backfillerLambda = backend.analyticsBackfillerFn.resources.lambda as lambda.Function;
 backfillerLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
 backfillerLambda.addEnvironment('ATHENA_WORKGROUP', athenaWorkgroupName);
-backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucketName);
+backfillerLambda.addEnvironment('ANALYTICS_BUCKET', analyticsBucket.bucketName);
 backfillerLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 backfillerLambda.addEnvironment('USER_TABLE', userTable.tableName);
 backfillerLambda.addEnvironment('USER_HASH_SALT_PATH', userHashSaltPath);
@@ -975,12 +975,12 @@ backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: [userHashSaltSsmArn]
 }));
 
-grantS3Access(backfillerLambda, analyticsBucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
+grantS3Access(backfillerLambda, analyticsBucket.bucketName, ['s3:GetObject', 's3:PutObject', 's3:ListBucket']);
 backfillerLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['s3:GetBucketLocation', 's3:GetObject', 's3:ListBucket', 's3:PutObject', 's3:DeleteObject'],
   resources: [
-    `arn:aws:s3:::${analyticsBucketName}`,
-    `arn:aws:s3:::${analyticsBucketName}/*`,
+    `arn:aws:s3:::${analyticsBucket.bucketName}`,
+    `arn:aws:s3:::${analyticsBucket.bucketName}/*`,
     'arn:aws:s3:::bebocard-enterprise-*',
     'arn:aws:s3:::bebocard-enterprise-*/*',
   ],
