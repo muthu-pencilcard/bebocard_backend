@@ -29,7 +29,7 @@ const schema = a.schema({
       index('subCategory').sortKeys(['createdAt']).queryField('userDataBySubCategory'),
     ])
     .authorization(allow => [
-      allow.owner(),
+      allow.owner().identityClaim('sub'),
     ]),
 
   // ── Analytics reporting: daily snapshots, trend metrics (P2-17) ────────────
