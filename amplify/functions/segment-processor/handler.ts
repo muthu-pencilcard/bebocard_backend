@@ -205,17 +205,70 @@ async function recomputeGlobalSegment(permULID: string, owner: string): Promise<
     ? Math.floor((Date.now() - new Date(lastVisit).getTime()) / 86_400_000)
     : 9999;
 
-  // 1. Determine Personas based on category spend
+  // 1. Base Aggregations
   const catTotals: Record<string, number> = {};
+  const brandTotals: Record<string, number> = {};
   for (const r of receipts) {
-    catTotals[r.category!] = (catTotals[r.category!] ?? 0) + r.amount;
+    const cat = r.category?.toLowerCase() ?? 'other';
+    catTotals[cat] = (catTotals[cat] ?? 0) + r.amount;
   }
-  const personas: string[] = [];
-  if (totalSpend > 500) personas.push('high_value');
-  if (visitCount > 15) personas.push('power_user');
-  if ((catTotals['groceries'] ?? 0) > totalSpend * 0.4) personas.push('grocery_focused');
-  if ((catTotals['dining'] ?? 0) > totalSpend * 0.3) personas.push('dining_enthusiast');
-  if ((catTotals['fuel'] ?? 0) > 30) personas.push('vehicle_owner');
+  
+  for (const r of receipts as any) {
+    const bId = r.brandId ?? 'unknown';
+    brandTotals[bId] = (brandTotals[bId] ?? 0) + r.amount;
+  }
+
+  // 2. Nuanced Heuristics (P3-Advanced)
+  const catIntensity: Record<string, number> = {};
+  const catConfidence: Record<string, number> = {};
+
+  for (const cat of Object.keys(catTotals)) {
+    const total = catTotals[cat];
+    const percentage = total / totalSpend;
+    // Intensity = how much higher is this cat than a typical 10% baseline
+    catIntensity[cat] = percentage / 0.1;
+    catConfidence[cat] = Math.min(1.0, (total / 100) * percentage);
+  }
+
+  const scores: Array<{ id: string; score: number }> = [];
+
+  // Persona: HIGH_VALUE (Magnitude signal)
+  if (totalSpend > 1000) scores.push({ id: 'high_value', score: Math.min(1.0, totalSpend / 3000) });
+  
+  // Persona: POWER_USER (Frequency signal)
+  if (visitCount > 30) scores.push({ id: 'power_user', score: Math.min(1.0, visitCount / 60) });
+
+  // Persona: GROCERY_FOCUSED
+  const groceryScore = (catTotals['groceries'] ?? 0) / totalSpend;
+  if (groceryScore > 0.35) scores.push({ id: 'grocery_focused', score: Math.min(1.0, groceryScore * 2) });
+
+  // Persona: TECH_ENTHUSIAST
+  const techScore = (catTotals['electronics'] ?? 0 + (catTotals['tech'] ?? 0)) / totalSpend;
+  if (techScore > 0.2) scores.push({ id: 'tech_enthusiast', score: Math.min(1.0, techScore * 3) });
+
+  // Persona: DINING_ENTHUSIAST
+  const diningScore = (catTotals['dining'] ?? 0) / totalSpend;
+  if (diningScore > 0.25) scores.push({ id: 'dining_enthusiast', score: Math.min(1.0, diningScore * 2.5) });
+
+  // Persona: TRAVELER
+  const travelScore = (catTotals['travel'] ?? 0) / totalSpend;
+  if (travelScore > 0.1) scores.push({ id: 'traveler', score: Math.min(1.0, travelScore * 2) });
+
+  // Persona: BRAND_LOYALIST (Concentration signal)
+  const maxBrandSpend = Math.max(...Object.values(brandTotals));
+  const brandConcentration = maxBrandSpend / totalSpend;
+  if (brandConcentration > 0.6 && visitCount > 5) {
+    scores.push({ id: 'brand_loyalist', score: Math.min(1.0, brandConcentration) });
+  }
+
+  // Persona: DEAL_HUNTER
+  const atv = totalSpend / visitCount; 
+  if (atv < 25 && visitCount > 10) scores.push({ id: 'deal_hunter', score: 0.8 });
+
+  // Sort by score (confidence)
+  scores.sort((a, b) => b.score - a.score);
+  const personas = scores.map(s => s.id);
+  const personaMap = scores.reduce((m, s) => ({ ...m, [s.id]: Math.round(s.score * 100) }), {});
 
   const desc = {
     spendBucket: toSpendBucket(totalSpend),
@@ -223,9 +276,8 @@ async function recomputeGlobalSegment(permULID: string, owner: string): Promise<
     totalSpend: Math.round(totalSpend * 100) / 100,
     visitCount,
     lastVisit,
-    persona: personas,
-    computedAt: new Date().toISOString(),
-    // Global segment doesn't have a single "subscribed" flag as it's for internal BI/Dashboard
+    persona: personas.length > 0 ? personas : ['undetermined'],
+    updatedAt: new Date().toISOString(),
   };
 
   await dynamo.send(new PutCommand({
@@ -238,6 +290,7 @@ async function recomputeGlobalSegment(permULID: string, owner: string): Promise<
       primaryCat: 'segment',
       subCategory: 'global',
       owner,
+      persona: personas.length > 0 ? personas : ['undetermined'], // Top-level for GSI targeting
       desc: JSON.stringify(desc),
       updatedAt: new Date().toISOString(),
     },

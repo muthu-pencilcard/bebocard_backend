@@ -639,7 +639,9 @@ segmentLambda.addToRolePolicy(new iam.PolicyStatement({
 // ── Billing Run Schedule (P1-8) ──
 const billingRunLambda = backend.billingRunHandlerFn.resources.lambda as lambda.Function;
 billingRunLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+billingRunLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 grantTableAccess(billingRunLambda, 'RefDataEvent', true);
+grantTableAccess(billingRunLambda, 'UserDataEvent', true);
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail'],
   resources: [`arn:aws:ses:*:${infraStack.account}:identity/bebocard.com.au`],
@@ -1120,6 +1122,10 @@ Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
 const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
 affiliateSyncLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
+affiliateSyncLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/affiliate-api-keys/*`],
+}));
 
 const affiliateSyncRule = new events.Rule(dataStack, 'NightlyAffiliateSyncRule', {
   schedule: events.Schedule.expression('cron(0 5 * * ? *)'),
@@ -1360,7 +1366,15 @@ Tags.of(templateManagerLambda).add('CostCenter', 'ops');
 // ── P2-2: Campaign Lifecycle Scheduler (every 5 mins sweep) ──────────────────
 const schedulerLambda = backend.campaignSchedulerFn.resources.lambda as lambda.Function;
 schedulerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+schedulerLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 grantTableAccess(schedulerLambda, 'RefDataEvent', true);
+grantTableAccess(schedulerLambda, 'UserDataEvent', false); // Read personas
+
+// Grant access to Firebase secret for proactive pushes
+schedulerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: [`arn:aws:secretsmanager:*:*:secret:bebocard/firebase-service-account`],
+}));
 
 const schedulerRule = new events.Rule(dataStack, 'CampaignSchedulerRule', {
   schedule: events.Schedule.rate(Duration.minutes(5)),

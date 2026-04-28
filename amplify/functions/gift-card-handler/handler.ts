@@ -101,6 +101,12 @@ async function handleAppSync(event: AppSyncResolverEvent<Record<string, unknown>
       return handlePurchaseAsGift(args, permULID);
     case 'syncGiftCardBalance':
       return handleSyncBalance(args, permULID);
+    case 'listYourGiftCardForSale':
+      return handleListForSale(args, permULID);
+    case 'purchaseResoldCard':
+      return handlePurchaseResoldCard(args, permULID);
+    case 'withdrawBalance':
+      return handleWithdrawBalance(args, permULID);
     default:
       throw new Error(`Unknown field: ${field}`);
   }
@@ -1105,4 +1111,216 @@ function safeJson(value: unknown): Record<string, unknown> {
   if (typeof value !== 'string' || !value) return {};
   try { return JSON.parse(value) as Record<string, unknown>; }
   catch { return {}; }
+}
+
+// ── Phase 3: Marketplace Handlers ─────────────────────────────────────────────
+
+async function handleListForSale(args: Record<string, any>, permULID: string) {
+  const { cardSK, askingPrice, currency, sellerNote } = args;
+  if (!cardSK || !askingPrice) throw new Error('cardSK and askingPrice are required');
+
+  // Verify card ownership and status
+  const card = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: cardSK },
+  }));
+
+  if (!card.Item) throw new Error('Gift card not found');
+  if (card.Item.status !== 'ACTIVE') throw new Error('Only active cards can be listed');
+
+  const cardDesc = safeJson(card.Item.desc);
+  const resaleId = `RESALE#${ulid()}`;
+
+  // Atomic update: Lock card in UserDataEvent and Create listing in RefDataEvent
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: cardSK },
+    UpdateExpression: 'SET #s = :locked',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':locked': 'LOCKED_FOR_SALE' },
+  }));
+
+  await dynamo.send(new PutCommand({
+    TableName: REF_TABLE,
+    Item: {
+      pK: 'MARKETPLACE#LISTINGS',
+      sK: resaleId,
+      cardSK: cardSK,
+      sellerPermULID: permULID,
+      brandId: card.Item.subCategory,
+      faceValue: cardDesc.denomination || cardDesc.balance,
+      askingPrice,
+      currency: currency || cardDesc.currency || 'AUD',
+      sellerNote,
+      status: 'ACTIVE',
+      createdAt: new Date().toISOString(),
+    }
+  }));
+
+  return { status: 'LISTED', resaleId };
+}
+
+async function handlePurchaseResoldCard(args: Record<string, any>, buyerPermULID: string) {
+  const { resaleId } = args;
+  if (!resaleId) throw new Error('resaleId is required');
+
+  // 1. Fetch listing
+  const listing = await dynamo.send(new GetCommand({
+    TableName: REF_TABLE,
+    Key: { pK: 'MARKETPLACE#LISTINGS', sK: resaleId },
+  }));
+
+  if (!listing.Item || listing.Item.status !== 'ACTIVE') {
+    throw new Error('Listing no longer available');
+  }
+
+  const { sellerPermULID, cardSK, brandId, faceValue, askingPrice, currency } = listing.Item;
+  if (sellerPermULID === buyerPermULID) throw new Error('Cannot buy your own listing');
+
+  // 2. Fetch seller's card details
+  const sellerCard = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${sellerPermULID}`, sK: cardSK },
+  }));
+
+  if (!sellerCard.Item) throw new Error('Seller card details missing');
+
+  // 3. Atomic Transfer
+  const newCardSK = `GIFTCARD#${ulid()}`;
+  
+  // Mark listing as sold
+  await dynamo.send(new UpdateCommand({
+    TableName: REF_TABLE,
+    Key: { pK: 'MARKETPLACE#LISTINGS', sK: resaleId },
+    UpdateExpression: 'SET #s = :sold',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':sold': 'SOLD' },
+  }));
+
+  // Mark seller card transferred
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${sellerPermULID}`, sK: cardSK },
+    UpdateExpression: 'SET #s = :transferred',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':transferred': 'TRANSFERRED' },
+  }));
+
+  // Add to buyer
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      ...sellerCard.Item,
+      pK: `USER#${buyerPermULID}`,
+      sK: newCardSK,
+      status: 'ACTIVE',
+      acquiredVia: 'MARKETPLACE',
+      purchasedAt: new Date().toISOString(),
+    }
+  }));
+
+  // 4. Credit Seller Balance
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${sellerPermULID}`, sK: 'IDENTITY' },
+    UpdateExpression: 'SET marketplaceBalance = if_not_exists(marketplaceBalance, :zero) + :credit, updatedAt = :now',
+    ExpressionAttributeValues: {
+      ':credit': askingPrice,
+      ':zero': 0,
+      ':now': new Date().toISOString(),
+    },
+  }));
+
+  // 5. Write SELLER_PROCEEDS# record for Finance tab
+  const proceedsId = ulid();
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${sellerPermULID}`,
+      sK: `RECEIPT#${new Date().toISOString().substring(0, 10)}#${proceedsId}`,
+      eventType: 'PROCEEDS',
+      status: 'CONFIRMED',
+      primaryCat: 'receipt',
+      brandId: 'bebocard',
+      desc: JSON.stringify({
+        merchant: 'BeboCard Marketplace',
+        amount: askingPrice,
+        currency: currency || 'AUD',
+        purchaseDate: new Date().toISOString(),
+        receiptType: 'MARKETPLACE_SALE_PROCEEDS',
+        linkedResaleId: resaleId,
+        category: 'income',
+        source: 'marketplace',
+      }),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+  }));
+
+  return { status: 'SUCCESS', cardSK: newCardSK };
+}
+
+async function handleWithdrawBalance(args: Record<string, any>, permULID: string) {
+  const { amount, currency = 'AUD' } = args;
+  if (!amount || amount <= 0) throw new Error('Invalid withdrawal amount');
+
+  // 1. Verify and Deduct Balance
+  try {
+    await dynamo.send(new UpdateCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+      UpdateExpression: 'SET marketplaceBalance = marketplaceBalance - :amount, updatedAt = :now',
+      ConditionExpression: 'marketplaceBalance >= :amount',
+      ExpressionAttributeValues: {
+        ':amount': amount,
+        ':now': new Date().toISOString(),
+      },
+    }));
+  } catch (err: any) {
+    if (err.name === 'ConditionalCheckFailedException') throw new Error('Insufficient balance');
+    throw err;
+  }
+
+  // 2. Create Withdrawal Request in AdminDataEvent for Ops
+  const withdrawalId = `WITHDRAWAL#${ulid()}`;
+  await dynamo.send(new PutCommand({
+    TableName: ADMIN_TABLE,
+    Item: {
+      pK: withdrawalId,
+      sK: permULID,
+      amount,
+      currency,
+      status: 'PENDING_PAYOUT',
+      requestedAt: new Date().toISOString(),
+      permULID,
+    }
+  }));
+
+  // 3. Record Withdrawal Receipt for User
+  const receiptId = ulid();
+  await dynamo.send(new PutCommand({
+    TableName: USER_TABLE,
+    Item: {
+      pK: `USER#${permULID}`,
+      sK: `RECEIPT#${new Date().toISOString().substring(0, 10)}#${receiptId}`,
+      eventType: 'WITHDRAWAL',
+      status: 'PENDING',
+      primaryCat: 'receipt',
+      brandId: 'bebocard',
+      desc: JSON.stringify({
+        merchant: 'BeboCard Withdrawal',
+        amount: -amount,
+        currency: currency,
+        purchaseDate: new Date().toISOString(),
+        receiptType: 'MARKETPLACE_WITHDRAWAL',
+        withdrawalId,
+        category: 'finance',
+        source: 'withdrawal',
+      }),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+  }));
+
+  return { status: 'PENDING', withdrawalId };
 }

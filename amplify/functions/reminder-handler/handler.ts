@@ -12,6 +12,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   ScanCommand,
+  QueryCommand,
   GetCommand,
   PutCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -127,32 +128,34 @@ export const handler = async () => {
 async function processRule(rule: ReminderRule, daysAhead: number): Promise<number> {
   const targetDate = new Date();
   targetDate.setDate(targetDate.getDate() + daysAhead);
-  const targetDateStr = targetDate.toISOString().slice(0, 10); // YYYY-MM-DD
+  // YYYY-MM-DD matches how we write to top-level expiryDate
+  const targetDateStr = targetDate.toISOString().slice(0, 10);
 
   let count = 0;
   let lastKey: Record<string, unknown> | undefined;
 
   do {
-    const res = await dynamo.send(new ScanCommand({
+    // 🔥 Optimized: Uses the userDataByExpiry GSI instead of table scan
+    const res = await dynamo.send(new QueryCommand({
       TableName: USER_TABLE,
+      IndexName: 'userDataByExpiry',
+      KeyConditionExpression: 'expiryDate = :target',
+      // Still filter by skPrefix and eventType/status if needed, 
+      // but GSI makes the candidate set very small.
       FilterExpression: 'begins_with(sK, :prefix)',
-      ExpressionAttributeValues: { ':prefix': rule.skPrefix },
+      ExpressionAttributeValues: { 
+        ':target': targetDateStr,
+        ':prefix': rule.skPrefix 
+      },
       ExclusiveStartKey: lastKey,
-      Limit: 200,
+      Limit: 100,
     }));
     lastKey = res.LastEvaluatedKey as typeof lastKey;
 
     for (const item of res.Items ?? []) {
       if (rule.statusCheck && !rule.statusCheck(item)) continue;
-
+      
       const desc = JSON.parse(item.desc ?? '{}') as Record<string, unknown>;
-      const dateValue = desc[rule.descField] as string | undefined;
-      if (!dateValue) continue;
-
-      // Compare date-only portions
-      const recordDate = dateValue.slice(0, 10);
-      if (recordDate !== targetDateStr) continue;
-
       // Extract permULID from pK: USER#<permULID>
       const permULID = (item.pK as string).replace('USER#', '');
 
@@ -167,11 +170,6 @@ async function processRule(rule: ReminderRule, daysAhead: number): Promise<numbe
       const token = await getDeviceToken(permULID);
       if (!token) continue;
 
-      // Write sent-log BEFORE sending FCM.
-      // If FCM succeeds but markSent fails on retry, the user may receive a
-      // duplicate — acceptable. If markSent succeeds but FCM fails, the user
-      // misses the reminder — also acceptable. The critical property is that
-      // we never send duplicates to users: write the log first to guarantee that.
       try {
         await markSent(permULID, item.sK as string, dedupKey);
       } catch (e) {
@@ -195,7 +193,6 @@ async function processRule(rule: ReminderRule, daysAhead: number): Promise<numbe
         count++;
       } catch (e) {
         console.error(`[reminder-handler] FCM failed for ${permULID}:`, e);
-        // sent-log already written — reminder won't retry next run, which is fine
       }
     }
   } while (lastKey);

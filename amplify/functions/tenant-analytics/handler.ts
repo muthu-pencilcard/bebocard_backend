@@ -70,6 +70,7 @@ interface SegmentsResponse {
   subscriberCount: number;
   spendDistribution: Record<string, number>;
   visitFrequency: Record<string, number>;
+  personaDistribution: Record<string, number>;
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -200,6 +201,7 @@ async function handleSegments(
   // Aggregate — only subscribed users (consent gate)
   const spendCounts: Record<string, number> = { '<100': 0, '100-200': 0, '200-500': 0, '500+': 0 };
   const visitCounts: Record<string, number> = { new: 0, occasional: 0, frequent: 0, lapsed: 0 };
+  const personaCounts: Record<string, number> = {};
   let subscriberCount = 0;
 
   for (const item of items) {
@@ -211,6 +213,12 @@ async function handleSegments(
     subscriberCount++;
     if (seg.spendBucket) spendCounts[seg.spendBucket] = (spendCounts[seg.spendBucket] ?? 0) + 1;
     if (seg.visitFrequency) visitCounts[seg.visitFrequency] = (visitCounts[seg.visitFrequency] ?? 0) + 1;
+    
+    if (Array.isArray(seg.persona)) {
+      for (const p of seg.persona) {
+        personaCounts[p] = (personaCounts[p] ?? 0) + 1;
+      }
+    }
   }
 
   // Suppress if below minimum cohort threshold — prevents statistical re-identification.
@@ -224,6 +232,7 @@ async function handleSegments(
       subscriberCount: 0,
       spendDistribution: { '<100': 0, '100-200': 0, '200-500': 0, '500+': 0 },
       visitFrequency: { new: 0, occasional: 0, frequent: 0, lapsed: 0 },
+      personaDistribution: {},
     };
     return { statusCode: 200, headers, body: JSON.stringify(response) };
   }
@@ -238,6 +247,7 @@ async function handleSegments(
     subscriberCount,
     spendDistribution,
     visitFrequency,
+    personaDistribution: normalise(personaCounts, subscriberCount),
   };
 
   return { statusCode: 200, headers, body: JSON.stringify(response) };

@@ -18,8 +18,10 @@ const schema = a.schema({
     primaryCat: a.string(),      // loyalty_card | receipt | invoice | gift_card | segment | subscription | ...
     subCategory: a.string(),     // usually brand id, or another feature-specific subtype
     desc: a.json(),              // all entity-specific fields
-    secondaryULID: a.string(),   // IDENTITY only — QR-facing rotating ID (top-level for fast reads)
-    rotatesAt: a.string(),       // IDENTITY only — ISO 8601, when secondaryULID should next be rotated
+    secondaryULID: a.string(),   // IDENTITY only
+    rotatesAt: a.string(),       // IDENTITY only
+    expiryDate: a.string(),      // Top-level for GSI lookups (invoices, gift cards, points)
+    persona: a.string(),         // SEGMENT only — top-level for GSI lookup targeting
     createdAt: a.datetime(),
     updatedAt: a.datetime(),
   })
@@ -27,6 +29,8 @@ const schema = a.schema({
     .secondaryIndexes(index => [
       index('primaryCat').sortKeys(['createdAt']).queryField('userDataByCategory'),
       index('subCategory').sortKeys(['createdAt']).queryField('userDataBySubCategory'),
+      index('expiryDate').queryField('userDataByExpiry'),
+      index('persona').queryField('userDataByPersona'),
     ])
     .authorization(allow => [
       allow.owner().identityClaim('sub'),
@@ -440,6 +444,35 @@ const schema = a.schema({
     })
     .returns(a.json())
     .handler(a.handler.function(giftCardHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  listYourGiftCardForSale: a.mutation()
+    .arguments({
+      cardSK: a.string().required(),
+      askingPrice: a.float().required(),
+      currency: a.string(),
+      sellerNote: a.string(),
+    })
+    .returns(a.json())
+    .handler(a.handler.function(giftCardHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  purchaseResoldCard: a.mutation()
+    .arguments({ resaleId: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(giftCardHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  withdrawBalance: a.mutation()
+    .arguments({ amount: a.float().required(), currency: a.string() })
+    .returns(a.json())
+    .handler(a.handler.function(giftCardHandlerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  linkStripeAccount: a.mutation()
+    .arguments({ stripeAccountId: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
   // ── SMB Loyalty-as-a-Service stamp cards (Phase 11) ──────────────────────

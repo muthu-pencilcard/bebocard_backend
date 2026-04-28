@@ -171,6 +171,17 @@ async function reportGeofenceEntry(args: {
   }
 }
 
+// ─── Persona Mapping (P4-3) ──────────────────────────────────────────────────
+
+function getPersonaForBrand(brandId: string): string {
+  const brand = brandId.toLowerCase();
+  if (['woolworths', 'coles', 'aldi', 'harris_scarfe', 'iga'].includes(brand)) return 'grocery_focused';
+  if (['jb_hifi', 'apple', 'eb_games', 'samsung'].includes(brand)) return 'tech_enthusiast';
+  if (['nike', 'adidas', 'zara', 'h_m', 'bigw', 'kmart', 'target'].includes(brand)) return 'deal_hunter';
+  if (['chemist_warehouse', 'priceline'].includes(brand)) return 'health_conscious';
+  return 'general';
+}
+
 // ─── Personalisation rules ────────────────────────────────────────────────────
 
 function buildNotification(params: {
@@ -179,13 +190,27 @@ function buildNotification(params: {
   broadcastOffer: BroadcastOffer | null;
   segment: any;
 }): { title: string; body: string } {
-  const { visitCount, broadcastOffer, segment } = params;
+  const { brandId, visitCount, broadcastOffer, segment } = params;
 
-  // Segment-aware arrival: Personalise based on persona
-  const personas = segment?.persona ?? [];
-  const isHighValue = personas.includes('high_value');
+  // Segment-aware arrival (Phase 4): Persona Confidence
+  const personaMap = segment?.personaMap ?? {};
+  const targetPersona = getPersonaForBrand(brandId);
+  const confidence = personaMap[targetPersona] ?? 0;
+  
+  const isHighValue = (segment?.persona ?? []).includes('high_value');
   const isLapsed = segment?.visitFrequency === 'lapsed';
 
+  // 1. High Confidence Persona Hook (P4-3)
+  if (confidence >= 75) {
+    return {
+      title: `${broadcastOffer?.brandName ?? brandId} — For our top ${targetPersona.replace('_', ' ')}s`,
+      body: broadcastOffer 
+        ? `${broadcastOffer.headline} (Priority offer for you!)`
+        : `Check your loyalty card — we've spotted exclusive deals for ${targetPersona.replace('_', ' ')}s like you today.`,
+    };
+  }
+
+  // 2. Lapsed User Hook
   if (isLapsed && broadcastOffer) {
     return {
       title: `Welcome back to ${broadcastOffer.brandName}!`,
@@ -193,7 +218,7 @@ function buildNotification(params: {
     };
   }
 
-  // Frequency bonus — more than 2 visits this calendar month
+  // 3. Frequency bonus — more than 2 visits this calendar month
   if (visitCount > 2 && broadcastOffer) {
     return {
       title: `${broadcastOffer.brandName} — ${isHighValue ? 'Premium' : 'Loyal'} customer offer 🎁`,
@@ -210,8 +235,8 @@ function buildNotification(params: {
 
   // Generic fallback — no active offer configured by tenant
   return {
-    title: 'Your loyalty card is ready',
-    body: 'Tap to show your card at checkout.',
+    title: `Ready for ${brandId}?`,
+    body: 'Tap to show your loyalty card at checkout.',
   };
 }
 

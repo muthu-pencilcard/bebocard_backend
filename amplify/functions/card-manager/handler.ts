@@ -184,6 +184,7 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     // GDPR — right to erasure
     case 'deleteAccount': return deleteAccount(permULID);
     case 'recordBipaConsent': return recordBipaConsent(permULID, owner, args.textVersion!);
+    case 'linkStripeAccount': return linkStripeAccount(permULID, (args as any).stripeAccountId);
     default: throw new Error(`Unknown operation: ${operation}`);
   }
 };
@@ -242,7 +243,9 @@ async function addCard(permULID: string, owner: string, args: Args) {
         addedAt: now,
         storeId: storeId ?? null,
         attributionBrandId: attributionBrandId ?? null,
+        pointsExpiryDate: (args as any).pointsExpiryDate ?? null, // Extract if passed
       }),
+      expiryDate: (args as any).pointsExpiryDate ?? null, // Top-level for GSI
       createdAt: now,
       updatedAt: now,
     },
@@ -352,15 +355,16 @@ async function getOrRefreshIdentity(permULID: string, owner: string) {
     const expiry = new Date(identity.Item.rotatesAt ?? 0);
 
     // Still valid — return current token, no write needed
-    if (expiry > now) {
+      const idDesc = parseRecord(identity.Item.desc);
       return {
         secondaryULID: identity.Item.secondaryULID,
         rotatesAt: identity.Item.rotatesAt,
         status: identity.Item.status,
+        marketplaceBalance: identity.Item.marketplaceBalance ?? 0,
+        stripeAccountId: idDesc.stripeAccountId as string | undefined,
         serverTime,
         generated: false,
       };
-    }
 
     // Expired — rotate. rotateQR uses conditional writes so concurrent calls
     // are safe: the losing device receives the winning rotation value.
@@ -369,6 +373,8 @@ async function getOrRefreshIdentity(permULID: string, owner: string) {
       secondaryULID: rotated.newSecondaryULID,
       rotatesAt: rotated.rotatesAt,
       status: identity.Item.status,
+      marketplaceBalance: (rotated as any).marketplaceBalance ?? 0,
+      stripeAccountId: (rotated as any).stripeAccountId as string | undefined,
       serverTime,
       generated: true,
     };
@@ -430,7 +436,7 @@ async function createFreshIdentity(permULID: string, owner: string, serverTime: 
       ],
     }));
 
-    return { secondaryULID: newSecondaryULID, rotatesAt, status: 'ACTIVE', serverTime, generated: true };
+      return { secondaryULID: newSecondaryULID, rotatesAt, status: 'ACTIVE', marketplaceBalance: 0, stripeAccountId: undefined, serverTime, generated: true };
 
   } catch (err: unknown) {
     const error = err as { name?: string; CancellationReasons?: Array<{ Code: string }> };
@@ -442,10 +448,12 @@ async function createFreshIdentity(permULID: string, owner: string, serverTime: 
         Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
       }));
       if (fresh.Item) {
+        const freshDesc = parseRecord(fresh.Item.desc);
         return {
           secondaryULID: fresh.Item.secondaryULID,
           rotatesAt: fresh.Item.rotatesAt,
           status: fresh.Item.status,
+          stripeAccountId: freshDesc.stripeAccountId as string | undefined,
           serverTime,
           generated: false,
         };
@@ -552,6 +560,7 @@ async function rotateQR(permULID: string) {
           alreadyRotated: true,
           newSecondaryULID: fresh.Item?.secondaryULID,
           rotatesAt: fresh.Item?.rotatesAt,
+          marketplaceBalance: fresh.Item?.marketplaceBalance ?? 0,
         };
       }
     }
@@ -573,7 +582,29 @@ async function rotateQR(permULID: string) {
     },
   })).catch(err => console.error('[card-manager] Failed to write rotation log:', err));
 
-  return { success: true, alreadyRotated: false, newSecondaryULID, rotatesAt: newRotatesAt, frequency };
+  return { success: true, alreadyRotated: false, newSecondaryULID, rotatesAt: newRotatesAt, frequency, marketplaceBalance: identity.Item.marketplaceBalance ?? 0, stripeAccountId: identityDesc.stripeAccountId as string | undefined };
+}
+
+async function linkStripeAccount(permULID: string, stripeAccountId: string) {
+  const now = new Date().toISOString();
+  const identity = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+  }));
+  if (!identity.Item) throw new Error('IDENTITY not found');
+  
+  const desc = parseRecord(identity.Item.desc);
+  await dynamo.send(new UpdateCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+    UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+    ExpressionAttributeNames: { '#d': 'desc' },
+    ExpressionAttributeValues: {
+      ':desc': JSON.stringify({ ...desc, stripeAccountId, linkedAt: now }),
+      ':now': now,
+    },
+  }));
+  return { success: true };
 }
 
 // ── Set rotation frequency (Patent Claims 75–86) ──────────────────────────────
@@ -654,6 +685,7 @@ async function addGiftCard(permULID: string, owner: string, args: Args) {
         // NOTE: PIN is never stored server-side — flutter_secure_storage only
         addedAt: now,
       }),
+      expiryDate: expiryDate ? expiryDate.substring(0, 10) : null, // Top-level for GSI
       createdAt: now,
       updatedAt: now,
     },
@@ -731,6 +763,7 @@ async function addInvoice(permULID: string, owner: string, args: Args) {
         billingPeriod:        billingPeriod        ?? null,
         createdAt: now,
       }),
+      expiryDate: dueDate ? dueDate.substring(0, 10) : null, // Top-level for GSI
       createdAt: now,
       updatedAt: now,
     },

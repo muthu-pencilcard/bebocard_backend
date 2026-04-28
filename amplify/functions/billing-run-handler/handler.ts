@@ -19,6 +19,7 @@ const ses = new SESClient({});
 const ssm = new SSMClient({});
 
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
+const USER_TABLE = process.env.USER_TABLE!;
 const FROM_EMAIL = process.env.FROM_EMAIL ?? 'billing@bebocard.com.au';
 
 // ── Stripe helpers (inline — avoid importing the portal's Stripe module) ──────
@@ -74,6 +75,43 @@ async function createStripeInvoiceItem(input: {
   }
 
   return response.json() as Promise<{ id: string; invoice?: string | null }>;
+}
+
+async function createStripeTransfer(input: {
+  amountAud: number;
+  destinationAccountId: string;
+  transferGroup: string;
+  metadata: Record<string, string>;
+}): Promise<{ id: string }> {
+  const stripeKey = await getStripeKey();
+  if (!stripeKey) throw new Error('STRIPE_SECRET_KEY not configured');
+
+  const params = new URLSearchParams({
+    amount: String(Math.round(input.amountAud * 100)),
+    currency: 'aud',
+    destination: input.destinationAccountId,
+    transfer_group: input.transferGroup,
+  });
+  
+  for (const [k, v] of Object.entries(input.metadata)) {
+    params.append(`metadata[${k}]`, v);
+  }
+
+  const response = await fetch('https://api.stripe.com/v1/transfers', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${stripeKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Stripe Transfer error: ${response.status} ${text}`);
+  }
+
+  return response.json() as Promise<{ id: string }>;
 }
 
 // ── Tier billable type filter ─────────────────────────────────────────────────
@@ -420,6 +458,87 @@ async function applyTierChange(tenantId: string, newTier: TenantTier) {
   }));
 }
 
+// ── Marketplace Payouts (P4-2) ────────────────────────────────────────────────
+
+async function processMarketplacePayouts() {
+  console.info('[billing-run] Sweeping PENDING marketplace withdrawals...');
+  
+  let lastEvaluatedKey: Record<string, any> | undefined = undefined;
+  let successCount = 0;
+  let failCount = 0;
+
+  do {
+    const scanResponse = await dynamo.send(new ScanCommand({
+      TableName: USER_TABLE,
+      FilterExpression: 'primaryCat = :cat AND #status = :pending',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':cat': 'withdrawal', ':pending': 'PENDING' },
+      ExclusiveStartKey: lastEvaluatedKey,
+    }));
+
+    if (scanResponse.Items) {
+      for (const item of scanResponse.Items) {
+        try {
+          const desc = parseRecord(item.desc);
+          const permULID = String(item.pK).replace('USER#', '');
+          const amount = Number(desc.amount ?? 0);
+          
+          // 1. Resolve Identity for Stripe Account ID
+          const idRes = await dynamo.send(new GetCommand({
+            TableName: USER_TABLE,
+            Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+          }));
+          
+          if (!idRes.Item) throw new Error(`Identity not found for ${permULID}`);
+          const idDesc = parseRecord(idRes.Item.desc);
+          const stripeAccountId = idDesc.stripeAccountId as string | undefined;
+          
+          if (!stripeAccountId) {
+            console.warn(`[payout] User ${permULID} has no stripeAccountId. Skipping.`);
+            continue;
+          }
+
+          // 2. Trigger Stripe Transfer
+          console.info(`[payout] Transferring $${amount} to ${stripeAccountId} for ${permULID}`);
+          const transfer = await createStripeTransfer({
+            amountAud: amount,
+            destinationAccountId: stripeAccountId,
+            transferGroup: `WITHDRAWAL_${item.sK}`,
+            metadata: {
+              permULID,
+              withdrawalSK: item.sK,
+              source: 'bebocard_marketplace'
+            }
+          });
+
+          // 3. Mark as COMPLETED
+          await dynamo.send(new PutCommand({
+            TableName: USER_TABLE,
+            Item: {
+              ...item,
+              status: 'COMPLETED',
+              updatedAt: new Date().toISOString(),
+              desc: JSON.stringify({
+                ...desc,
+                stripeTransferId: transfer.id,
+                completedAt: new Date().toISOString(),
+              }),
+            },
+          }));
+          
+          successCount++;
+        } catch (err) {
+          console.error(`[payout] Failed processing withdrawal ${item.sK}:`, err);
+          failCount++;
+        }
+      }
+    }
+    lastEvaluatedKey = scanResponse.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  console.info(`[billing-run] Payouts direct: success=${successCount}, fail=${failCount}`);
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler: Handler = async () => {
@@ -475,6 +594,9 @@ export const handler: Handler = async () => {
       console.error(`[billing-run] Error processing ${tenant.tenantId}:`, err);
     }
   }
+
+  // ── 5. Marketplace Payouts (P4-2) ──
+  await processMarketplacePayouts();
 
   console.info(`[billing-run] Complete: processedCount=${processedCount} total=${tenants.length}`);
   return { today, processedCount, total: tenants.length };

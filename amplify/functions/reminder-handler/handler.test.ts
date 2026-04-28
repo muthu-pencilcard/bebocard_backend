@@ -38,6 +38,10 @@ vi.mock('@aws-sdk/lib-dynamodb', () => ({
     this.__type = 'PutCommand';
     this.input = input;
   }),
+  QueryCommand: vi.fn(function (this: { __type: string; input: unknown }, input: unknown) {
+    this.__type = 'QueryCommand';
+    this.input = input;
+  }),
 }));
 
 vi.mock('firebase-admin/app', () => ({
