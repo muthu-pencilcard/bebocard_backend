@@ -3,11 +3,15 @@ import { GlueClient, CreateTableCommand, GetTableCommand, EntityNotFoundExceptio
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client, PutBucketPolicyCommand, CreateBucketCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { APIGatewayClient, CreateApiKeyCommand, CreateUsagePlanKeyCommand, DeleteApiKeyCommand } from '@aws-sdk/client-api-gateway';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { unmarshall } from '@aws-sdk/util-dynamodb';
 import { randomBytes } from 'crypto';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb  = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const glue = new GlueClient({});
+const apigw = new APIGatewayClient({});
+const ssm   = new SSMClient({});
 const GLUE_DATABASE = process.env.GLUE_DATABASE!;
 const ANALYTICS_BUCKET = process.env.ANALYTICS_BUCKET!;
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
@@ -45,6 +49,8 @@ export const handler: DynamoDBStreamHandler = async (event) => {
         ensureTenantSalt(tenantId, newItem)
       ]);
     }
+
+    await provisionApiKey(tenantId, tier, desc, record.eventName!);
   }
 };
 
@@ -231,4 +237,80 @@ async function createGlueTable(tableName: string, s3Location: string) {
       ]
     }
   }));
+}
+
+// ── API Gateway key provisioning ──────────────────────────────────────────────
+
+const planIdCache: Record<string, string> = {};
+
+async function getPlanId(paramEnvVar: string): Promise<string> {
+  if (planIdCache[paramEnvVar]) return planIdCache[paramEnvVar];
+  const paramName = process.env[paramEnvVar]!;
+  const result = await ssm.send(new GetParameterCommand({ Name: paramName }));
+  planIdCache[paramEnvVar] = result.Parameter!.Value!;
+  return planIdCache[paramEnvVar];
+}
+
+function tierPlanEnvVars(tier: string): string[] {
+  const t = tier.toUpperCase();
+  if (t === 'BASE') return [`USAGE_PLAN_SCAN_${t}`];
+  return [`USAGE_PLAN_SCAN_${t}`, `USAGE_PLAN_ANALYTICS_${t}`];
+}
+
+async function provisionApiKey(
+  tenantId: string,
+  tier: string,
+  desc: Record<string, unknown>,
+  eventName: string,
+) {
+  const apiKeyPlaintext = desc.apiKeyPlaintext as string | undefined;
+  if (!apiKeyPlaintext) return;
+
+  // MODIFY with same tier: already provisioned — skip
+  if (eventName === 'MODIFY' && desc.apigwKeyId && desc.apigwKeyTier === tier) return;
+
+  // MODIFY tier upgrade: remove old key first
+  if (eventName === 'MODIFY' && desc.apigwKeyId) {
+    try {
+      await apigw.send(new DeleteApiKeyCommand({ apiKey: desc.apigwKeyId as string }));
+    } catch (err) {
+      if ((err as Error & { name?: string }).name !== 'NotFoundException') throw err;
+      console.warn(`[tenant-provisioner] Old API key ${desc.apigwKeyId} not found — continuing with new key.`);
+    }
+  }
+
+  // Create new API Gateway key
+  const createResult = (await apigw.send(new CreateApiKeyCommand({
+    name: tenantId,
+    value: apiKeyPlaintext,
+    enabled: true,
+  }))) as { id: string };
+  const apigwKeyId = createResult.id;
+
+  // Associate with usage plans for this tier
+  await Promise.all(
+    tierPlanEnvVars(tier).map(async (envVar) => {
+      const planId = await getPlanId(envVar);
+      await apigw.send(new CreateUsagePlanKeyCommand({
+        keyId: apigwKeyId,
+        keyType: 'API_KEY',
+        usagePlanId: planId,
+      }));
+    })
+  );
+
+  // Persist apigwKeyId + tier; clear plaintext from DDB
+  const { apiKeyPlaintext: _dropped, ...rest } = desc;
+  await ddb.send(new UpdateCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `TENANT#${tenantId}`, sK: 'profile' },
+    UpdateExpression: 'SET #desc = :d, updatedAt = :now',
+    ExpressionAttributeNames: { '#desc': 'desc' },
+    ExpressionAttributeValues: {
+      ':d': JSON.stringify({ ...rest, apigwKeyId, apigwKeyTier: tier }),
+      ':now': new Date().toISOString(),
+    },
+  }));
+
+  console.info(`[tenant-provisioner] Provisioned API key for tenant ${tenantId} (tier: ${tier}).`);
 }

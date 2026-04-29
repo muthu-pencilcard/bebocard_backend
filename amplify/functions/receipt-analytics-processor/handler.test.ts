@@ -1,11 +1,12 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const { mockS3Send, mockSecretsSend } = vi.hoisted(() => {
-  process.env.ANALYTICS_BUCKET = 'test-analytics-bucket';
+const { mockS3Send, mockSecretsSend, mockSsmSend } = vi.hoisted(() => {
+  process.env.ANALYTICS_BUCKET_PARAM = '/bebocard/test/ANALYTICS_BUCKET';
   process.env.GLOBAL_ANALYTICS_SALT = 'test-global-salt';
   return {
     mockS3Send: vi.fn().mockResolvedValue({}),
     mockSecretsSend: vi.fn(),
+    mockSsmSend: vi.fn().mockResolvedValue({ Parameter: { Value: 'test-analytics-bucket' } }),
   };
 });
 
@@ -16,6 +17,10 @@ vi.mock('@aws-sdk/client-s3', () => ({
 vi.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: vi.fn().mockImplementation(function (this: any) { this.send = mockSecretsSend; }),
   GetSecretValueCommand: vi.fn().mockImplementation(function (input: any) { return { __type: 'GetSecretValueCommand', input }; }),
+}));
+vi.mock('@aws-sdk/client-ssm', () => ({
+  SSMClient: vi.fn().mockImplementation(function (this: any) { this.send = mockSsmSend; }),
+  GetParameterCommand: vi.fn().mockImplementation(function (input: any) { return { __type: 'GetParameterCommand', input }; }),
 }));
 
 import { handler } from './handler.js';

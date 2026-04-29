@@ -1,13 +1,23 @@
 import type { SQSHandler } from 'aws-lambda';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { createHmac } from 'crypto';
 
 const s3 = new S3Client({});
 const secretsManager = new SecretsManagerClient({});
+const ssmClient = new SSMClient({});
 
-const ANALYTICS_BUCKET     = process.env.ANALYTICS_BUCKET!;
-const GLOBAL_ANALYTICS_SALT = process.env.GLOBAL_ANALYTICS_SALT!;
+const ANALYTICS_BUCKET_PARAM = process.env.ANALYTICS_BUCKET_PARAM!;
+const GLOBAL_ANALYTICS_SALT  = process.env.GLOBAL_ANALYTICS_SALT!;
+
+let cachedBucketName: string | undefined;
+async function getAnalyticsBucket(): Promise<string> {
+  if (cachedBucketName) return cachedBucketName;
+  const result = await ssmClient.send(new GetParameterCommand({ Name: ANALYTICS_BUCKET_PARAM }));
+  cachedBucketName = result.Parameter!.Value!;
+  return cachedBucketName;
+}
 
 // Cache per-tenant salts for the Lambda lifetime to avoid repeated Secrets Manager calls
 const tenantSaltCache: Record<string, string> = {};
@@ -110,13 +120,14 @@ export const handler: SQSHandler = async (event) => {
     partitions[key].push(row);
   }
 
+  const bucketName = await getAnalyticsBucket();
   await Promise.all(
     Object.entries(partitions).map(([partition, partRows]) => {
       // Use the first SQS messageId for this partition as the filename — guaranteed unique per SQS
       const s3Key = `receipts/raw/${partition}/${partitionFirstMessageId[partition]}.jsonl`;
       const body = partRows.map(r => JSON.stringify(r)).join('\n');
       return s3.send(new PutObjectCommand({
-        Bucket: ANALYTICS_BUCKET,
+        Bucket: bucketName,
         Key: s3Key,
         Body: body,
         ContentType: 'application/x-ndjson',

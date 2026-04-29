@@ -1,182 +1,150 @@
-import { Handler } from 'aws-lambda';
+import type { Handler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { DynamoDBDocumentClient, BatchWriteCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { createHash } from 'crypto';
 
-const client = new DynamoDBClient({});
+const client    = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
-const secretsClient = new SecretsManagerClient({});
+const ssmClient = new SSMClient({});
 
-const REFDATA_TABLE = process.env.REFDATA_TABLE!;
+let cachedTableName: string | undefined;
+async function getTableName(): Promise<string> {
+  if (cachedTableName) return cachedTableName;
+  const result = await ssmClient.send(new GetParameterCommand({ Name: process.env.REFDATA_TABLE_PARAM! }));
+  cachedTableName = result.Parameter!.Value!;
+  return cachedTableName;
+}
 
-/**
- * PRODUCTION AFFILIATE SYNC
- * Fetches from Commission Factory (AU Focused) and Impact.com.
- * Maps categories to BeboCard Personas for targeted Discovery.
- */
-export const handler: Handler = async (event) => {
-  console.log('[affiliate-sync] Starting production feed sync...');
+interface CFFeed {
+  Id: number;
+  Name: string;
+  MerchantName: string;
+  Description: string;
+  TrackingUrl: string;
+  MerchantLogoUrl: string;
+  EndDate?: string;
+  Category?: string;
+}
+
+function contentHash(title: string, desc: string, url: string): string {
+  return createHash('sha256').update(JSON.stringify({ title, desc, url })).digest('hex');
+}
+
+function toItem(offer: CFFeed) {
+  return {
+    PutRequest: {
+      Item: {
+        pK: `BEBO_OFFER#CF_${offer.Id}`,
+        sK: 'offer',
+        eventType: 'AFFILIATE_OFFER',
+        primaryCat: 'curated_offer',
+        status: 'ACTIVE',
+        updatedAt: new Date().toISOString(),
+        desc: {
+          contentHash: contentHash(offer.Name, offer.Description, offer.TrackingUrl),
+          headline: offer.Name,
+          body: offer.Description,
+          brandName: offer.MerchantName,
+          logoUrl: offer.MerchantLogoUrl,
+          trackingUrl: offer.TrackingUrl,
+          expiryDate: offer.EndDate ?? null,
+          category: offer.Category ?? 'general',
+        },
+      },
+    },
+  };
+}
+
+// AU-focused mock offers used when AFFILIATE_API_KEY is not set (dev / canary env).
+// Replace these stubs with real CF data once API credentials are live.
+const MOCK_OFFERS: CFFeed[] = [
+  { Id: 1001, Name: '10% off Grocery Shop',    MerchantName: 'Woolworths',   Description: 'Save 10% on your next shop. Min spend $80.',             TrackingUrl: 'https://t.commissionfactory.com/woolworths',   MerchantLogoUrl: 'https://cdn.bebocard.com/brands/woolworths/logo.png',   Category: 'grocery' },
+  { Id: 1002, Name: '$20 off $150+ Spend',      MerchantName: 'Coles',        Description: '$20 off when you spend $150 or more online.',             TrackingUrl: 'https://t.commissionfactory.com/coles',        MerchantLogoUrl: 'https://cdn.bebocard.com/brands/coles/logo.png',        Category: 'grocery' },
+  { Id: 1003, Name: '10% off Tech',             MerchantName: 'JB Hi-Fi',     Description: 'Extra 10% off selected tech and appliances.',             TrackingUrl: 'https://t.commissionfactory.com/jbhifi',       MerchantLogoUrl: 'https://cdn.bebocard.com/brands/jbhifi/logo.png',       Category: 'tech'    },
+  { Id: 1004, Name: '30% off Clothing',         MerchantName: 'Cotton On',    Description: '30% off full-price styles site-wide.',                    TrackingUrl: 'https://t.commissionfactory.com/cottonon',     MerchantLogoUrl: 'https://cdn.bebocard.com/brands/cottonon/logo.png',     Category: 'fashion' },
+  { Id: 1005, Name: '$10 off First Order',      MerchantName: 'Menulog',      Description: '$10 off your first food delivery order over $25.',        TrackingUrl: 'https://t.commissionfactory.com/menulog',      MerchantLogoUrl: 'https://cdn.bebocard.com/brands/menulog/logo.png',      Category: 'food'    },
+  { Id: 1006, Name: '15% off Hotels',           MerchantName: 'Booking.com',  Description: '15% off selected properties when you sign in.',           TrackingUrl: 'https://t.commissionfactory.com/bookingcom',   MerchantLogoUrl: 'https://cdn.bebocard.com/brands/bookingcom/logo.png',   Category: 'travel'  },
+  { Id: 1007, Name: '20% off Pet Supplies',     MerchantName: 'Petbarn',      Description: '20% off your first online order at Petbarn.',             TrackingUrl: 'https://t.commissionfactory.com/petbarn',      MerchantLogoUrl: 'https://cdn.bebocard.com/brands/petbarn/logo.png',      Category: 'pets'    },
+];
+
+export const handler: Handler = async (_event) => {
+  console.log('[affiliate-sync] Starting affiliate feed sync...');
 
   try {
-    const secrets = await fetchPartnerSecrets();
-    
-    // 1. Fetch from multiple sources
-    const [cfOffers, impactOffers] = await Promise.all([
-      fetchCommissionFactory(secrets.cf_key),
-      fetchImpactRadius(secrets.impact_sid, secrets.impact_token)
+    const table  = await getTableName();
+    const apiKey = process.env.AFFILIATE_API_KEY;
+
+    if (!apiKey) {
+      console.log('[affiliate-sync] No AFFILIATE_API_KEY — writing mock offers.');
+      await batchWrite(table, MOCK_OFFERS.map(toItem));
+      return { statusCode: 200, body: JSON.stringify({ count: MOCK_OFFERS.length }) };
+    }
+
+    const [liveOffers, existing] = await Promise.all([
+      fetchCF(apiKey),
+      scanExisting(table),
     ]);
 
-    const allOffers = [...cfOffers, ...impactOffers];
-    console.log(`[affiliate-sync] Fetched ${allOffers.length} raw offers across providers.`);
+    const liveIds   = new Set(liveOffers.map(o => `BEBO_OFFER#CF_${o.Id}`));
+    const existingByPk = new Map(existing.map(item => [item.pK as string, item]));
 
-    // 2. Map and Enrich
-    const putRequests = allOffers.map(raw => {
-      const brandId = raw.brandName.toLowerCase().replace(/\s+/g, '_');
-      const persona = guessPersonaFromCategory(raw.category, raw.brandName);
-      
-      // Hot Deal Logic: If discount is high, mark for Discovery Push
-      const isDiscovery = raw.discountPercentage >= 20 || raw.isFeatured;
+    type WriteRequest = { PutRequest: { Item: Record<string, unknown> } };
 
-      return {
-        PutRequest: {
-          Item: {
-            pK: `BRAND#${brandId}`,
-            sK: `OFFER#${raw.provider}#${raw.offerId}`,
-            eventType: 'OFFER',
-            primaryCat: 'curated_offer',
-            subCategory: raw.category || 'general',
-            status: 'ACTIVE',
-            brandId: brandId,
-            createdAt: new Date().toISOString(),
-            region: raw.region,
-            updatedAt: new Date().toISOString(),
-            desc: JSON.stringify({
-              headline: raw.title,
-              body: raw.description,
-              brandName: raw.brandName,
-              logoUrl: raw.logoUrl,
-              brandColor: raw.brandColor || '#10B981',
-              voucherCode: raw.voucherCode || null,
-              expiryDate: raw.expiryDate || null,
-              affiliateUrl: raw.trackingUrl,
-              discountLabel: raw.discountLabel || null,
-              isDiscovery: isDiscovery, // 🔥 Triggers campaign-scheduler push
-              targetPersona: persona,   // 🔥 Matching user persona
-              source: raw.provider,
-              lastSyncedAt: new Date().toISOString(),
-              isBeboCurated: true,
-            }),
-          }
-        }
-      };
-    });
-
-    // 3. Batch Write to RefDataEvent
-    const chunks = [];
-    for (let i = 0; i < putRequests.length; i += 25) {
-      chunks.push(putRequests.slice(i, i + 25));
+    const upserts: WriteRequest[] = [];
+    for (const offer of liveOffers) {
+      const pk   = `BEBO_OFFER#CF_${offer.Id}`;
+      const hash = contentHash(offer.Name, offer.Description, offer.TrackingUrl);
+      const prev = existingByPk.get(pk);
+      if ((prev?.desc as Record<string, unknown> | undefined)?.contentHash === hash) continue;
+      upserts.push(toItem(offer));
     }
 
-    for (const chunk of chunks) {
-      await docClient.send(new BatchWriteCommand({
-        RequestItems: { [REFDATA_TABLE]: chunk }
-      }));
+    const expirations: WriteRequest[] = [];
+    for (const item of existing) {
+      if (!liveIds.has(item.pK as string)) {
+        expirations.push({
+          PutRequest: {
+            Item: { ...item, status: 'EXPIRED', updatedAt: new Date().toISOString() },
+          },
+        });
+      }
     }
 
-    return { success: true, count: allOffers.length };
+    await batchWrite(table, [...upserts, ...expirations]);
+    console.log(`[affiliate-sync] Upserted ${upserts.length}, expired ${expirations.length}`);
+    return { statusCode: 200, body: JSON.stringify({ count: upserts.length + expirations.length }) };
 
   } catch (error) {
     console.error('[affiliate-sync] Critical failure:', error);
-    throw error;
+    return { statusCode: 500, body: JSON.stringify({ error: (error as Error).message }) };
   }
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+async function fetchCF(apiKey: string): Promise<CFFeed[]> {
+  const res = await fetch('https://api.commissionfactory.com/v2/promotions', {
+    headers: { 'X-ApiKey': apiKey, 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`CF API ${res.status}: ${res.statusText}`);
+  return res.json() as Promise<CFFeed[]>;
+}
 
-async function fetchPartnerSecrets() {
-  const res = await secretsClient.send(new GetSecretValueCommand({ 
-    SecretId: 'bebocard/affiliate-api-keys' 
+async function scanExisting(table: string): Promise<Record<string, unknown>[]> {
+  const result = await docClient.send(new ScanCommand({
+    TableName: table,
+    FilterExpression: 'begins_with(pK, :prefix) AND #st = :active',
+    ExpressionAttributeNames: { '#st': 'status' },
+    ExpressionAttributeValues: { ':prefix': 'BEBO_OFFER#CF_', ':active': 'ACTIVE' },
+    ProjectionExpression: 'pK, desc',
   }));
-  return JSON.parse(res.SecretString || '{}');
+  return (result.Items ?? []) as Record<string, unknown>[];
 }
 
-/**
- * Maps incoming categories to our internal BeboCard Personas.
- */
-function guessPersonaFromCategory(category: string, brandName: string): string {
-  const cat = category.toLowerCase();
-  const brand = brandName.toLowerCase();
-
-  if (brand.includes('woolworths') || brand.includes('coles') || cat.includes('grocery')) return 'grocery_focused';
-  if (cat.includes('tech') || cat.includes('electronic') || brand.includes('apple')) return 'tech_enthusiast';
-  if (cat.includes('fashion') || cat.includes('clothing') || brand.includes('nike')) return 'brand_loyalist';
-  if (cat.includes('travel') || cat.includes('flight')) return 'traveler';
-  if (cat.includes('fuel') || brand.includes('ampol')) return 'vehicle_owner';
-  if (cat.includes('food') || cat.includes('dining')) return 'dining_enthusiast';
-  
-  return 'deal_hunter'; // Default catch-all
-}
-
-interface RawOffer {
-  provider: string;
-  offerId: string;
-  brandName: string;
-  title: string;
-  description: string;
-  category: string;
-  discountPercentage: number;
-  discountLabel: string;
-  logoUrl: string;
-  brandColor?: string;
-  voucherCode?: string;
-  expiryDate?: string;
-  trackingUrl: string;
-  isFeatured: boolean;
-  region: string;
-}
-
-// ── Provider Adapters (Production Mocks — Swap for real Axios/Fetch) ───────────
-
-async function fetchCommissionFactory(apiKey: string): Promise<RawOffer[]> {
-  if (!apiKey) return [];
-  // return cfClient.get('/promotions');
-  return [
-    {
-      provider: 'cf',
-      offerId: 'cf_woolworths_10pct',
-      brandName: 'Woolworths',
-      title: '10% off your Grocery Shop',
-      description: 'Minimum spend $150. Valid for first-time online customers.',
-      category: 'grocery',
-      discountPercentage: 10,
-      discountLabel: '10% OFF',
-      logoUrl: 'https://cdn.bebocard.com/brands/woolworths/logo.png',
-      trackingUrl: 'https://t.cf.com/woolworths',
-      isFeatured: true,
-      region: 'AU'
+async function batchWrite(table: string, requests: { PutRequest: { Item: Record<string, unknown> } }[]) {
+  for (let i = 0; i < requests.length; i += 25) {
+    const chunk = requests.slice(i, i + 25);
+    if (chunk.length > 0) {
+      await docClient.send(new BatchWriteCommand({ RequestItems: { [table]: chunk } }));
     }
-  ];
-}
-
-async function fetchImpactRadius(sid: string, token: string): Promise<RawOffer[]> {
-  if (!sid || !token) return [];
-  // return impactClient.get('/MediaPartners/Promotions');
-  return [
-    {
-      provider: 'impact',
-      offerId: 'imp_nike_20',
-      brandName: 'Nike',
-      title: '20% Off Outlet Styles',
-      description: 'Extra 20% off selected seasonal outlet styles.',
-      category: 'fashion',
-      discountPercentage: 20,
-      discountLabel: '20% OFF',
-      logoUrl: 'https://cdn.bebocard.com/brands/nike/logo.png',
-      brandColor: '#CC0000',
-      voucherCode: 'NIKE20',
-      trackingUrl: 'https://impact.com/nike',
-      isFeatured: false,
-      region: 'US',
-    }
-  ];
+  }
 }

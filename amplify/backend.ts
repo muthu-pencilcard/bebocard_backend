@@ -223,10 +223,10 @@ new ssm.StringParameter(infraStack, 'AnalyticsBucketParam', {
 });
 
 // ── Remote Configuration (P2-2) ──
-// Allows instant UI/Feature updates without App Store reviews
+// Allows instant UI/Feature updates without App Store reviews.
+// Public read is intentional (app fetches without auth) but restricted to config/* prefix only.
 const remoteConfigBucket = new s3.Bucket(infraStack, 'RemoteConfig', {
   versioned: true,
-  publicReadAccess: true, 
   blockPublicAccess: {
     blockPublicAcls: false,
     blockPublicPolicy: false,
@@ -239,6 +239,12 @@ const remoteConfigBucket = new s3.Bucket(infraStack, 'RemoteConfig', {
     allowedHeaders: ['*'],
   }],
 });
+remoteConfigBucket.addToResourcePolicy(new iam.PolicyStatement({
+  effect: iam.Effect.ALLOW,
+  principals: [new iam.StarPrincipal()],
+  actions: ['s3:GetObject'],
+  resources: [`${remoteConfigBucket.bucketArn}/config/*`],
+}));
 
 new ssm.StringParameter(infraStack, 'RemoteConfigBucketParam', {
   parameterName: `/bebocard/${amplifyAppId}/${amplifyBranch}/REMOTE_CONFIG_BUCKET`,
@@ -453,9 +459,8 @@ scanLambda.addToRolePolicy(new iam.PolicyStatement({
   resources: ['*'],
 }));
 
-// Provisioned Concurrency — scan-handler: eliminates cold starts for retail checkout (P0-5)
-// (scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
-const scanAlias = scanLambda.addAlias('prod');
+// Reserved Concurrency — scan-handler: prevents POS checkout from being throttled by other bursts (P0-5)
+(scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
 const scanThrottleAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerThrottlesAlarm', {
@@ -533,7 +538,7 @@ receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
-// cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
+cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
 
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
@@ -1121,6 +1126,7 @@ Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
 // ── Affiliate Feed Sync (Nightly at 05:00 UTC) ──
 const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
 affiliateSyncLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
+affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 affiliateSyncLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],

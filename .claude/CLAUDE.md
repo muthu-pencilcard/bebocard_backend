@@ -312,7 +312,7 @@ YOUGOTAGIFT_API_KEY             # UAE/GCC distributor
 
 ## Tests
 
-592/592 passing across 37 test files (includes `template-manager`). All functions have `handler.test.ts` using Vitest + `vi.hoisted()` for mocks.
+597/597 passing across 40 test files. All functions have `handler.test.ts` using Vitest + `vi.hoisted()` for mocks.
 Key pattern: env vars read at module level (e.g. `USER_HASH_SALT`) must be set inside `vi.hoisted()`, not `beforeEach`.
 
 ---
