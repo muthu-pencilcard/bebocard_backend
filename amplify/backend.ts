@@ -460,7 +460,7 @@ scanLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // Reserved Concurrency — scan-handler: prevents POS checkout from being throttled by other bursts (P0-5)
-(scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
+// (scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
 const scanThrottleAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerThrottlesAlarm', {
@@ -538,7 +538,7 @@ receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
-cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
+// cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
 
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
