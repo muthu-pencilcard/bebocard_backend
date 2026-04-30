@@ -331,7 +331,7 @@ const icebergDlqAlarm = createDlqAlarm(icebergDLQ, 'ReceiptIcebergDLQ');
 
 // ── Receipt Signing (P3-4) ──
 const receiptSigningKey = new kms.Key(infraStack, 'ReceiptSigningKey', {
-  alias: 'bebocard/receipt-signing',
+  alias: `bebocard/receipt-signing-${amplifyBranch}`,
   keySpec: kms.KeySpec.RSA_2048,
   keyUsage: kms.KeyUsage.SIGN_VERIFY,
   removalPolicy: RemovalPolicy.RETAIN,
