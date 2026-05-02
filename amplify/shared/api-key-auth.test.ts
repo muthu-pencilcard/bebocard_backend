@@ -27,6 +27,7 @@ vi.mock('ulid', () => ({
 }));
 
 import { generateApiKey, extractApiKey, validateApiKey } from './api-key-auth.js';
+import type { ValidatedKey } from './api-key-auth.js';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 const fakeDdb = { send: mockSend } as unknown as DynamoDBDocumentClient;
@@ -151,7 +152,8 @@ describe('validateApiKey', () => {
     });
     const result = await validateApiKey(fakeDdb, rawKey, 'scan');
     expect(result).not.toBeNull();
-    expect(result!.brandId).toBe('woolworths');
+    expect(result).not.toBe('rate_limited');
+    expect((result as ValidatedKey).brandId).toBe('woolworths');
   });
 
   it('returns null if hash does not match', async () => {
@@ -178,10 +180,12 @@ describe('validateApiKey', () => {
     });
     const result = await validateApiKey(fakeDdb, rawKey, 'scan');
     expect(result).not.toBeNull();
-    expect(result!.brandId).toBe('woolworths');
-    expect(result!.keyId).toBe(keyId);
-    expect(result!.rateLimit).toBe(500);
-    expect(result!.scopes).toContain('scan');
-    expect(result!.scopes).toContain('offers');
+    expect(result).not.toBe('rate_limited');
+    const key = result as ValidatedKey;
+    expect(key.brandId).toBe('woolworths');
+    expect(key.keyId).toBe(keyId);
+    expect(key.rateLimit).toBe(500);
+    expect(key.scopes).toContain('scan');
+    expect(key.scopes).toContain('offers');
   });
 });

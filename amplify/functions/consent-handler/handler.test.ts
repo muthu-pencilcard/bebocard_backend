@@ -61,8 +61,8 @@ vi.mock('../../shared/audit-logger', () => ({
 
 vi.mock('https', () => ({
   default: {
-    request: vi.fn((_url: unknown, _opts: unknown, cb: (res: { resume: () => void; on: (e: string, fn: () => void) => void }) => void) => {
-      cb({ resume: vi.fn(), on: vi.fn((e: string, fn: () => void) => { if (e === 'end') fn(); }) });
+    request: vi.fn((_url: unknown, _opts: unknown, cb: (res: { statusCode: number; resume: () => void; on: (e: string, fn: () => void) => void }) => void) => {
+      cb({ statusCode: 200, resume: vi.fn(), on: vi.fn((e: string, fn: () => void) => { if (e === 'end') fn(); }) });
       return { on: vi.fn(), write: vi.fn(), end: vi.fn(), setTimeout: vi.fn() };
     }),
   },

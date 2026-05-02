@@ -108,6 +108,9 @@ async function handleLoyaltyCheck(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'scan') : null;
+  if (validKey === 'rate_limited') {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
+  }
   if (!validKey) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
   }
@@ -415,6 +418,9 @@ async function handleReceipt(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'receipt') : null;
+  if (validKey === 'rate_limited') {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
+  }
   if (!validKey) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
   }
@@ -652,6 +658,9 @@ async function handleGetReceipt(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'receipt') : null;
+  if (validKey === 'rate_limited') {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
+  }
   if (!validKey) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
   }
