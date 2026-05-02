@@ -935,14 +935,23 @@ async function sendGiftEmail(opts: {
       <p style="color:#999;font-size:12px;margin-top:24px">Powered by BeboCard · Privacy-first loyalty wallet</p>
     </div>`;
 
-  await ses.send(new SendEmailCommand({
-    Source:      FROM_EMAIL,
-    Destination: { ToAddresses: [opts.recipientEmail] },
-    Message: {
-      Subject: { Data: subject },
-      Body:    { Html: { Data: html } },
-    },
-  }));
+  try {
+    await ses.send(new SendEmailCommand({
+      Source:               FROM_EMAIL,
+      ConfigurationSetName: process.env.SES_CONFIGURATION_SET,
+      Destination: { ToAddresses: [opts.recipientEmail] },
+      Message: {
+        Subject: { Data: subject },
+        Body:    { Html: { Data: html } },
+      },
+    }));
+  } catch (err) {
+    if ((err as { name?: string }).name === 'MessageRejected') {
+      console.warn('[gift-card-handler] SES rejected gift email — recipient address suppressed', { brandName: opts.brandName });
+      return;
+    }
+    throw err;
+  }
 }
 
 async function generateBarcodeBase64(text: string): Promise<string | null> {
@@ -1033,7 +1042,8 @@ async function sendPurchaseConfirmation(opts: {
 
   try {
     await ses.send(new SendEmailCommand({
-      Source:      FROM_EMAIL,
+      Source:               FROM_EMAIL,
+      ConfigurationSetName: process.env.SES_CONFIGURATION_SET,
       Destination: { ToAddresses: [buyerEmail] },
       Message: {
         Subject: { Data: `Your ${brandName} Gift Card — ${currency} ${denomination.toFixed(2)}` },
@@ -1050,7 +1060,11 @@ async function sendPurchaseConfirmation(opts: {
 
     console.log(`[gift-card-handler] Purchase confirmation sent for ${permULID}`);
   } catch (err) {
-    console.warn(`[gift-card-handler] Failed to send purchase confirmation to ${buyerEmail}:`, err);
+    if ((err as { name?: string }).name === 'MessageRejected') {
+      console.warn('[gift-card-handler] SES rejected purchase confirmation — buyer address suppressed', { permULID });
+      return;
+    }
+    console.warn(`[gift-card-handler] Failed to send purchase confirmation:`, err);
   }
 }
 

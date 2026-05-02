@@ -88,6 +88,7 @@ interface EnrollBody {
 async function handleEnroll(event: Parameters<APIGatewayProxyHandler>[0]) {
   const rawKey   = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'enrollment') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
 
   const body: Partial<EnrollBody> = JSON.parse(event.body ?? '{}');
@@ -176,6 +177,7 @@ async function handleStatus(
 ) {
   const rawKey   = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'enrollment') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const res = await dynamo.send(new QueryCommand({
@@ -391,9 +393,19 @@ async function callBrandWebhook(
       const req = https.request(
         { hostname: url.hostname, path: url.pathname + url.search, method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
-        (res) => { res.resume(); res.on('end', resolve); },
+        (res) => {
+          res.resume();
+          res.on('end', () => {
+            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              resolve();
+            } else {
+              reject(new Error(`Webhook returned HTTP ${res.statusCode}`));
+            }
+          });
+        },
       );
       req.on('error', reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error('Webhook timeout')); });
       req.write(body);
       req.end();
     });

@@ -112,6 +112,7 @@ interface CheckoutRequest {
 async function handleCheckout(event: Parameters<APIGatewayProxyHandler>[0]) {
   const rawKey  = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'payment') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
 
   const body: Partial<CheckoutRequest> = JSON.parse(event.body ?? '{}');
@@ -240,14 +241,17 @@ async function handleCheckoutStatus(orderId: string) {
 // Fires 90s after checkout creation. If still PENDING, marks TIMEOUT and notifies brand.
 
 async function handleTimeoutBatch(event: SQSEvent) {
+  const failures: { itemIdentifier: string }[] = [];
   for (const record of event.Records) {
     try {
       const { orderId, permULID } = JSON.parse(record.body) as { orderId: string; permULID: string };
       await processTimeout(orderId, permULID);
     } catch (e) {
       console.error('[payment-router] timeout processing error', e);
+      failures.push({ itemIdentifier: record.messageId });
     }
   }
+  return { batchItemFailures: failures };
 }
 
 async function processTimeout(orderId: string, permULID: string) {
@@ -300,7 +304,7 @@ async function getDeviceToken(permULID: string): Promise<string | null> {
 }
 
 function postWebhook(url: string, payload: unknown): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
     try {
       const req = https.request(url, {
@@ -308,18 +312,24 @@ function postWebhook(url: string, payload: unknown): Promise<void> {
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
       }, (res) => {
         res.resume();
-        res.on('end', resolve);
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Webhook returned HTTP ${res.statusCode}`));
+          }
+        });
       });
       req.on('error', (e) => {
         console.error('[payment-router] webhook delivery failed', url, e.message);
-        resolve();
+        reject(e);
       });
-      req.setTimeout(5000, () => { req.destroy(); resolve(); });
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error('Webhook timeout')); });
       req.write(body);
       req.end();
     } catch (e) {
       console.error('[payment-router] webhook error', e);
-      resolve();
+      reject(e as Error);
     }
   });
 }

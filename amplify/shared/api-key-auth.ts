@@ -101,7 +101,7 @@ export async function validateApiKey(
   ddb: DynamoDBDocumentClient,
   rawKey: string,
   requiredScope: ApiKeyScope,
-): Promise<ValidatedKey | null> {
+): Promise<ValidatedKey | 'rate_limited' | null> {
   if (!rawKey?.startsWith('bebo_')) return null;
 
   const withoutPrefix = rawKey.slice(5);          // strip 'bebo_'
@@ -146,7 +146,7 @@ export async function validateApiKey(
   const rl = await checkRateLimit(ddb, normalized.keyId, normalized.rateLimit);
   if (!rl.allowed) {
     console.warn('[api-key-auth] rate limit exceeded', { keyId: normalized.keyId, usage: rl.usage, limit: rl.limit });
-    return null; // caller should return 429
+    return 'rate_limited';
   }
 
   return {

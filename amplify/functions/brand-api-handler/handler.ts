@@ -119,7 +119,7 @@ function verifyInternalSignature(brandId: string, timestamp: string, sig: string
 async function authGuard(
   event: APIGatewayProxyEvent,
   scope: ApiKeyScope,
-): Promise<{ brandId: string; authMethod: 'internal' | 'api_key' } | null> {
+): Promise<{ brandId: string; authMethod: 'internal' | 'api_key' } | 'rate_limited' | null> {
   // Direct Lambda invocation from the business portal — IAM auth is enforced at
   // the Lambda resource policy level. As defence-in-depth, the portal also signs
   // the internal payload with INTERNAL_SIGNING_SECRET (HMAC-SHA256).
@@ -140,6 +140,7 @@ async function authGuard(
   const rawKey = extractApiKey(event.headers as Record<string, string>);
   if (!rawKey) return null;
   const validated = await validateApiKey(dynamo, rawKey, scope);
+  if (validated === 'rate_limited') return 'rate_limited';
   if (!validated) return null;
   return { brandId: validated.brandId, authMethod: 'api_key' };
 }
@@ -153,6 +154,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Receipt status ACK ──────────────────────────────────────────────────────
   if (method === 'GET' && /\/receipt\/[^/]+\/status/.test(path)) {
     const auth = await authGuard(event, 'receipt');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     return handleReceiptStatus(event, auth.brandId);
   }
@@ -160,6 +162,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Offers ──────────────────────────────────────────────────────────────────
   if (path.includes('/offers')) {
     const auth = await authGuard(event, 'offers');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'GET') return listOffers(event, auth.brandId);
     if (method === 'POST') return createOffer(event, auth.brandId);
@@ -170,6 +173,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Newsletters ─────────────────────────────────────────────────────────────
   if (path.includes('/newsletters')) {
     const auth = await authGuard(event, 'newsletters');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return sendNewsletter(event, auth.brandId);
     if (method === 'GET') return listNewsletters(event, auth.brandId);
@@ -178,6 +182,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Catalogues ──────────────────────────────────────────────────────────────
   if (path.includes('/catalogues')) {
     const auth = await authGuard(event, 'catalogues');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return createCatalogue(event, auth.brandId);
     if (method === 'GET') return listCatalogues(event, auth.brandId);
@@ -186,12 +191,14 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Analytics ───────────────────────────────────────────────────────────────
   if (path.includes('/analytics')) {
     const auth = await authGuard(event, 'analytics');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     return getAnalytics(event, auth.brandId);
   }
 
   if (path.includes('/usage')) {
     const auth = await authGuard(event, 'analytics');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     return getUsage(event, auth.brandId);
   }
@@ -199,6 +206,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Stores ──────────────────────────────────────────────────────────────────
   if (path.includes('/stores')) {
     const auth = await authGuard(event, 'stores');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return upsertStore(event, auth.brandId);
     if (method === 'GET') return listStores(event, auth.brandId);
@@ -210,6 +218,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // out-of-order-safe way (e.g. paid, overdue, cancelled).
   if (path.includes('/invoice-status')) {
     const auth = await authGuard(event, 'recurring');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return upsertInvoiceStatus(event, auth.brandId);
   }
@@ -218,6 +227,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // Generates a payable URL for linked tenant invoices.
   if (path.includes('/invoice-payment-session')) {
     const auth = await authGuard(event, 'recurring');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return createInvoicePaymentSession(event, auth.brandId);
   }
@@ -225,6 +235,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── API key self-management (brand rotates own key) ─────────────────────────
   if (path.includes('/api-keys/rotate')) {
     const auth = await authGuard(event, 'scan'); // any scope allows rotation
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     return handleRotateKey(event, auth.brandId);
   }
@@ -239,6 +250,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Subscription catalog: tenant self-onboarding ─────────────────────────
   if (path.includes('/subscription-catalog')) {
     const auth = await authGuard(event, 'recurring');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return createSubscriptionCatalogEntry(event, auth.brandId);
     if (method === 'PUT') return updateSubscriptionCatalogEntry(event, auth.brandId);
@@ -248,6 +260,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
   // ── Custom segments ──────────────────────────────────────────────────────
   if (path.includes('/segments')) {
     const auth = await authGuard(event, 'analytics');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return createSegmentDef(event, auth.brandId);
     if (method === 'GET') return listSegmentDefs(event, auth.brandId);
@@ -276,6 +289,7 @@ const _handler: APIGatewayProxyHandler = async (event) => {
     }
     // Brand-scoped routes — internal call (portal, tenant_admin/brand_admin) or API key
     const auth = await authGuard(event, 'card_config');
+    if (auth === 'rate_limited') return err(event, 429, 'Rate limit exceeded');
     if (!auth) return err(event, 401, 'Unauthorized');
     if (method === 'POST') return createCardConfig(event, auth.brandId);
     if (method === 'GET') return listCardConfigs(event, auth.brandId);

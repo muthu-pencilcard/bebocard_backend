@@ -72,6 +72,7 @@ import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { DynamoEventSource, SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
+import * as ses from 'aws-cdk-lib/aws-ses';
 
 const backend = defineBackend({
   auth,
@@ -1171,6 +1172,18 @@ receiptClaimLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
 receiptClaimLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 grantTableAccess(receiptClaimLambda, 'UserDataEvent', true);
 grantTableAccess(receiptClaimLambda, 'RefDataEvent', true);
+
+// ── Gift Card Handler (P13) ──
+const sesConfigSet = new ses.ConfigurationSet(dataStack, 'BeboTransactionalConfigSet', {
+  configurationSetName: `bebo-transactional-${stage}`,
+  suppressionReasons: ses.SuppressionReasons.BOUNCES_AND_COMPLAINTS,
+});
+const giftCardLambda = backend.giftCardHandlerFn.resources.lambda as lambda.Function;
+giftCardLambda.addEnvironment('SES_CONFIGURATION_SET', sesConfigSet.configurationSetName!);
+giftCardLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+  resources: [`arn:aws:ses:*:${dataStack.account}:identity/bebocard.com.au`],
+}));
 
 // ── Remote Config Wiring (P2-21) ──
 const remoteConfigLambda = backend.remoteConfigHandlerFn.resources.lambda as lambda.Function;
