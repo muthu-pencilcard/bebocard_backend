@@ -525,7 +525,7 @@ describe('POST /v1/scan — consent-gated identity release', () => {
     expect(body.consentRequired).toBeUndefined();
     // Verify the UpdateCommand to mark CONSUMED was issued
     const updateCalls = mockDdbSend.mock.calls.filter(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
+      ([cmd]: any[]) => cmd.__type === 'UpdateCommand',
     );
     expect(updateCalls.length).toBeGreaterThanOrEqual(1);
   });

@@ -263,20 +263,53 @@ describe('POST /consent-request — success', () => {
 });
 
 describe('GET /consent-request/{requestId}/status', () => {
-  it('returns correct shape including approvedFields', async () => {
+  beforeEach(() => {
+    mockExtractApiKey.mockReturnValue('bebo_test.secret');
+    mockValidateApiKey.mockResolvedValue(makeValidKey());
+  });
+
+  function makeStatusEvent(requestId = 'REQ001') {
+    return {
+      path: `/consent-request/${requestId}/status`,
+      httpMethod: 'GET',
+      headers: { 'x-api-key': 'bebo_test.secret' },
+      body: null,
+      queryStringParameters: null,
+    };
+  }
+
+  it('returns 401 when no API key provided', async () => {
+    mockExtractApiKey.mockReturnValue(null);
+    mockValidateApiKey.mockResolvedValue(null);
+    const res = await handler(makeStatusEvent()) as { statusCode: number };
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('returns 429 when API key is rate limited', async () => {
+    mockValidateApiKey.mockResolvedValue('rate_limited');
+    const res = await handler(makeStatusEvent()) as { statusCode: number };
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('returns 403 when consent request belongs to a different brand', async () => {
     mockSend.mockResolvedValue({
       Items: [{
         status: 'APPROVED',
-        desc: JSON.stringify({ approvedFields: ['email'], expiresAt: '2026-01-01T00:00:00.000Z' }),
+        desc: JSON.stringify({ brandId: 'bigw', approvedFields: ['email'], expiresAt: '2026-01-01T00:00:00.000Z' }),
       }],
     });
-    const res = await handler({
-      path: '/consent-request/REQ001/status',
-      httpMethod: 'GET',
-      headers: {},
-      body: null,
-      queryStringParameters: null,
-    }) as { statusCode: number; body: string };
+    const res = await handler(makeStatusEvent()) as { statusCode: number };
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('returns correct shape including approvedFields when brand matches', async () => {
+    mockSend.mockResolvedValue({
+      Items: [{
+        status: 'APPROVED',
+        desc: JSON.stringify({ brandId: 'woolworths', approvedFields: ['email'], expiresAt: '2026-01-01T00:00:00.000Z' }),
+      }],
+    });
+    const res = await handler(makeStatusEvent()) as { statusCode: number; body: string };
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.requestId).toBe('REQ001');
@@ -287,13 +320,7 @@ describe('GET /consent-request/{requestId}/status', () => {
 
   it('returns 404 for unknown requestId', async () => {
     mockSend.mockResolvedValue({ Items: [] });
-    const res = await handler({
-      path: '/consent-request/UNKNOWN/status',
-      httpMethod: 'GET',
-      headers: {},
-      body: null,
-      queryStringParameters: null,
-    }) as { statusCode: number };
+    const res = await handler(makeStatusEvent('UNKNOWN')) as { statusCode: number };
     expect(res.statusCode).toBe(404);
   });
 });

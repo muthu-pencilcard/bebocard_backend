@@ -108,6 +108,7 @@ interface RegisterBody {
 async function handleRegister(event: Parameters<APIGatewayProxyHandler>[0]) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
 
   const body: Partial<RegisterBody> = JSON.parse(event.body ?? '{}');
@@ -216,6 +217,7 @@ async function handleBrandCancel(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   // Look up subscription in AdminDataEvent index (subId → permULID)
@@ -241,6 +243,7 @@ async function handleAmountChange(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const body = JSON.parse(event.body ?? '{}');
@@ -391,6 +394,7 @@ async function handleStatus(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const idxRes = await dynamo.send(new QueryCommand({
@@ -435,6 +439,7 @@ async function handleInvoice(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const body: Partial<InvoiceBody> = JSON.parse(event.body ?? '{}');
@@ -551,6 +556,7 @@ async function handleBillingConfirmed(
 ) {
   const rawKey = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'recurring') : null;
+  if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const body: Partial<BillingConfirmedBody> = JSON.parse(event.body ?? '{}');

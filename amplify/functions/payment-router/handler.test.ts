@@ -363,17 +363,42 @@ describe('GET /checkout/{orderId}/status', () => {
     mockValidateApiKey.mockResolvedValue(makeValidKey());
   });
 
-  it('returns 200 with status from item', async () => {
-    mockSend.mockResolvedValue({
-      Items: [{ status: 'APPROVED', desc: JSON.stringify({ expiresAt: '2026-01-01T00:00:00.000Z' }) }],
-    });
-    const res = await handler({
-      path: '/checkout/ORDER001/status',
+  function makeStatusEvent(orderId = 'ORDER001') {
+    return {
+      path: `/checkout/${orderId}/status`,
       httpMethod: 'GET',
-      headers: {},
+      headers: { 'x-api-key': 'bebo_test.secret' },
       body: null,
       queryStringParameters: null,
-    }) as { statusCode: number; body: string };
+    };
+  }
+
+  it('returns 401 when no API key provided', async () => {
+    mockExtractApiKey.mockReturnValue(null);
+    mockValidateApiKey.mockResolvedValue(null);
+    const res = await handler(makeStatusEvent()) as { statusCode: number };
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('returns 429 when API key is rate limited', async () => {
+    mockValidateApiKey.mockResolvedValue('rate_limited');
+    const res = await handler(makeStatusEvent()) as { statusCode: number };
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('returns 403 when checkout belongs to a different brand', async () => {
+    mockSend.mockResolvedValue({
+      Items: [{ status: 'PENDING', desc: JSON.stringify({ brandId: 'bigw', expiresAt: '2026-01-01T00:00:00.000Z' }) }],
+    });
+    const res = await handler(makeStatusEvent()) as { statusCode: number };
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('returns 200 with status when brand matches', async () => {
+    mockSend.mockResolvedValue({
+      Items: [{ status: 'APPROVED', desc: JSON.stringify({ brandId: 'woolworths', expiresAt: '2026-01-01T00:00:00.000Z' }) }],
+    });
+    const res = await handler(makeStatusEvent()) as { statusCode: number; body: string };
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.orderId).toBe('ORDER001');
@@ -382,13 +407,7 @@ describe('GET /checkout/{orderId}/status', () => {
 
   it('returns 404 for unknown orderId', async () => {
     mockSend.mockResolvedValue({ Items: [] });
-    const res = await handler({
-      path: '/checkout/unknown/status',
-      httpMethod: 'GET',
-      headers: {},
-      body: null,
-      queryStringParameters: null,
-    }) as { statusCode: number };
+    const res = await handler(makeStatusEvent('unknown')) as { statusCode: number };
     expect(res.statusCode).toBe(404);
   });
 });

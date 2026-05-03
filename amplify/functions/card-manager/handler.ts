@@ -1,6 +1,7 @@
 import type { AppSyncResolverHandler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import https from 'https';
 import { monotonicFactory } from 'ulid';
 import { withAuditLog, writeAuditLog } from '../../shared/audit-logger';
@@ -13,11 +14,13 @@ import {
 import { getTenantStateForBrand, incrementTenantUsageCounter } from '../../shared/tenant-billing';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const ulid = monotonicFactory();
+const ssm   = new SSMClient({});
+const ulid  = monotonicFactory();
 
-const USER_TABLE = process.env.USER_TABLE!;
-const REFDATA_TABLE = process.env.REFDATA_TABLE!;
-const ADMIN_TABLE = process.env.ADMIN_TABLE!;
+const USER_TABLE            = process.env.USER_TABLE!;
+const REFDATA_TABLE         = process.env.REFDATA_TABLE!;
+const ADMIN_TABLE           = process.env.ADMIN_TABLE!;
+const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY ?? '';
 
 type Args = {
   // Stamp cards (Phase 11 SMB)
@@ -185,6 +188,8 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     case 'deleteAccount': return deleteAccount(permULID);
     case 'recordBipaConsent': return recordBipaConsent(permULID, owner, args.textVersion!);
     case 'linkStripeAccount': return linkStripeAccount(permULID, (args as any).stripeAccountId);
+    case 'initiateStripeConnect': return initiateStripeConnect(permULID);
+    case 'getStripeConfig': return getStripeConfig();
     default: throw new Error(`Unknown operation: ${operation}`);
   }
 };
@@ -352,19 +357,22 @@ async function getOrRefreshIdentity(permULID: string, owner: string) {
   }));
 
   if (identity.Item) {
-    const expiry = new Date(identity.Item.rotatesAt ?? 0);
+    const item   = identity.Item;
+    const expiry = new Date(item.rotatesAt ?? 0);
 
-    // Still valid — return current token, no write needed
-      const idDesc = parseRecord(identity.Item.desc);
+    if (expiry > now) {
+      // Still valid — return current token, no write needed
+      const idDesc = parseRecord(item.desc);
       return {
-        secondaryULID: identity.Item.secondaryULID,
-        rotatesAt: identity.Item.rotatesAt,
-        status: identity.Item.status,
-        marketplaceBalance: identity.Item.marketplaceBalance ?? 0,
+        secondaryULID: item.secondaryULID,
+        rotatesAt: item.rotatesAt,
+        status: item.status,
+        marketplaceBalance: item.marketplaceBalance ?? 0,
         stripeAccountId: idDesc.stripeAccountId as string | undefined,
         serverTime,
         generated: false,
       };
+    }
 
     // Expired — rotate. rotateQR uses conditional writes so concurrent calls
     // are safe: the losing device receives the winning rotation value.
@@ -372,7 +380,7 @@ async function getOrRefreshIdentity(permULID: string, owner: string) {
     return {
       secondaryULID: rotated.newSecondaryULID,
       rotatesAt: rotated.rotatesAt,
-      status: identity.Item.status,
+      status: item.status,
       marketplaceBalance: (rotated as any).marketplaceBalance ?? 0,
       stripeAccountId: (rotated as any).stripeAccountId as string | undefined,
       serverTime,
@@ -605,6 +613,89 @@ async function linkStripeAccount(permULID: string, stripeAccountId: string) {
     },
   }));
   return { success: true };
+}
+
+// ── Stripe Connect onboarding ─────────────────────────────────────────────────
+// Creates a Stripe Express account (if not already linked) and returns a hosted
+// onboarding URL. The account ID is persisted immediately so a refresh_url
+// callback can re-issue a new link without creating a duplicate account.
+
+async function initiateStripeConnect(permULID: string) {
+  const stripeKey = await getStripeSecretKey();
+  if (!stripeKey) throw new Error('Stripe is not configured');
+
+  const identity = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+  }));
+  if (!identity.Item) throw new Error('IDENTITY not found');
+
+  const desc = parseRecord(identity.Item.desc);
+  let accountId = desc.stripeAccountId as string | undefined;
+
+  if (!accountId) {
+    const account = await stripeRequest(stripeKey, 'POST', '/v1/accounts', { type: 'express' });
+    accountId = account.id as string;
+    const now = new Date().toISOString();
+    await dynamo.send(new UpdateCommand({
+      TableName: USER_TABLE,
+      Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+      UpdateExpression: 'SET #d = :desc, updatedAt = :now',
+      ExpressionAttributeNames: { '#d': 'desc' },
+      ExpressionAttributeValues: {
+        ':desc': JSON.stringify({ ...desc, stripeAccountId: accountId, linkedAt: now }),
+        ':now': now,
+      },
+    }));
+  }
+
+  const link = await stripeRequest(stripeKey, 'POST', '/v1/account_links', {
+    account: accountId,
+    refresh_url: 'bebocard://stripe-connect/callback?status=refresh',
+    return_url: 'bebocard://stripe-connect/callback?status=complete',
+    type: 'account_onboarding',
+  });
+
+  return { url: link.url as string, accountId };
+}
+
+function getStripeConfig() {
+  return { stripePublishableKey: STRIPE_PUBLISHABLE_KEY };
+}
+
+async function getStripeSecretKey(): Promise<string> {
+  try {
+    const res = await ssm.send(new GetParameterCommand({
+      Name: '/amplify/shared/STRIPE_SECRET_KEY',
+      WithDecryption: true,
+    }));
+    return res.Parameter?.Value ?? '';
+  } catch {
+    return process.env.STRIPE_SECRET_KEY ?? '';
+  }
+}
+
+async function stripeRequest(
+  secretKey: string,
+  method: string,
+  path: string,
+  body?: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const params = body ? new URLSearchParams(body).toString() : '';
+  const res = await fetch(`https://api.stripe.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${secretKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: method !== 'GET' ? params : undefined,
+  });
+  const data = await res.json() as Record<string, unknown>;
+  if (!res.ok) {
+    const msg = (data.error as Record<string, string> | undefined)?.message ?? JSON.stringify(data);
+    throw new Error(`Stripe API error: ${msg}`);
+  }
+  return data;
 }
 
 // ── Set rotation frequency (Patent Claims 75–86) ──────────────────────────────

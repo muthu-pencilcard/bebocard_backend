@@ -107,6 +107,14 @@ describe('POST /gift-card/deliver', () => {
     expect(res!.statusCode).toBe(401);
   });
 
+  it('returns 429 when API key is rate limited', async () => {
+    mockExtractApiKey.mockReturnValue('bebo_valid.key');
+    mockValidateApiKey.mockResolvedValue('rate_limited');
+    const res = await handler(makeEvent('/gift-card/deliver', 'POST', DELIVER_BODY), {} as never, () => {});
+    expect(res!.statusCode).toBe(429);
+    expect(JSON.parse(res!.body).error).toMatch(/rate limit/i);
+  });
+
   it('returns 400 when required fields are missing', async () => {
     mockExtractApiKey.mockReturnValue('bebo_valid.key');
     mockValidateApiKey.mockResolvedValue(VALID_KEY);

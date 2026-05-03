@@ -56,11 +56,11 @@ describe('Segment Processor (Phase 3 Intelligence)', () => {
       .mockResolvedValueOnce({ Items: receipts, LastEvaluatedKey: null }) // recomputeGlobalSegment receipts
       .mockResolvedValueOnce({}); // Put SEGMENT#global
 
-    await handler(streamEvent);
+    await handler(streamEvent, {} as any, () => {});
 
     const globalPut = mockDdbSend.mock.calls.find(c => c[0].input.Item?.sK === 'SEGMENT#global');
-    const desc = JSON.parse(globalPut[0].input.Item.desc);
-    
+    const desc = JSON.parse(globalPut![0].input.Item.desc);
+
     expect(desc.persona).toContain('brand_loyalist');
     expect(desc.persona).toContain('traveler');
     expect(desc.spendBucket).toBe('500+');
@@ -88,11 +88,11 @@ describe('Segment Processor (Phase 3 Intelligence)', () => {
       .mockResolvedValueOnce({ Items: manySmallReceipts }) 
       .mockResolvedValueOnce({}); // Put global segment
 
-    await handler(streamEvent);
+    await handler(streamEvent, {} as any, () => {});
 
     const globalPut = mockDdbSend.mock.calls.find(c => c[0].input.Item?.sK === 'SEGMENT#global');
-    const desc = JSON.parse(globalPut[0].input.Item.desc);
-    
+    const desc = JSON.parse(globalPut![0].input.Item.desc);
+
     expect(desc.persona).toContain('deal_hunter');
   });
 });

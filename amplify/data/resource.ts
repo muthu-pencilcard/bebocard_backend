@@ -475,6 +475,18 @@ const schema = a.schema({
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
+  initiateStripeConnect: a.mutation()
+    .arguments({})
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
+  getStripeConfig: a.query()
+    .arguments({})
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
   // ── SMB Loyalty-as-a-Service stamp cards (Phase 11) ──────────────────────
   // User-facing read access to their stamp card state. Mutations are performed
   // by brand backends via the SMB REST API (smb-handler Lambda).

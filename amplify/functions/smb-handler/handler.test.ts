@@ -171,6 +171,17 @@ describe('POST /smb/stamp', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('returns 429 when API key is rate limited', async () => {
+    vi.mocked(extractApiKey).mockReturnValue('bebo_valid.key');
+    vi.mocked(validateApiKey).mockResolvedValue('rate_limited' as never);
+
+    const { handler } = await import('./handler');
+    const res = await (handler as Function)(makeEvent());
+
+    expect(res.statusCode).toBe(429);
+    expect(JSON.parse(res.body).error).toMatch(/rate limit/i);
+  });
+
   it('returns 400 when secondaryULID is missing', async () => {
     vi.mocked(extractApiKey).mockReturnValue('bebo_valid.key');
     vi.mocked(validateApiKey).mockResolvedValue(VALID_KEY as never);

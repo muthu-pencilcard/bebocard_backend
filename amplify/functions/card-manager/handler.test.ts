@@ -578,3 +578,64 @@ describe('invoice usage tracking (Phase 20)', () => {
     expect(usageUpdate).toBeDefined();
   });
 });
+
+// ── getCurrentIdentity — expiry branch ───────────────────────────────────────
+
+describe('getOrRefreshIdentity', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockSend.mockReset();
+  });
+
+  function makeIdentityEvent() {
+    return {
+      info: { fieldName: 'getOrRefreshIdentity' },
+      identity: { claims: { 'custom:permULID': 'perm-ulid-001', 'cognito:username': 'test-user' } },
+      arguments: {},
+    } as any;
+  }
+
+  it('returns cached secondaryULID without rotating when identity is still valid', async () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    mockSend.mockResolvedValue({
+      Item: {
+        secondaryULID: 'cached-ulid',
+        rotatesAt: future,
+        status: 'ACTIVE',
+        marketplaceBalance: 0,
+        desc: JSON.stringify({}),
+      },
+    });
+
+    const res: any = await handler(makeIdentityEvent(), null as any, null as any);
+    expect(res.secondaryULID).toBe('cached-ulid');
+    expect(res.generated).toBe(false);
+    // No rotation writes — only GetCommand(s) and any audit log write
+    const writeCalls = mockSend.mock.calls.filter(
+      ([cmd]: any[]) => ['TransactWriteCommand', 'UpdateCommand'].includes(cmd.__type),
+    );
+    expect(writeCalls.length).toBe(0);
+  });
+
+  it('rotates identity and returns new secondaryULID when identity has expired', async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const expiredItem = {
+      secondaryULID: 'old-ulid',
+      rotatesAt: past,
+      status: 'ACTIVE',
+      marketplaceBalance: 0,
+      desc: JSON.stringify({ rotationFrequency: 'every_24h' }),
+    };
+    mockSend
+      .mockResolvedValueOnce({ Item: expiredItem })  // getOrRefreshIdentity: GetCommand IDENTITY
+      .mockResolvedValueOnce({ Item: expiredItem })  // rotateQR: GetCommand IDENTITY (reads again for oldSecondaryULID)
+      .mockResolvedValueOnce({ Item: null })          // rotateQR: GetCommand old SCAN index
+      .mockResolvedValue({});                         // TransactWriteCommand + rotation log PutCommand + audit writes
+
+    const res: any = await handler(makeIdentityEvent(), null as any, null as any);
+    expect(res.generated).toBe(true);
+    // TransactWriteCommand was issued for the rotation
+    const transactCalls = mockSend.mock.calls.filter(([cmd]: any[]) => cmd.__type === 'TransactWriteCommand');
+    expect(transactCalls.length).toBe(1);
+  });
+});

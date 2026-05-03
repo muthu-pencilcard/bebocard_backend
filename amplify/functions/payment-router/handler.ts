@@ -87,8 +87,13 @@ const _restHandler: APIGatewayProxyHandler = async (event) => {
       return handleCheckout(event);
 
     const statusMatch = path.match(/\/checkout\/([^/]+)\/status$/);
-    if (method === 'GET' && statusMatch)
-      return handleCheckoutStatus(statusMatch[1]);
+    if (method === 'GET' && statusMatch) {
+      const rawKey  = extractApiKey(event.headers as Record<string, string | undefined>);
+      const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'payment') : null;
+      if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
+      if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
+      return handleCheckoutStatus(statusMatch[1], validKey.brandId);
+    }
 
     return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Not found' }) };
   } catch (e) {
@@ -218,7 +223,7 @@ async function handleCheckout(event: Parameters<APIGatewayProxyHandler>[0]) {
 
 // ── GET /checkout/{orderId}/status ─────────────────────────────────────────────
 
-async function handleCheckoutStatus(orderId: string) {
+async function handleCheckoutStatus(orderId: string, brandId: string) {
   // Scan for the checkout record (pK known, sK is permULID — query by pK)
   const res = await dynamo.send(new QueryCommand({
     TableName: ADMIN_TABLE,
@@ -230,6 +235,8 @@ async function handleCheckoutStatus(orderId: string) {
   if (!item) return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Checkout not found' }) };
 
   const desc = JSON.parse(item.desc ?? '{}');
+  if (desc.brandId !== brandId) return { statusCode: 403, headers: CORS, body: JSON.stringify({ error: 'Forbidden' }) };
+
   return {
     statusCode: 200,
     headers: CORS,

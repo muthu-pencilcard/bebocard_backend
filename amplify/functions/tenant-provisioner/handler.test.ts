@@ -100,7 +100,7 @@ function makeStreamEvent(
         },
       },
     ],
-  } as Parameters<typeof handler>[0];
+  } as unknown as Parameters<typeof handler>[0];
 }
 
 function setupSsmPlanIds() {
@@ -286,7 +286,7 @@ describe('tenant-provisioner — provisionApiKey', () => {
           },
         },
       ],
-    } as Parameters<typeof handler>[0];
+    } as unknown as Parameters<typeof handler>[0];
 
     await handler(event, {} as never, () => {});
     expect(mockApigwSend).not.toHaveBeenCalled();

@@ -5,17 +5,50 @@ import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 
+const IOS_BUNDLE_ID = 'com.pencilcard.bebocard';
+const ANDROID_PACKAGE = 'com.pencilcard.bebocard';
+const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID ?? 'XXXXXXXXXX';
+const ANDROID_SHA256 = process.env.ANDROID_SHA256_FINGERPRINT ?? 'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99';
+
 export const handler: APIGatewayProxyHandler = async (event) => {
   const { pathParameters, headers, path } = event;
   const brandId = pathParameters?.brandId;
-  const storeId = pathParameters?.storeId; // If provided via /{brandId}/{storeId}
+  const storeId = pathParameters?.storeId;
   const userAgent = headers['User-Agent'] || headers['user-agent'] || '';
-  
-  // 301 Redirect for base path
+
+  if (path === '/.well-known/apple-app-site-association') {
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' },
+      body: JSON.stringify({
+        applinks: {
+          apps: [],
+          details: [{ appID: `${APPLE_TEAM_ID}.${IOS_BUNDLE_ID}`, paths: ['*'] }],
+        },
+        webcredentials: { apps: [`${APPLE_TEAM_ID}.${IOS_BUNDLE_ID}`] },
+      }),
+    };
+  }
+
+  if (path === '/.well-known/assetlinks.json') {
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' },
+      body: JSON.stringify([{
+        relation: ['delegate_permission/common.handle_all_urls'],
+        target: {
+          namespace: 'android_app',
+          package_name: ANDROID_PACKAGE,
+          sha256_cert_fingerprints: [ANDROID_SHA256],
+        },
+      }]),
+    };
+  }
+
   if (!brandId) {
     return {
       statusCode: 302,
-      headers: { Location: 'https://bebocard.com.au' },
+      headers: { Location: 'https://bebocard.com' },
       body: '',
     } as APIGatewayProxyResult;
   }
@@ -39,7 +72,7 @@ export const handler: APIGatewayProxyHandler = async (event) => {
   
   // Store URLs
   const iosStore = 'https://apps.apple.com/au/app/bebocard/id123456789';
-  const androidStore = 'https://play.google.com/store/apps/details?id=me.bebocard.app';
+  const androidStore = `https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE}`;
 
   // Lightweight Landing Page for acquisition / anonymous scan
   const html = `

@@ -91,8 +91,13 @@ const _restHandler: APIGatewayProxyHandler = async (event) => {
       return handleConsentRequest(event);
 
     const statusMatch = path.match(/\/consent-request\/([^/]+)\/status$/);
-    if (method === 'GET' && statusMatch)
-      return handleConsentStatus(statusMatch[1]);
+    if (method === 'GET' && statusMatch) {
+      const rawKey  = extractApiKey(event.headers as Record<string, string | undefined>);
+      const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'consent') : null;
+      if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
+      if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
+      return handleConsentStatus(statusMatch[1], validKey.brandId);
+    }
 
     return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Not found' }) };
   } catch (e) {
@@ -204,7 +209,7 @@ async function handleConsentRequest(event: Parameters<APIGatewayProxyHandler>[0]
 
 // ── GET /consent-request/{requestId}/status ───────────────────────────────────
 
-async function handleConsentStatus(requestId: string) {
+async function handleConsentStatus(requestId: string, brandId: string) {
   const res = await dynamo.send(new QueryCommand({
     TableName: ADMIN_TABLE,
     KeyConditionExpression: 'pK = :pk',
@@ -215,6 +220,8 @@ async function handleConsentStatus(requestId: string) {
   if (!item) return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Consent request not found' }) };
 
   const desc = JSON.parse(item.desc ?? '{}');
+  if (desc.brandId !== brandId) return { statusCode: 403, headers: CORS, body: JSON.stringify({ error: 'Forbidden' }) };
+
   return {
     statusCode: 200,
     headers: CORS,

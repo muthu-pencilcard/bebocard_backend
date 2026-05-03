@@ -54,12 +54,12 @@ describe('Gift Card Marketplace (Phase 3)', () => {
         currency: 'AUD'
       }));
 
-      expect(res.status).toBe('LISTED');
-      expect(res.resaleId).toBeDefined();
+      expect((res as any).status).toBe('LISTED');
+      expect((res as any).resaleId).toBeDefined();
 
       // Verify card was locked
       const lockCall = mockDdbSend.mock.calls.find(c => c[0].__type === 'UpdateCommand');
-      expect(lockCall[0].input.ExpressionAttributeValues[':locked']).toBe('LOCKED_FOR_SALE');
+      expect(lockCall![0].input.ExpressionAttributeValues[':locked']).toBe('LOCKED_FOR_SALE');
     });
 
     it('denies listing if card is not active', async () => {
@@ -97,8 +97,8 @@ describe('Gift Card Marketplace (Phase 3)', () => {
         resaleId: 'RESALE#123'
       }));
 
-      expect(res.status).toBe('SUCCESS');
-      expect(res.cardSK).toBeDefined();
+      expect((res as any).status).toBe('SUCCESS');
+      expect((res as any).cardSK).toBeDefined();
 
       // Verify one transaction was sent (marking listing sold, deleting seller card, adding buyer card etc)
       const transactCall = mockDdbSend.mock.calls.find(c => c[0].__type === 'UpdateCommand' && c[0].input.ExpressionAttributeValues[':sold'] === 'SOLD');

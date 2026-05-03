@@ -48,7 +48,7 @@ import { campaignSchedulerFn } from './functions/campaign-scheduler/resource';
 import { pointsExpiryForecastFn } from './functions/points-expiry-forecast/resource';
 import { aggregatedSpendingProcessorFn } from './functions/aggregated-spending-processor/resource';
 import { receiptAnalyticsProcessorFn } from './functions/receipt-analytics-processor/resource';
-import { Stack, Duration, RemovalPolicy, Tags, CfnOutput } from 'aws-cdk-lib';
+import { Stack, Duration, RemovalPolicy, Tags, CfnOutput, Fn } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -73,6 +73,9 @@ import { DynamoEventSource, SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
 import * as ses from 'aws-cdk-lib/aws-ses';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 
 const backend = defineBackend({
   auth,
@@ -386,7 +389,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail', 'ses:SendRawEmail'],
-  resources: [`arn:aws:ses:*:${authStack.account}:identity/bebocard.com.au`],
+  resources: [`arn:aws:ses:*:${authStack.account}:identity/bebocard.com`],
 }));
 postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter'],
@@ -447,6 +450,11 @@ const grantKmsAccess = (fn: lambda.Function, key: kms.IKey, actions: string[]) =
 grantTableAccess(cardManagerLambda, 'UserDataEvent', true);
 grantTableAccess(cardManagerLambda, 'RefDataEvent', false);
 grantTableAccess(cardManagerLambda, 'AdminDataEvent', true);
+cardManagerLambda.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:*:*:parameter/amplify/shared/STRIPE_SECRET_KEY`],
+}));
+cardManagerLambda.addEnvironment('STRIPE_PUBLISHABLE_KEY', process.env.STRIPE_PUBLISHABLE_KEY ?? '');
 
 // ── Scan handler ──
 const scanLambda = backend.scanHandlerFn.resources.lambda as lambda.Function;
@@ -605,13 +613,70 @@ grantTableAccess(geofenceLambda, 'AdminDataEvent', false);
 
 // ── Consent handler ──
 const consentLambda = backend.consentHandlerFn.resources.lambda as lambda.Function;
-consentLambda.addEnvironment('USER_TABLE_PARAM', userTableParamName);
-consentLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
-consentLambda.addEnvironment('ADMIN_TABLE_PARAM', adminTableParamName);
-consentLambda.addEnvironment('REPORT_TABLE_PARAM', reportTableParamName);
+consentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+consentLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+consentLambda.addEnvironment('REF_TABLE', refDataTable.tableName);
 grantTableAccess(consentLambda, 'UserDataEvent', true);
 grantTableAccess(consentLambda, 'RefDataEvent', false);
 grantTableAccess(consentLambda, 'AdminDataEvent', true);
+
+const consentTimeoutQueueName = `bebo-ctq-${amplifyAppId}-${amplifyBranch}`.substring(0, 80);
+const consentTimeoutDLQ = new sqs.Queue(infraStack, 'ConsentTimeoutDLQ', {
+  queueName: consentTimeoutQueueName + '-dlq',
+  retentionPeriod: Duration.days(14),
+});
+createDlqAlarm(consentTimeoutDLQ, 'ConsentTimeoutDLQ');
+const consentTimeoutQueue = new sqs.Queue(infraStack, 'ConsentTimeoutQueue', {
+  queueName: consentTimeoutQueueName,
+  visibilityTimeout: Duration.seconds(180),
+  deadLetterQueue: { queue: consentTimeoutDLQ, maxReceiveCount: 3 },
+});
+consentLambda.addEnvironment('CONSENT_TIMEOUT_QUEUE_URL', consentTimeoutQueue.queueUrl);
+grantSqsAccess(consentLambda, consentTimeoutQueue, ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
+new lambda.EventSourceMapping(mappingStack, 'ConsentHandlerSQSSource', {
+  target: consentLambda,
+  eventSourceArn: consentTimeoutQueue.queueArn,
+  batchSize: 10,
+  reportBatchItemFailures: true,
+});
+
+// ── Payment router ──
+const paymentRouterLambda = backend.paymentRouterFn.resources.lambda as lambda.Function;
+paymentRouterLambda.addEnvironment('USER_TABLE', userTable.tableName);
+paymentRouterLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+paymentRouterLambda.addEnvironment('REF_TABLE', refDataTable.tableName);
+grantTableAccess(paymentRouterLambda, 'UserDataEvent', false);
+grantTableAccess(paymentRouterLambda, 'RefDataEvent', true);  // incrementTenantUsageCounter writes to RefDataEvent
+grantTableAccess(paymentRouterLambda, 'AdminDataEvent', true);
+
+const paymentTimeoutQueueName = `bebo-ptq-${amplifyAppId}-${amplifyBranch}`.substring(0, 80);
+const paymentTimeoutDLQ = new sqs.Queue(infraStack, 'PaymentTimeoutDLQ', {
+  queueName: paymentTimeoutQueueName + '-dlq',
+  retentionPeriod: Duration.days(14),
+});
+createDlqAlarm(paymentTimeoutDLQ, 'PaymentTimeoutDLQ');
+const paymentTimeoutQueue = new sqs.Queue(infraStack, 'PaymentTimeoutQueue', {
+  queueName: paymentTimeoutQueueName,
+  visibilityTimeout: Duration.seconds(180),
+  deadLetterQueue: { queue: paymentTimeoutDLQ, maxReceiveCount: 3 },
+});
+paymentRouterLambda.addEnvironment('TIMEOUT_QUEUE_URL', paymentTimeoutQueue.queueUrl);
+grantSqsAccess(paymentRouterLambda, paymentTimeoutQueue, ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
+new lambda.EventSourceMapping(mappingStack, 'PaymentRouterSQSSource', {
+  target: paymentRouterLambda,
+  eventSourceArn: paymentTimeoutQueue.queueArn,
+  batchSize: 10,
+  reportBatchItemFailures: true,
+});
+
+// ── Enrollment handler ──
+const enrollmentLambda = backend.enrollmentHandlerFn.resources.lambda as lambda.Function;
+enrollmentLambda.addEnvironment('USER_TABLE', userTable.tableName);
+enrollmentLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+enrollmentLambda.addEnvironment('REF_TABLE', refDataTable.tableName);
+grantTableAccess(enrollmentLambda, 'UserDataEvent', true);
+grantTableAccess(enrollmentLambda, 'RefDataEvent', false);
+grantTableAccess(enrollmentLambda, 'AdminDataEvent', true);
 
 // ── Segment processor ──
 const segmentLambda = backend.segmentProcessorFn.resources.lambda as lambda.Function;
@@ -650,7 +715,7 @@ grantTableAccess(billingRunLambda, 'RefDataEvent', true);
 grantTableAccess(billingRunLambda, 'UserDataEvent', true);
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail'],
-  resources: [`arn:aws:ses:*:${infraStack.account}:identity/bebocard.com.au`],
+  resources: [`arn:aws:ses:*:${infraStack.account}:identity/bebocard.com`],
 }));
 
 billingRunLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -990,6 +1055,51 @@ new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocAnalyticsApi', {
   webAclArn: publicWebAcl.attrArn,
 });
 
+// ── Consent API ──
+const consentApi = new apigw.RestApi(dataStack, 'ConsentApi', {
+  restApiName: `bebo-consent-api-${stage}`,
+  deployOptions: { stageName: 'prod' },
+});
+const consentIntegration = new apigw.LambdaIntegration(consentLambda);
+const consentV1 = consentApi.root.addResource('v1');
+const consentRequestRes = consentV1.addResource('consent-request');
+consentRequestRes.addMethod('POST', consentIntegration, { apiKeyRequired: true });
+consentRequestRes.addResource('{requestId}').addResource('status').addMethod('GET', consentIntegration, { apiKeyRequired: true });
+new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocConsentApi', {
+  resourceArn: `arn:aws:apigateway:${infraStack.region}::/restapis/${consentApi.restApiId}/stages/${consentApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
+});
+
+// ── Payment API ──
+const paymentApi = new apigw.RestApi(dataStack, 'PaymentApi', {
+  restApiName: `bebo-payment-api-${stage}`,
+  deployOptions: { stageName: 'prod' },
+});
+const paymentIntegration = new apigw.LambdaIntegration(paymentRouterLambda);
+const paymentV1 = paymentApi.root.addResource('v1');
+const checkoutRes = paymentV1.addResource('checkout');
+checkoutRes.addMethod('POST', paymentIntegration, { apiKeyRequired: true });
+checkoutRes.addResource('{orderId}').addResource('status').addMethod('GET', paymentIntegration, { apiKeyRequired: true });
+new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocPaymentApi', {
+  resourceArn: `arn:aws:apigateway:${infraStack.region}::/restapis/${paymentApi.restApiId}/stages/${paymentApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
+});
+
+// ── Enrollment API ──
+const enrollmentApi = new apigw.RestApi(dataStack, 'EnrollmentApi', {
+  restApiName: `bebo-enrollment-api-${stage}`,
+  deployOptions: { stageName: 'prod' },
+});
+const enrollmentIntegration = new apigw.LambdaIntegration(enrollmentLambda);
+const enrollmentV1 = enrollmentApi.root.addResource('v1');
+const enrollRes = enrollmentV1.addResource('enroll');
+enrollRes.addMethod('POST', enrollmentIntegration, { apiKeyRequired: true });
+enrollRes.addResource('{enrollmentId}').addResource('status').addMethod('GET', enrollmentIntegration, { apiKeyRequired: true });
+new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocEnrollmentApi', {
+  resourceArn: `arn:aws:apigateway:${infraStack.region}::/restapis/${enrollmentApi.restApiId}/stages/${enrollmentApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
+});
+
 // ── Analytics Compactor (P1-5) ──
 const compactorLambda = backend.analyticsCompactorFn.resources.lambda as lambda.Function;
 compactorLambda.addEnvironment('GLUE_DATABASE', glueDatabaseName);
@@ -1182,7 +1292,7 @@ const giftCardLambda = backend.giftCardHandlerFn.resources.lambda as lambda.Func
 giftCardLambda.addEnvironment('SES_CONFIGURATION_SET', sesConfigSet.configurationSetName!);
 giftCardLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['ses:SendEmail', 'ses:SendRawEmail'],
-  resources: [`arn:aws:ses:*:${dataStack.account}:identity/bebocard.com.au`],
+  resources: [`arn:aws:ses:*:${dataStack.account}:identity/bebocard.com`],
 }));
 
 // ── Remote Config Wiring (P2-21) ──
@@ -1382,6 +1492,43 @@ grantTableAccess(templateManagerLambda, 'RefDataEvent', true);
 Tags.of(templateManagerLambda).add('Function', 'template-manager');
 Tags.of(templateManagerLambda).add('CostCenter', 'ops');
 
+// ── Widget Action API (embeddable brand iframe endpoint) ──────────────────
+const widgetActionLambda = backend.widgetActionHandlerFn.resources.lambda as lambda.Function;
+widgetActionLambda.addEnvironment('USER_TABLE', userTable.tableName);
+widgetActionLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+widgetActionLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+widgetActionLambda.addEnvironment('COGNITO_REGION', dataStack.region);
+widgetActionLambda.addEnvironment(
+  'COGNITO_USER_POOL_ID',
+  ssm.StringParameter.valueForStringParameter(dataStack, USER_POOL_ID_PARAM),
+);
+grantTableAccess(widgetActionLambda, 'UserDataEvent', true);
+grantTableAccess(widgetActionLambda, 'RefDataEvent', false);
+grantTableAccess(widgetActionLambda, 'AdminDataEvent', true);
+Tags.of(widgetActionLambda).add('Function', 'widget-action-handler');
+Tags.of(widgetActionLambda).add('CostCenter', 'engagement');
+
+const widgetApi = new apigw.RestApi(dataStack, 'WidgetActionApi', {
+  restApiName: `bebo-widget-api-${stage}`,
+  deployOptions: { stageName: 'prod' },
+  defaultCorsPreflightOptions: {
+    allowOrigins: apigw.Cors.ALL_ORIGINS,
+    allowMethods: apigw.Cors.ALL_METHODS,
+    allowHeaders: ['Content-Type', 'Authorization'],
+  },
+});
+const widgetIntegration = new apigw.LambdaIntegration(widgetActionLambda);
+const widgetApiRes = widgetApi.root.addResource('widget');
+widgetApiRes.addResource('auth').addMethod('POST', widgetIntegration, { apiKeyRequired: false });
+widgetApiRes.addResource('invoice').addMethod('POST', widgetIntegration, { apiKeyRequired: false });
+const widgetGiftcardsRes = widgetApiRes.addResource('giftcards');
+widgetGiftcardsRes.addMethod('GET', widgetIntegration, { apiKeyRequired: false });
+widgetGiftcardsRes.addResource('select').addMethod('POST', widgetIntegration, { apiKeyRequired: false });
+new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocWidgetApi', {
+  resourceArn: `arn:aws:apigateway:${dataStack.region}::/restapis/${widgetApi.restApiId}/stages/${widgetApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
+});
+
 // ── P2-2: Campaign Lifecycle Scheduler (every 5 mins sweep) ──────────────────
 const schedulerLambda = backend.campaignSchedulerFn.resources.lambda as lambda.Function;
 schedulerLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
@@ -1434,3 +1581,165 @@ Tags.of(schedulerLambda).add('CostCenter', 'engagement');
 //     alarms: [errorAlarm],
 //   });
 // }
+
+// ── Production Domain Infrastructure ─────────────────────────────────────
+// Activates on prod branch only. Requires two one-time manual steps:
+//   1. Create ACM wildcard cert in deployment region:
+//      aws acm request-certificate --domain-name '*.bebocard.com'
+//        --subject-alternative-names bebocard.com
+//        --validation-method DNS --region <your-region>
+//      → Set the returned ARN as API_CERT_ARN in Amplify app environment variables.
+//   2. For CDN (cdn.bebocard.com), create a second ACM cert in us-east-1:
+//      aws acm request-certificate --domain-name '*.bebocard.com'
+//        --validation-method DNS --region us-east-1
+//      → Set as CLOUDFRONT_CERT_ARN in Amplify app environment variables.
+//   3. After first deploy outputs the NS records, update your domain registrar
+//      to point bebocard.com to the Route 53 hosted zone nameservers.
+if (stage === 'prod') {
+  const apexDomain = 'bebocard.com';
+  const apiCertArn = process.env.API_CERT_ARN;
+  const cfCertArn = process.env.CLOUDFRONT_CERT_ARN;
+
+  const hostedZone = new route53.PublicHostedZone(infraStack, 'BeboCardHostedZone', {
+    zoneName: apexDomain,
+  });
+
+  new CfnOutput(infraStack, 'HostedZoneNameServers', {
+    value: Fn.join(',', hostedZone.hostedZoneNameServers ?? []),
+    description: 'Copy all 4 NS values to your domain registrar for bebocard.com',
+  });
+
+  if (apiCertArn) {
+    // scan.bebocard.com — POS dedicated endpoint (in scanApiStack to avoid cross-stack CDK tokens)
+    const scanDomain = new apigw.DomainName(scanApiStack, 'ScanCustomDomain', {
+      domainName: `scan.${apexDomain}`,
+      certificate: acm.Certificate.fromCertificateArn(scanApiStack, 'ScanCertRef', apiCertArn),
+      endpointType: apigw.EndpointType.REGIONAL,
+      securityPolicy: apigw.SecurityPolicy.TLS_1_2,
+    });
+    new apigw.BasePathMapping(scanApiStack, 'ScanRootMapping', {
+      domainName: scanDomain,
+      restApi: scanApi,
+      stage: scanApi.deploymentStage,
+    });
+    new route53.ARecord(scanApiStack, 'ScanARecord', {
+      zone: hostedZone,
+      recordName: 'scan',
+      target: route53.RecordTarget.fromAlias(new route53targets.ApiGatewayDomain(scanDomain)),
+    });
+
+    // app.bebocard.com — QR routing + iOS/Android deep links (in dataStack)
+    const appDomain = new apigw.DomainName(dataStack, 'AppCustomDomain', {
+      domainName: `app.${apexDomain}`,
+      certificate: acm.Certificate.fromCertificateArn(dataStack, 'AppCertRef', apiCertArn),
+      endpointType: apigw.EndpointType.REGIONAL,
+      securityPolicy: apigw.SecurityPolicy.TLS_1_2,
+    });
+    new apigw.BasePathMapping(dataStack, 'AppRootMapping', {
+      domainName: appDomain,
+      restApi: qrApi,
+      stage: qrApi.deploymentStage,
+    });
+    new route53.ARecord(dataStack, 'AppARecord', {
+      zone: hostedZone,
+      recordName: 'app',
+      target: route53.RecordTarget.fromAlias(new route53targets.ApiGatewayDomain(appDomain)),
+    });
+
+    // api.bebocard.com — tenant APIs (analytics, consent, payment, enrollment) via base path
+    const apiDomain = new apigw.DomainName(dataStack, 'ApiCustomDomain', {
+      domainName: `api.${apexDomain}`,
+      certificate: acm.Certificate.fromCertificateArn(dataStack, 'ApiCertRef', apiCertArn),
+      endpointType: apigw.EndpointType.REGIONAL,
+      securityPolicy: apigw.SecurityPolicy.TLS_1_2,
+    });
+    new apigw.BasePathMapping(dataStack, 'AnalyticsMapping', {
+      domainName: apiDomain,
+      restApi: analyticsApi,
+      basePath: 'analytics',
+      stage: analyticsApi.deploymentStage,
+    });
+    new apigw.BasePathMapping(dataStack, 'ConsentMapping', {
+      domainName: apiDomain,
+      restApi: consentApi,
+      basePath: 'consent',
+      stage: consentApi.deploymentStage,
+    });
+    new apigw.BasePathMapping(dataStack, 'PaymentMapping', {
+      domainName: apiDomain,
+      restApi: paymentApi,
+      basePath: 'payment',
+      stage: paymentApi.deploymentStage,
+    });
+    new apigw.BasePathMapping(dataStack, 'EnrollmentMapping', {
+      domainName: apiDomain,
+      restApi: enrollmentApi,
+      basePath: 'enrollment',
+      stage: enrollmentApi.deploymentStage,
+    });
+    new route53.ARecord(dataStack, 'ApiARecord', {
+      zone: hostedZone,
+      recordName: 'api',
+      target: route53.RecordTarget.fromAlias(new route53targets.ApiGatewayDomain(apiDomain)),
+    });
+
+    // widget.bebocard.com — embeddable brand iframe (in dataStack)
+    const widgetDomain = new apigw.DomainName(dataStack, 'WidgetCustomDomain', {
+      domainName: `widget.${apexDomain}`,
+      certificate: acm.Certificate.fromCertificateArn(dataStack, 'WidgetCertRef', apiCertArn),
+      endpointType: apigw.EndpointType.REGIONAL,
+      securityPolicy: apigw.SecurityPolicy.TLS_1_2,
+    });
+    new apigw.BasePathMapping(dataStack, 'WidgetRootMapping', {
+      domainName: widgetDomain,
+      restApi: widgetApi,
+      stage: widgetApi.deploymentStage,
+    });
+    new route53.ARecord(dataStack, 'WidgetARecord', {
+      zone: hostedZone,
+      recordName: 'widget',
+      target: route53.RecordTarget.fromAlias(new route53targets.ApiGatewayDomain(widgetDomain)),
+    });
+
+    new CfnOutput(infraStack, 'ScanApiUrl', {
+      value: `https://scan.${apexDomain}/v1`,
+      description: 'POS scan endpoint — configure in POS vendor integration',
+    });
+    new CfnOutput(infraStack, 'AppUrl', {
+      value: `https://app.${apexDomain}`,
+      description: 'QR routing + iOS/Android deep link host',
+    });
+    new CfnOutput(infraStack, 'TenantApiBase', {
+      value: `https://api.${apexDomain}`,
+      description: 'Tenant API base (/analytics/*, /consent/*, /payment/*, /enrollment/*)',
+    });
+    new CfnOutput(infraStack, 'WidgetOrigin', {
+      value: `https://widget.${apexDomain}`,
+      description: 'Widget iframe origin — set as allowedWidgetDomain in tenant config',
+    });
+  }
+
+  // cdn.bebocard.com — CloudFront for remote config bucket
+  const remoteConfigDistribution = new cloudfront.Distribution(infraStack, 'RemoteConfigCdn', {
+    defaultBehavior: {
+      origin: cfOrigins.S3BucketOrigin.withOriginAccessControl(remoteConfigBucket),
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
+    ...(cfCertArn ? {
+      domainNames: [`cdn.${apexDomain}`],
+      certificate: acm.Certificate.fromCertificateArn(infraStack, 'CdnCertRef', cfCertArn),
+    } : {}),
+  });
+  if (cfCertArn) {
+    new route53.ARecord(infraStack, 'CdnARecord', {
+      zone: hostedZone,
+      recordName: 'cdn',
+      target: route53.RecordTarget.fromAlias(new route53targets.CloudFrontTarget(remoteConfigDistribution)),
+    });
+  }
+  new CfnOutput(infraStack, 'RemoteConfigCdnDomain', {
+    value: remoteConfigDistribution.distributionDomainName,
+    description: 'Remote config CDN — set as REMOTE_CONFIG_CDN env var in app',
+  });
+}
