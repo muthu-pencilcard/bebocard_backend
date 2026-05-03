@@ -170,3 +170,26 @@ export const AddReceiptSchema = z.object({
   items:          z.array(z.unknown()).max(200).optional().nullable(),
   photoKey:       z.string().max(512).optional().nullable(),
 });
+
+// ── REST consumer API schemas ─────────────────────────────────────────────────
+
+export const CheckoutRequestSchema = z.object({
+  secondaryULID: z.string().min(1).max(128),
+  amount:        z.number().positive().max(100_000),
+  currency:      z.string().length(3),
+  merchantName:  z.string().min(1).max(100),
+  orderId:       z.string().min(1).max(128),
+});
+
+export const ConsentRequestSchema = z.object({
+  secondaryULID:   z.string().min(1).max(128),
+  requestedFields: z.array(z.string().min(1).max(64)).min(1).max(10),
+  purpose:         z.string().min(1).max(500),
+});
+
+export const EnrollRequestSchema = z.object({
+  secondaryULID:      z.string().min(1).max(128),
+  programName:        z.string().min(1).max(100),
+  programDescription: z.string().max(1000).optional(),
+  rewardDescription:  z.string().max(500).optional(),
+});

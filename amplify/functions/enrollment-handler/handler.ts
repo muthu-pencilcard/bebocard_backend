@@ -28,16 +28,15 @@
 import { createHash } from 'crypto';
 import https from 'https';
 import type { APIGatewayProxyHandler } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { monotonicFactory } from 'ulid';
 import { validateApiKey, extractApiKey } from '../../shared/api-key-auth';
 import { withAuditLog } from '../../shared/audit-logger';
+import { EnrollRequestSchema } from '../../shared/validation-schemas';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const ulid   = monotonicFactory();
 
 const ADMIN_TABLE = process.env.ADMIN_TABLE!;
 const USER_TABLE  = process.env.USER_TABLE!;
@@ -78,55 +77,60 @@ const _restHandler: APIGatewayProxyHandler = async (event) => {
 
 // ── POST /enroll ──────────────────────────────────────────────────────────────
 
-interface EnrollBody {
-  secondaryULID:      string;
-  programName:        string;
-  programDescription?: string;
-  rewardDescription?:  string;
-}
-
 async function handleEnroll(event: Parameters<APIGatewayProxyHandler>[0]) {
   const rawKey   = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'enrollment') : null;
   if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
 
-  const body: Partial<EnrollBody> = JSON.parse(event.body ?? '{}');
-  const { secondaryULID, programName } = body;
-
-  if (!secondaryULID || !programName) {
-    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing required fields: secondaryULID, programName' }) };
-  }
+  const parsed = EnrollRequestSchema.safeParse(JSON.parse(event.body ?? '{}'));
+  if (!parsed.success) return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: parsed.error.flatten() }) };
+  const { secondaryULID, programName, programDescription, rewardDescription } = parsed.data;
 
   const permULID = await resolvePermULID(secondaryULID);
   if (!permULID) return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'User not found' }) };
 
-  const enrollmentId = ulid();
+  const enrollmentId = createHash('sha256')
+    .update(`${validKey.brandId}|${permULID}`)
+    .digest('hex')
+    .slice(0, 26);
   const now = new Date().toISOString();
 
-  // Check for duplicate: same user + brand already has a PENDING or ACCEPTED enrollment
-  const existing = await findExistingEnrollment(permULID, validKey.brandId);
-  if (existing === 'ACCEPTED') {
-    return { statusCode: 409, headers: CORS, body: JSON.stringify({ error: 'User is already enrolled in this program' }) };
+  // Store enrollment record in AdminDataEvent — idempotent via deterministic enrollmentId
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: ADMIN_TABLE,
+      Item: {
+        pK:          `ENROLL#${enrollmentId}`,
+        sK:          permULID,
+        eventType:   'ENROLLMENT',
+        status:      'PENDING',
+        brandId:     validKey.brandId,
+        programName,
+        programDescription: programDescription ?? null,
+        rewardDescription:  rewardDescription  ?? null,
+        createdAt:   now,
+        updatedAt:   now,
+      },
+      ConditionExpression: 'attribute_not_exists(pK)',
+    }));
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) {
+      const existRes = await dynamo.send(new QueryCommand({
+        TableName: ADMIN_TABLE,
+        KeyConditionExpression: 'pK = :pk',
+        ExpressionAttributeValues: { ':pk': `ENROLL#${enrollmentId}` },
+        Limit: 1,
+      }));
+      const existItem = existRes.Items?.[0];
+      return {
+        statusCode: 200,
+        headers: CORS,
+        body: JSON.stringify({ enrollmentId, status: existItem?.status ?? 'PENDING' }),
+      };
+    }
+    throw err;
   }
-
-  // Store enrollment record in AdminDataEvent (brand polls this for status)
-  await dynamo.send(new PutCommand({
-    TableName: ADMIN_TABLE,
-    Item: {
-      pK:          `ENROLL#${enrollmentId}`,
-      sK:          permULID,
-      eventType:   'ENROLLMENT',
-      status:      'PENDING',
-      brandId:     validKey.brandId,
-      programName,
-      programDescription: body.programDescription ?? null,
-      rewardDescription:  body.rewardDescription  ?? null,
-      createdAt:   now,
-      updatedAt:   now,
-    },
-    ConditionExpression: 'attribute_not_exists(pK)',
-  }));
 
   // FCM push to notify user
   const deviceToken = await getDeviceToken(permULID);
@@ -147,12 +151,12 @@ async function handleEnroll(event: Parameters<APIGatewayProxyHandler>[0]) {
           brandId:            validKey.brandId,
           brandName,
           programName,
-          programDescription: body.programDescription ?? '',
-          rewardDescription:  body.rewardDescription  ?? '',
+          programDescription: programDescription ?? '',
+          rewardDescription:  rewardDescription  ?? '',
         },
         notification: {
           title: `Join ${brandName} rewards`,
-          body:  programName + (body.rewardDescription ? ` — ${body.rewardDescription}` : ''),
+          body:  programName + (rewardDescription ? ` — ${rewardDescription}` : ''),
         },
         android: { priority: 'high' },
         apns:    { payload: { aps: { contentAvailable: true, sound: 'default' } } },
@@ -356,21 +360,6 @@ async function getBrandName(brandId: string): Promise<string> {
   return (desc.brandName as string) ?? brandId;
 }
 
-async function findExistingEnrollment(permULID: string, brandId: string): Promise<string | null> {
-  const res = await dynamo.send(new QueryCommand({
-    TableName: USER_TABLE,
-    KeyConditionExpression: 'pK = :pk AND begins_with(sK, :prefix)',
-    FilterExpression: '#s = :accepted',
-    ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: {
-      ':pk':       `USER#${permULID}`,
-      ':prefix':   `ENROLL#${brandId}#`,
-      ':accepted': 'ACCEPTED',
-    },
-    Limit: 1,
-  }));
-  return (res.Items?.[0]?.status as string) ?? null;
-}
 
 async function callBrandWebhook(
   ddb: DynamoDBDocumentClient,

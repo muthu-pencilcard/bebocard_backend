@@ -26,22 +26,22 @@
  *   desc: { brandId, brandName, requestedFields, approvedFields, status, resolvedAt }
  */
 
+import { createHash } from 'crypto';
 import type { APIGatewayProxyHandler, SQSEvent } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
-import { monotonicFactory } from 'ulid';
 import { validateApiKey, extractApiKey } from '../../shared/api-key-auth';
 import { withAuditLog } from '../../shared/audit-logger';
+import { ConsentRequestSchema } from '../../shared/validation-schemas';
 import https from 'https';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const sqs    = new SQSClient({});
-const ulid   = monotonicFactory();
 
 const ADMIN_TABLE              = process.env.ADMIN_TABLE!;
 const USER_TABLE               = process.env.USER_TABLE!;
@@ -109,27 +109,18 @@ const _restHandler: APIGatewayProxyHandler = async (event) => {
 // ── POST /consent-request ─────────────────────────────────────────────────────
 // Called by brand POS backend. Validates fields, sends FCM prompt, enqueues timeout.
 
-interface ConsentRequestBody {
-  secondaryULID: string;
-  requestedFields: ConsentField[];
-  purpose: string;
-}
-
 async function handleConsentRequest(event: Parameters<APIGatewayProxyHandler>[0]) {
   const rawKey  = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'consent') : null;
   if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
 
-  const body: Partial<ConsentRequestBody> = JSON.parse(event.body ?? '{}');
-  const { secondaryULID, requestedFields, purpose } = body;
-
-  if (!secondaryULID || !requestedFields?.length || !purpose) {
-    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing required fields: secondaryULID, requestedFields, purpose' }) };
-  }
+  const parsed = ConsentRequestSchema.safeParse(JSON.parse(event.body ?? '{}'));
+  if (!parsed.success) return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: parsed.error.flatten() }) };
+  const { secondaryULID, requestedFields, purpose } = parsed.data;
 
   // Validate requested fields against allow-list
-  const invalid = requestedFields.filter(f => !ALLOWED_FIELDS.includes(f));
+  const invalid = (requestedFields as string[]).filter(f => !ALLOWED_FIELDS.includes(f as ConsentField));
   if (invalid.length) {
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: `Invalid fields: ${invalid.join(', ')}. Allowed: ${ALLOWED_FIELDS.join(', ')}` }) };
   }
@@ -146,24 +137,44 @@ async function handleConsentRequest(event: Parameters<APIGatewayProxyHandler>[0]
   const brandName        = brandDesc.brandName as string | undefined ?? validKey.brandId;
   const brandWebhookUrl  = brandDesc.consentWebhookUrl as string | undefined;
 
-  const requestId = ulid();
+  const sortedFields = [...requestedFields].sort();
+  const requestId = createHash('sha256')
+    .update(`${validKey.brandId}|${secondaryULID}|${sortedFields.join(',')}`)
+    .digest('hex')
+    .slice(0, 26);
   const now       = new Date();
   const expiresAt = new Date(now.getTime() + CONSENT_TTL_SECS * 1000).toISOString();
 
-  // Store consent request record
-  await dynamo.send(new PutCommand({
-    TableName: ADMIN_TABLE,
-    Item: {
-      pK: `CONSENT#${requestId}`,
-      sK: permULID,
-      eventType: 'CONSENT_REQUEST',
-      status: 'PENDING',
-      desc: JSON.stringify({ requestedFields, purpose, brandId: validKey.brandId, brandName, brandWebhookUrl, expiresAt }),
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString(),
-    },
-    ConditionExpression: 'attribute_not_exists(pK)',
-  }));
+  // Store consent request record — idempotent via deterministic requestId
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: ADMIN_TABLE,
+      Item: {
+        pK: `CONSENT#${requestId}`,
+        sK: permULID,
+        eventType: 'CONSENT_REQUEST',
+        status: 'PENDING',
+        desc: JSON.stringify({ requestedFields, purpose, brandId: validKey.brandId, brandName, brandWebhookUrl, expiresAt }),
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+      ConditionExpression: 'attribute_not_exists(pK)',
+    }));
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) {
+      const existRes = await dynamo.send(new GetCommand({
+        TableName: ADMIN_TABLE,
+        Key: { pK: `CONSENT#${requestId}`, sK: permULID },
+      }));
+      const existDesc = JSON.parse(existRes.Item?.desc ?? '{}');
+      return {
+        statusCode: 200,
+        headers: CORS,
+        body: JSON.stringify({ requestId, status: existRes.Item?.status ?? 'PENDING', expiresAt: existDesc.expiresAt }),
+      };
+    }
+    throw err;
+  }
 
   // FCM push to user device
   const token = await getDeviceToken(permULID);

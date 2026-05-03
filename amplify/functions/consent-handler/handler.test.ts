@@ -2,19 +2,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Hoisted mock functions ────────────────────────────────────────────────────
 
-const { mockSend, mockValidateApiKey, mockExtractApiKey, mockFcmSend, mockSqsSend } =
+const { mockSend, mockValidateApiKey, mockExtractApiKey, mockFcmSend, mockSqsSend, MockConditionalCheckFailedException } =
   vi.hoisted(() => ({
     mockSend: vi.fn(),
     mockValidateApiKey: vi.fn(),
     mockExtractApiKey: vi.fn(),
     mockFcmSend: vi.fn(),
     mockSqsSend: vi.fn(),
+    MockConditionalCheckFailedException: class MockConditionalCheckFailedException extends Error {
+      constructor() { super('ConditionalCheckFailedException'); this.name = 'ConditionalCheckFailedException'; }
+    },
   }));
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
 vi.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: vi.fn(function (this: Record<string, unknown>) { }),
+  ConditionalCheckFailedException: MockConditionalCheckFailedException,
 }));
 
 vi.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -322,6 +326,41 @@ describe('GET /consent-request/{requestId}/status', () => {
     mockSend.mockResolvedValue({ Items: [] });
     const res = await handler(makeStatusEvent('UNKNOWN')) as { statusCode: number };
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('POST /consent-request — idempotency', () => {
+  beforeEach(() => {
+    mockExtractApiKey.mockReturnValue('bebo_test.secret');
+    mockValidateApiKey.mockResolvedValue(makeValidKey());
+  });
+
+  it('returns 200 with existing requestId on duplicate consent request', async () => {
+    mockSend.mockImplementation((cmd: { __type: string; input: Record<string, unknown> }) => {
+      if (cmd.__type === 'QueryCommand') {
+        return Promise.resolve({ Items: [{ sK: 'PERM001' }] });
+      }
+      if (cmd.__type === 'GetCommand') {
+        const key = (cmd.input as { Key?: Record<string, string> }).Key ?? {};
+        if (key.pK?.startsWith('BRAND#')) {
+          return Promise.resolve({ Item: { desc: JSON.stringify({ brandName: 'Woolworths' }) } });
+        }
+        return Promise.resolve({
+          Item: { status: 'PENDING', desc: JSON.stringify({ expiresAt: '2026-01-01T00:00:00.000Z' }) },
+        });
+      }
+      if (cmd.__type === 'PutCommand') {
+        return Promise.reject(new MockConditionalCheckFailedException());
+      }
+      return Promise.resolve({});
+    });
+
+    const res = await handler(makeApiEvent()) as { statusCode: number; body: string };
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.requestId).toBeDefined();
+    expect(body.status).toBe('PENDING');
+    expect(body.expiresAt).toBeDefined();
   });
 });
 

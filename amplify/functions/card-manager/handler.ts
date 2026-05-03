@@ -663,13 +663,18 @@ function getStripeConfig() {
   return { stripePublishableKey: STRIPE_PUBLISHABLE_KEY };
 }
 
+let _cachedStripeKey: string | null = null;
+let _stripeKeyFetchedAt = 0;
 async function getStripeSecretKey(): Promise<string> {
+  if (_cachedStripeKey && Date.now() - _stripeKeyFetchedAt < 5 * 60 * 1000) return _cachedStripeKey;
   try {
     const res = await ssm.send(new GetParameterCommand({
       Name: '/amplify/shared/STRIPE_SECRET_KEY',
       WithDecryption: true,
     }));
-    return res.Parameter?.Value ?? '';
+    _cachedStripeKey = res.Parameter?.Value ?? '';
+    _stripeKeyFetchedAt = Date.now();
+    return _cachedStripeKey;
   } catch {
     return process.env.STRIPE_SECRET_KEY ?? '';
   }

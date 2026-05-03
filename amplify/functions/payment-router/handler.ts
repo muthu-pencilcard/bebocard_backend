@@ -34,6 +34,7 @@ import { monotonicFactory } from 'ulid';
 import { validateApiKey, extractApiKey } from '../../shared/api-key-auth';
 import { withAuditLog } from '../../shared/audit-logger';
 import { getTenantStateForBrand, incrementTenantUsageCounter } from '../../shared/tenant-billing';
+import { CheckoutRequestSchema } from '../../shared/validation-schemas';
 import https from 'https';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -106,26 +107,15 @@ const _restHandler: APIGatewayProxyHandler = async (event) => {
 // Called by brand POS backend at checkout.
 // Resolves secondaryULID → permULID, sends FCM push, enqueues 90s timeout.
 
-interface CheckoutRequest {
-  secondaryULID: string;
-  amount: number;
-  currency: string;
-  merchantName: string;
-  orderId: string;
-}
-
 async function handleCheckout(event: Parameters<APIGatewayProxyHandler>[0]) {
   const rawKey  = extractApiKey(event.headers as Record<string, string | undefined>);
   const validKey = rawKey ? await validateApiKey(dynamo, rawKey, 'payment') : null;
   if (validKey === 'rate_limited') return { statusCode: 429, headers: CORS, body: JSON.stringify({ error: 'Rate limit exceeded' }) };
   if (!validKey) return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Invalid or missing API key' }) };
 
-  const body: Partial<CheckoutRequest> = JSON.parse(event.body ?? '{}');
-  const { secondaryULID, amount, currency, merchantName, orderId } = body;
-
-  if (!secondaryULID || !amount || !currency || !merchantName || !orderId) {
-    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing required fields: secondaryULID, amount, currency, merchantName, orderId' }) };
-  }
+  const parsed = CheckoutRequestSchema.safeParse(JSON.parse(event.body ?? '{}'));
+  if (!parsed.success) return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: parsed.error.flatten() }) };
+  const { secondaryULID, amount, currency, merchantName, orderId } = parsed.data;
 
   const tenantState = await getTenantStateForBrand(dynamo, REF_TABLE, validKey.brandId);
   if (!tenantState.active) {

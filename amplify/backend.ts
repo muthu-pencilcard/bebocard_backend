@@ -344,7 +344,7 @@ const receiptSigningKey = new kms.Key(infraStack, 'ReceiptSigningKey', {
 // ── Post-confirmation ──
 const postConfirmLambda = backend.postConfirmationFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-// (postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.postConfirm;
+(postConfirmLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.postConfirm;
 
 const createUtilizationAlarm = (fn: lambda.Function, name: string) => {
   const alarm = new cloudwatch.Alarm(Stack.of(fn), `${name}UtilizationAlarm`, {
@@ -399,7 +399,7 @@ postConfirmLambda.addToRolePolicy(new iam.PolicyStatement({
 // ── Card manager ──
 const cardManagerLambda = backend.cardManagerFn.resources.lambda as lambda.Function;
 // ── P0-5: Concurrency Reservation ──
-// (cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.cardManager;
+(cardManagerLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.cardManager;
 createHighTrafficUtilizationAlarm(cardManagerLambda, 'CardManager');
 (cardManagerLambda.node.defaultChild as lambda.CfnFunction).addPropertyOverride('TracingConfig', { Mode: 'Active' });
 cardManagerLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -469,7 +469,7 @@ scanLambda.addToRolePolicy(new iam.PolicyStatement({
 }));
 
 // Reserved Concurrency — scan-handler: prevents POS checkout from being throttled by other bursts (P0-5)
-// (scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
+(scanLambda.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = reservations.scanHandler;
 
 // Throttling Alarm — scan-handler: ensures we are notified if concurrency ceiling is approached
 const scanThrottleAlarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanHandlerThrottlesAlarm', {
@@ -547,7 +547,7 @@ receiptProcessorLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl
 grantTableAccess(receiptProcessorLambda, 'UserDataEvent', true);
 // Reserved concurrency — receipt-processor: ensures receipt writes cannot be throttled by other bursts (P0-5)
 const cfnReceiptProcessor = receiptProcessorLambda.node.defaultChild as lambda.CfnFunction;
-// cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
+cfnReceiptProcessor.reservedConcurrentExecutions = reservations.receiptProcessor;
 
 grantKmsAccess(receiptProcessorLambda, receiptSigningKey, ['kms:Sign']);
 receiptProcessorLambda.addEnvironment('RECEIPT_SIGNING_KEY_ID', receiptSigningKey.keyId);
@@ -1182,7 +1182,7 @@ grantTableAccess(backfillerLambda, 'UserDataEvent', false);
  
 // Reserved concurrency — analytics-backfiller: prevents massive backfill scans from consuming entire regional concurrency (P0-5)
 const cfnBackfiller = backfillerLambda.node.defaultChild as lambda.CfnFunction;
-// cfnBackfiller.reservedConcurrentExecutions = reservations.backfiller;
+cfnBackfiller.reservedConcurrentExecutions = reservations.backfiller;
 
 // Schedule: Nightly at 2:00 AM UTC
 const cronRule = new events.Rule(dataStack, 'NightlyCompactionRule', {
@@ -1434,6 +1434,25 @@ const drCompositeAlarm = new cloudwatch.CompositeAlarm(dataStack, 'BebocardDRCom
 });
 drCompositeAlarm.addAlarmAction(acyclicAlertAction);
 
+// ── B7: SLO alarms — scan P99 < 300ms, checkout error rate < 0.5% ────────────
+const scanP99Alarm = new cloudwatch.Alarm(Stack.of(scanLambda), 'ScanP99Alarm', {
+  metric: scanLambda.metricDuration({ statistic: 'p99', period: Duration.minutes(5) }),
+  threshold: 300,
+  evaluationPeriods: 3,
+  alarmDescription: 'scan-handler p99 > 300ms — SLO breach',
+  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+});
+scanP99Alarm.addAlarmAction(acyclicAlertAction);
+
+const checkoutErrorAlarm = new cloudwatch.Alarm(dataStack, 'CheckoutErrorRateAlarm', {
+  metric: paymentApi.metricClientError({ period: Duration.minutes(5) }),
+  threshold: 5,
+  evaluationPeriods: 2,
+  alarmDescription: 'Checkout 4xx rate elevated — investigate client rejections',
+  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+});
+checkoutErrorAlarm.addAlarmAction(acyclicAlertAction);
+
 // ── P3-16: Brand Health Monitor Lambda (weekly, 50%-drop CSM alert) ───────────
 const brandHealthLambda = backend.brandHealthMonitorFn.resources.lambda as lambda.Function;
 brandHealthLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
@@ -1526,6 +1545,34 @@ widgetGiftcardsRes.addMethod('GET', widgetIntegration, { apiKeyRequired: false }
 widgetGiftcardsRes.addResource('select').addMethod('POST', widgetIntegration, { apiKeyRequired: false });
 new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocWidgetApi', {
   resourceArn: `arn:aws:apigateway:${dataStack.region}::/restapis/${widgetApi.restApiId}/stages/${widgetApi.deploymentStage.stageName}`,
+  webAclArn: publicWebAcl.attrArn,
+});
+
+// ── B6: Brand API (offers, stores, catalogues, newsletters, analytics) ────────
+const brandApiLambda = backend.brandApiHandlerFn.resources.lambda as lambda.Function;
+brandApiLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
+brandApiLambda.addEnvironment('USER_TABLE', userTable.tableName);
+brandApiLambda.addEnvironment('ADMIN_TABLE', adminTable.tableName);
+grantTableAccess(brandApiLambda, 'RefDataEvent', true);
+grantTableAccess(brandApiLambda, 'UserDataEvent', true);
+grantTableAccess(brandApiLambda, 'AdminDataEvent', true);
+Tags.of(brandApiLambda).add('Function', 'brand-api-handler');
+Tags.of(brandApiLambda).add('CostCenter', 'platform');
+
+const brandApi = new apigw.RestApi(dataStack, 'BrandApi', {
+  restApiName: `bebo-brand-api-${stage}`,
+  deployOptions: { stageName: 'prod' },
+  defaultCorsPreflightOptions: {
+    allowOrigins: apigw.Cors.ALL_ORIGINS,
+    allowMethods: apigw.Cors.ALL_METHODS,
+    allowHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+  },
+});
+const brandIntegration = new apigw.LambdaIntegration(brandApiLambda);
+brandApi.root.addMethod('ANY', brandIntegration);
+brandApi.root.addResource('{proxy+}').addMethod('ANY', brandIntegration);
+new wafv2.CfnWebACLAssociation(dataStack, 'WafAssocBrandApi', {
+  resourceArn: `arn:aws:apigateway:${dataStack.region}::/restapis/${brandApi.restApiId}/stages/${brandApi.deploymentStage.stageName}`,
   webAclArn: publicWebAcl.attrArn,
 });
 
@@ -1701,6 +1748,24 @@ if (stage === 'prod') {
       target: route53.RecordTarget.fromAlias(new route53targets.ApiGatewayDomain(widgetDomain)),
     });
 
+    // brand.bebocard.com — brand portal API (in dataStack)
+    const brandDomain = new apigw.DomainName(dataStack, 'BrandCustomDomain', {
+      domainName: `brand.${apexDomain}`,
+      certificate: acm.Certificate.fromCertificateArn(dataStack, 'BrandCertRef', apiCertArn),
+      endpointType: apigw.EndpointType.REGIONAL,
+      securityPolicy: apigw.SecurityPolicy.TLS_1_2,
+    });
+    new apigw.BasePathMapping(dataStack, 'BrandRootMapping', {
+      domainName: brandDomain,
+      restApi: brandApi,
+      stage: brandApi.deploymentStage,
+    });
+    new route53.ARecord(dataStack, 'BrandARecord', {
+      zone: hostedZone,
+      recordName: 'brand',
+      target: route53.RecordTarget.fromAlias(new route53targets.ApiGatewayDomain(brandDomain)),
+    });
+
     new CfnOutput(infraStack, 'ScanApiUrl', {
       value: `https://scan.${apexDomain}/v1`,
       description: 'POS scan endpoint — configure in POS vendor integration',
@@ -1716,6 +1781,10 @@ if (stage === 'prod') {
     new CfnOutput(infraStack, 'WidgetOrigin', {
       value: `https://widget.${apexDomain}`,
       description: 'Widget iframe origin — set as allowedWidgetDomain in tenant config',
+    });
+    new CfnOutput(infraStack, 'BrandApiUrl', {
+      value: `https://brand.${apexDomain}`,
+      description: 'Brand/tenant API base — offers, stores, analytics, catalogue management',
     });
   }
 

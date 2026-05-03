@@ -25,14 +25,16 @@ const FROM_EMAIL = process.env.FROM_EMAIL ?? 'billing@bebocard.com.au';
 // ── Stripe helpers (inline — avoid importing the portal's Stripe module) ──────
 
 let cachedStripeKey: string | null = null;
+let stripeKeyFetchedAt = 0;
 async function getStripeKey(): Promise<string> {
-  if (cachedStripeKey) return cachedStripeKey;
+  if (cachedStripeKey && Date.now() - stripeKeyFetchedAt < 5 * 60 * 1000) return cachedStripeKey;
   try {
     const res = await ssm.send(new GetParameterCommand({
       Name: '/amplify/shared/STRIPE_SECRET_KEY',
       WithDecryption: true,
     }));
     cachedStripeKey = res.Parameter?.Value ?? '';
+    stripeKeyFetchedAt = Date.now();
     return cachedStripeKey;
   } catch (err) {
     console.warn('[billing-run] Failed to fetch key from SSM, falling back to env');

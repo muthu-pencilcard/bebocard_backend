@@ -13,10 +13,16 @@ import { generateAlias } from './handler';
 // ── Mock AWS SDK ──────────────────────────────────────────────────────────────
 // vi.mock is hoisted — use vi.hoisted so mockSend is available inside the factory.
 
-const { mockSend } = vi.hoisted(() => ({ mockSend: vi.fn() }));
+const { mockSend, MockConditionalCheckFailedException } = vi.hoisted(() => ({
+  mockSend: vi.fn(),
+  MockConditionalCheckFailedException: class MockConditionalCheckFailedException extends Error {
+    constructor() { super('ConditionalCheckFailedException'); this.name = 'ConditionalCheckFailedException'; }
+  },
+}));
 
 vi.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: vi.fn(function () { return {}; }),
+  ConditionalCheckFailedException: MockConditionalCheckFailedException,
 }));
 
 vi.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -139,7 +145,7 @@ describe('POST /enroll', () => {
     }));
 
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toContain('secondaryULID');
+    expect(JSON.stringify(JSON.parse(res.body).error)).toContain('secondaryULID');
   });
 
   it('returns 400 when programName is missing', async () => {
@@ -152,7 +158,7 @@ describe('POST /enroll', () => {
     }));
 
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toContain('programName');
+    expect(JSON.stringify(JSON.parse(res.body).error)).toContain('programName');
   });
 
   it('returns 404 when secondaryULID cannot be resolved', async () => {
@@ -173,8 +179,6 @@ describe('POST /enroll', () => {
     vi.mocked(validateApiKey).mockResolvedValue(VALID_KEY as never);
     // SCAN# lookup → permULID
     mockSend.mockResolvedValueOnce({ Items: [{ sK: 'PERM001' }] });
-    // findExistingEnrollment (USER# query) → no existing
-    mockSend.mockResolvedValueOnce({ Items: [] });
     // PutCommand for ENROLL# in AdminDataEvent
     mockSend.mockResolvedValueOnce({});
     // getDeviceToken → no token (skip FCM)
@@ -190,19 +194,23 @@ describe('POST /enroll', () => {
     expect(typeof body.enrollmentId).toBe('string');
   });
 
-  it('returns 409 when user is already enrolled (ACCEPTED)', async () => {
+  it('returns 200 with existing enrollmentId on duplicate request (idempotent retry)', async () => {
     vi.mocked(extractApiKey).mockReturnValue('bebo_valid.key');
     vi.mocked(validateApiKey).mockResolvedValue(VALID_KEY as never);
     // SCAN# → permULID
     mockSend.mockResolvedValueOnce({ Items: [{ sK: 'PERM001' }] });
-    // findExistingEnrollment → already ACCEPTED
-    mockSend.mockResolvedValueOnce({ Items: [{ status: 'ACCEPTED' }] });
+    // PutCommand → ConditionalCheckFailedException (record already exists)
+    mockSend.mockRejectedValueOnce(new MockConditionalCheckFailedException());
+    // QueryCommand for existing record
+    mockSend.mockResolvedValueOnce({ Items: [{ pK: 'ENROLL#someId', status: 'PENDING' }] });
 
     const { handler } = await import('./handler');
     const res = await (handler as Function)(makeEvent());
 
-    expect(res.statusCode).toBe(409);
-    expect(JSON.parse(res.body).error).toContain('already enrolled');
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.enrollmentId).toBeTruthy();
+    expect(body.status).toBe('PENDING');
   });
 
   it('returns 404 for unknown routes', async () => {
