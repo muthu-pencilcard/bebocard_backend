@@ -35,9 +35,9 @@ const ulid = monotonicFactory();
 
 const USER_TABLE = process.env.USER_TABLE!;
 const ADMIN_TABLE = process.env.ADMIN_TABLE!;
-const APP_SUCCESS_URL = process.env.APP_SUCCESS_URL ?? 'https://bebocard.app/link-success';
-const APP_FAILURE_URL = process.env.APP_FAILURE_URL ?? 'https://bebocard.app/link-failed';
-const BASE_URL = process.env.API_BASE_URL!; // e.g. https://api.bebocard.app
+const APP_SUCCESS_URL = process.env.APP_SUCCESS_URL ?? 'https://bebocard.com/link-success';
+const APP_FAILURE_URL = process.env.APP_FAILURE_URL ?? 'https://bebocard.com/link-failed';
+const BASE_URL = process.env.API_BASE_URL!; // e.g. https://api.bebocard.com
 const OAUTH_STATE_TTL_SECONDS = Number(process.env.OAUTH_STATE_TTL_SECONDS ?? '300');
 
 // ---------------------------------------------------------------------------

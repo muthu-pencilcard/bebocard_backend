@@ -97,6 +97,10 @@ function makeTenantProfileItem(desc: Record<string, unknown> = {}) {
   };
 }
 
+function findCommandCall(type: string): any[] | undefined {
+  return mockDdbSend.mock.calls.find((call: any[]) => call[0]?.__type === type);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Signature verification
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,10 +207,7 @@ describe('checkout.session.completed', () => {
     expect(res).toMatchObject({ statusCode: 200 });
 
     // Verify UpdateCommand was called with correct values
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string; input: { ExpressionAttributeValues?: Record<string, string> } }]) =>
-        cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     expect(updateArgs).toBeDefined();
     const descUpdated = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
@@ -247,9 +248,7 @@ describe('checkout.session.completed', () => {
       {} as never,
     );
 
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     const desc = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
         .input.ExpressionAttributeValues[':desc'],
@@ -285,9 +284,7 @@ describe('customer.subscription.updated / deleted', () => {
       {} as never,
     );
 
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     const desc = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
         .input.ExpressionAttributeValues[':desc'],
@@ -311,9 +308,7 @@ describe('customer.subscription.updated / deleted', () => {
       {} as never,
     );
 
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     const desc = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
         .input.ExpressionAttributeValues[':desc'],
@@ -336,9 +331,7 @@ describe('customer.subscription.updated / deleted', () => {
       {} as never,
     );
 
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     const desc = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
         .input.ExpressionAttributeValues[':desc'],
@@ -361,9 +354,7 @@ describe('customer.subscription.updated / deleted', () => {
       {} as never,
     );
 
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     const desc = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
         .input.ExpressionAttributeValues[':desc'],
@@ -426,9 +417,7 @@ describe('invoice.payment_failed', () => {
       {} as never,
     );
 
-    const updateArgs = mockDdbSend.mock.calls.find(
-      ([cmd]: [{ __type: string }]) => cmd.__type === 'UpdateCommand',
-    );
+    const updateArgs = findCommandCall('UpdateCommand');
     const desc = JSON.parse(
       (updateArgs![0] as { input: { ExpressionAttributeValues: Record<string, string> } })
         .input.ExpressionAttributeValues[':desc'],

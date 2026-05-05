@@ -22,7 +22,7 @@ export const handler = async (event: any) => {
       is_rotation_enabled: config.is_rotation_enabled ?? true,
       min_scan_interval_ms: config.min_scan_interval_ms ?? 30000,
       enforce_biometrics: config.enforce_biometrics ?? false,
-      support_email: config.support_email ?? 'hello@bebocard.app',
+      support_email: config.support_email ?? 'hello@bebocard.com',
       feature_flags: config.feature_flags ?? {
         gift_cards_v2: true,
         receipt_ocr_enhanced: false,

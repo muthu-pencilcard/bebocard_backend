@@ -41,7 +41,7 @@ vi.mock('../subscription-proxy/handler', () => ({
 // Mock enrollment-handler dynamic imports (used by initiateEnrollment / respondToEnrollment)
 vi.mock('../enrollment-handler/handler', () => ({
   respondToEnrollmentFn: vi.fn().mockResolvedValue({ success: true }),
-  generateAlias: vi.fn((permULID: string, brandId: string) => `alias-${permULID}-${brandId}@bebocard.app`),
+  generateAlias: vi.fn((permULID: string, brandId: string) => `alias-${permULID}-${brandId}@bebocard.com`),
 }));
 
 describe('card-manager privacy tests', () => {

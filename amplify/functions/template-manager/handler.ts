@@ -41,7 +41,7 @@ const CORS_HEADERS = {
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 };
 
-const PORTAL_ORIGIN = process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com.au';
+const PORTAL_ORIGIN = process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com';
 
 function resolveOrigin(event: APIGatewayProxyEvent): string {
   const origin = event.headers.origin || event.headers.Origin || PORTAL_ORIGIN;

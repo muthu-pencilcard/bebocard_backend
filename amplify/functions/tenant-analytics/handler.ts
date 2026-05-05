@@ -502,6 +502,11 @@ async function handleTrends(
   headers: Record<string, string>,
   tenant: ValidatedTenant,
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  if (!tenant.allowedScopes.includes('intelligence')) {
+    console.warn('[tenant-analytics] scope not permitted', { tenantId: tenant.tenantId, requestedScope: 'trends' });
+    return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
   const brandId = event.queryStringParameters?.['brandId'];
   if (!brandId || !tenant.brandIds.includes(brandId)) {
     return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };

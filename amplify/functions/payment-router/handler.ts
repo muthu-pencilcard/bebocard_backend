@@ -35,7 +35,6 @@ import { validateApiKey, extractApiKey } from '../../shared/api-key-auth';
 import { withAuditLog } from '../../shared/audit-logger';
 import { getTenantStateForBrand, incrementTenantUsageCounter } from '../../shared/tenant-billing';
 import { CheckoutRequestSchema } from '../../shared/validation-schemas';
-import https from 'https';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const sqs    = new SQSClient({});
@@ -45,6 +44,7 @@ const ADMIN_TABLE        = process.env.ADMIN_TABLE!;
 const USER_TABLE         = process.env.USER_TABLE!;
 const REF_TABLE          = process.env.REF_TABLE!;
 const TIMEOUT_QUEUE_URL  = process.env.TIMEOUT_QUEUE_URL!;
+const WEBHOOK_QUEUE_URL  = process.env.WEBHOOK_QUEUE_URL;
 const CHECKOUT_TTL_SECS  = 90;
 
 const CORS = {
@@ -271,8 +271,8 @@ async function processTimeout(orderId: string, permULID: string) {
   }));
 
   // Notify brand webhook
-  if (desc.brandWebhookUrl) {
-    await postWebhook(desc.brandWebhookUrl, { orderId, status: 'TIMEOUT' });
+  if (desc.brandId) {
+    await enqueueWebhook(desc.brandId, 'CHECKOUT_TIMEOUT', { orderId, status: 'TIMEOUT' });
   }
 
   console.info(`[payment-router] Checkout ${orderId} timed out`);
@@ -300,33 +300,13 @@ async function getDeviceToken(permULID: string): Promise<string | null> {
   return (JSON.parse(res.Item.desc ?? '{}') as { token?: string }).token ?? null;
 }
 
-function postWebhook(url: string, payload: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(payload);
-    try {
-      const req = https.request(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      }, (res) => {
-        res.resume();
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Webhook returned HTTP ${res.statusCode}`));
-          }
-        });
-      });
-      req.on('error', (e) => {
-        console.error('[payment-router] webhook delivery failed', url, e.message);
-        reject(e);
-      });
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error('Webhook timeout')); });
-      req.write(body);
-      req.end();
-    } catch (e) {
-      console.error('[payment-router] webhook error', e);
-      reject(e as Error);
-    }
-  });
+async function enqueueWebhook(brandId: string, type: string, data: unknown): Promise<void> {
+  if (!WEBHOOK_QUEUE_URL) {
+    console.warn('[payment-router] WEBHOOK_QUEUE_URL not set — skipping webhook');
+    return;
+  }
+  await sqs.send(new SendMessageCommand({
+    QueueUrl: WEBHOOK_QUEUE_URL,
+    MessageBody: JSON.stringify({ brandId, type, data }),
+  }));
 }

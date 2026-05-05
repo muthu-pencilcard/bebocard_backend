@@ -46,6 +46,34 @@ function parseRecord(value: unknown): Record<string, unknown> {
   }
 }
 
+function resolveIdentityField(identity: Record<string, unknown>, permULID: string, field: string): string | undefined {
+  if (field === 'email_alias') {
+    const hash = createHash('sha256').update(permULID + 'email').digest('hex').substring(0, 12);
+    return `${hash}@bebocard.me`;
+  }
+  if (field === 'phone_alias') {
+    const hash = createHash('sha256').update(permULID + 'phone').digest('hex').substring(0, 8);
+    return `+614${hash.replace(/[^0-9]/g, '0').substring(0, 7)}`;
+  }
+
+  const candidates: Record<string, string[]> = {
+    email: ['email'],
+    phone: ['phone'],
+    firstName: ['firstName', 'first_name', 'given_name'],
+    first_name: ['first_name', 'firstName', 'given_name'],
+    lastName: ['lastName', 'last_name', 'family_name'],
+    last_name: ['last_name', 'lastName', 'family_name'],
+    dateOfBirth: ['dateOfBirth', 'date_of_birth', 'birthdate'],
+    date_of_birth: ['date_of_birth', 'dateOfBirth', 'birthdate'],
+    address: ['address'],
+  };
+
+  for (const key of candidates[field] ?? [field]) {
+    if (identity[key] != null) return String(identity[key]);
+  }
+  return undefined;
+}
+
 const _handler: APIGatewayProxyHandler = async (event) => {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -122,7 +150,20 @@ async function handleLoyaltyCheck(
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Missing required fields' }) };
   }
 
-  if (storeBrandLoyaltyName !== validKey.brandId) {
+  // ── Brand Authorization ─────────────────────────────────────────────────────
+  // Direct brand key: storeBrandLoyaltyName must match the key's brandId exactly.
+  // POS aggregator key: storeBrandLoyaltyName must be in the tenant's registered brandIds.
+  const effectiveBrandId = storeBrandLoyaltyName;
+  if (validKey.isAggregator) {
+    if (!validKey.tenantBrandIds.includes(storeBrandLoyaltyName)) {
+      console.warn('[scan-handler] aggregator attempted to scan unauthorized brand', {
+        tenantId: validKey.tenantId,
+        requested: storeBrandLoyaltyName,
+        allowed: validKey.tenantBrandIds,
+      });
+      return { statusCode: 403, headers, body: JSON.stringify({ error: 'Brand not registered under this POS aggregator account' }) };
+    }
+  } else if (storeBrandLoyaltyName !== validKey.brandId) {
     console.warn('[scan-handler] brand mismatch for API key', { requested: storeBrandLoyaltyName, keyBrand: validKey.brandId });
     return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
@@ -184,11 +225,11 @@ async function handleLoyaltyCheck(
 
   const indexDesc = JSON.parse(scanItem.desc ?? '{}');
   const cards: Array<{ brand: string; cardId: string; isDefault: boolean }> = indexDesc.cards ?? [];
-  const brandCards = cards.filter(c => c.brand === validKey.brandId);
+  const brandCards = cards.filter(c => c.brand === effectiveBrandId);
 
   if (brandCards.length === 0) {
     const permULID: string = scanItem.sK;
-    void maybeSendCardSuggestion(permULID, validKey.brandId).catch((err) => {
+    void maybeSendCardSuggestion(permULID, effectiveBrandId).catch((err) => {
       console.error('[scan-handler] CARD_SUGGESTION failed', err);
     });
     return {
@@ -203,9 +244,10 @@ async function handleLoyaltyCheck(
   const permULID: string = scanItem.sK;
 
   // ── Billing Check (P1-8) ──
-  const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, validKey.brandId);
+  // Use effectiveBrandId (the merchant) not the aggregator tenantId for billing resolution.
+  const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, effectiveBrandId);
   if (!tenantState.active) {
-    console.warn('[scan-handler] tenant suspended or grace period expired', { brandId: validKey.brandId, tenantId: tenantState.tenantId });
+    console.warn('[scan-handler] tenant suspended or grace period expired', { brandId: effectiveBrandId, tenantId: tenantState.tenantId });
   }
 
   // Fetch subscription consent + segment labels in parallel.
@@ -213,11 +255,11 @@ async function handleLoyaltyCheck(
   const [subRes, segRes] = await Promise.all([
     dynamo.send(new GetCommand({
       TableName: USER_TABLE,
-      Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${validKey.brandId}` },
+      Key: { pK: `USER#${permULID}`, sK: `SUBSCRIPTION#${effectiveBrandId}` },
     })),
     dynamo.send(new GetCommand({
       TableName: USER_TABLE,
-      Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${validKey.brandId}` },
+      Key: { pK: `USER#${permULID}`, sK: `SEGMENT#${effectiveBrandId}` },
     })),
   ]);
 
@@ -240,6 +282,10 @@ async function handleLoyaltyCheck(
       TableName: ADMIN_TABLE,
       IndexName: 'GSI1', 
       KeyConditionExpression: 'GSI1PK = :bpk AND GSI1SK = :bsk',
+      ExpressionAttributeValues: {
+        ':bpk': `CONSENT#${validKey.brandId}`,
+        ':bsk': permULID,
+      },
       ScanIndexForward: false, // Get most recent first
       Limit: 10, // Check recent history
     })).catch(() => ({ Items: [] }));
@@ -377,15 +423,8 @@ async function resolveAttributes(permULID: string, fields: string[]): Promise<Re
   const identity = JSON.parse(identityRes.Item?.desc ?? '{}');
 
   for (const field of fields) {
-    if (field === 'email_alias') {
-      const hash = createHash('sha256').update(permULID + 'email').digest('hex').substring(0, 12);
-      result[field] = `${hash}@bebocard.me`;
-    } else if (field === 'phone_alias') {
-       const hash = createHash('sha256').update(permULID + 'phone').digest('hex').substring(0, 8);
-       result[field] = `+614${hash.replace(/[^0-9]/g, '0').substring(0, 7)}`;
-    } else if (identity[field]) {
-      result[field] = String(identity[field]);
-    }
+    const value = resolveIdentityField(identity, permULID, field);
+    if (value != null) result[field] = value;
   }
   return result;
 }
@@ -441,7 +480,15 @@ async function handleReceipt(
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid supplierTaxIdType' }) };
   }
 
-  if (body.brandId && body.brandId !== validKey.brandId) {
+  // ── Brand Authorization (Receipt) ──────────────────────────────────────────
+  // Aggregators may send receipts on behalf of any of their registered merchant brands.
+  const effectiveReceiptBrandId = body.brandId ?? validKey.brandId;
+  if (validKey.isAggregator) {
+    if (body.brandId && !validKey.tenantBrandIds.includes(body.brandId)) {
+      console.warn('[scan-handler] aggregator attempted receipt for unauthorized brand', { tenantId: validKey.tenantId, requested: body.brandId });
+      return { statusCode: 403, headers, body: JSON.stringify({ error: 'Brand not registered under this POS aggregator account' }) };
+    }
+  } else if (body.brandId && body.brandId !== validKey.brandId) {
     console.warn('[scan-handler] receipt brand mismatch for API key', { requested: body.brandId, keyBrand: validKey.brandId });
     return { statusCode: 403, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
@@ -500,8 +547,7 @@ async function handleReceipt(
   }
  
   // ── Billing Check (Receipt) ──
-  // Note: Receipt ingestion is considered core and is generally not hard-blocked except for suspended/inactive tenants.
-  const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, validKey.brandId);
+  const tenantState = await getTenantStateForBrand(dynamo, REFDATA_TABLE, effectiveReceiptBrandId);
   if (!tenantState.active) {
     return { statusCode: 403, headers, body: JSON.stringify({ error: 'Tenant account suspended. Please contact BeboCard Billing.' }) };
   }
@@ -515,7 +561,7 @@ async function handleReceipt(
       permULID,
       owner,
       claimToken,
-      brandId: validKey.brandId,
+      brandId: effectiveReceiptBrandId,
       isInvoice,
       isSandbox: validKey.isSandbox,
     }),

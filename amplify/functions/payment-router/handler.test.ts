@@ -59,21 +59,13 @@ vi.mock('../../shared/audit-logger', () => ({
   withAuditLog: vi.fn((_ddb: unknown, h: unknown) => h),
 }));
 
-vi.mock('https', () => ({
-  default: {
-    request: vi.fn((_url: unknown, _opts: unknown, cb: (res: { statusCode: number; resume: () => void; on: (e: string, fn: () => void) => void }) => void) => {
-      cb({ statusCode: 200, resume: vi.fn(), on: vi.fn((e: string, fn: () => void) => { if (e === 'end') fn(); }) });
-      return { on: vi.fn(), write: vi.fn(), end: vi.fn(), setTimeout: vi.fn() };
-    }),
-  },
-}));
-
 // ── Set env vars before importing handler (top-level consts are captured at import time) ──
 
 process.env.ADMIN_TABLE = 'admin-table';
 process.env.USER_TABLE = 'user-table';
 process.env.REF_TABLE = 'ref-table';
 process.env.TIMEOUT_QUEUE_URL = 'https://sqs.example.com/queue';
+process.env.WEBHOOK_QUEUE_URL = 'https://sqs.example.com/webhook-queue';
 process.env.FIREBASE_SERVICE_ACCOUNT_JSON = JSON.stringify({ project_id: 'test' });
 
 // ── Import handler AFTER all mocks ────────────────────────────────────────────
@@ -419,7 +411,7 @@ describe('SQS timeout handler', () => {
         return Promise.resolve({
           Item: {
             status: 'PENDING',
-            desc: JSON.stringify({ brandWebhookUrl: 'https://example.com/webhook' }),
+            desc: JSON.stringify({ brandId: 'test-brand' }),
           },
         });
       }
@@ -433,6 +425,11 @@ describe('SQS timeout handler', () => {
       ExpressionAttributeValues: Record<string, string>;
     };
     expect(updateInput.ExpressionAttributeValues[':s']).toBe('TIMEOUT');
+    // Webhook enqueued via SQS
+    expect(mockSqsSend).toHaveBeenCalled();
+    const sqsBody = JSON.parse(mockSqsSend.mock.calls[0][0].input.MessageBody) as { brandId: string; type: string };
+    expect(sqsBody.brandId).toBe('test-brand');
+    expect(sqsBody.type).toBe('CHECKOUT_TIMEOUT');
   });
 
   it('skips if checkout record is not found', async () => {

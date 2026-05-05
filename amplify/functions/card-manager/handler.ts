@@ -2,6 +2,8 @@ import type { AppSyncResolverHandler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { createHash } from 'crypto';
 import https from 'https';
 import { monotonicFactory } from 'ulid';
 import { withAuditLog, writeAuditLog } from '../../shared/audit-logger';
@@ -13,14 +15,16 @@ import {
 } from '../../shared/validation-schemas';
 import { getTenantStateForBrand, incrementTenantUsageCounter } from '../../shared/tenant-billing';
 
-const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const ssm   = new SSMClient({});
-const ulid  = monotonicFactory();
+const dynamo     = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ssm        = new SSMClient({});
+const sqsClient  = new SQSClient({});
+const ulid       = monotonicFactory();
 
-const USER_TABLE            = process.env.USER_TABLE!;
-const REFDATA_TABLE         = process.env.REFDATA_TABLE!;
-const ADMIN_TABLE           = process.env.ADMIN_TABLE!;
+const USER_TABLE             = process.env.USER_TABLE!;
+const REFDATA_TABLE          = process.env.REFDATA_TABLE!;
+const ADMIN_TABLE            = process.env.ADMIN_TABLE!;
 const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY ?? '';
+const WEBHOOK_QUEUE_URL      = process.env.WEBHOOK_QUEUE_URL;
 
 type Args = {
   // Stamp cards (Phase 11 SMB)
@@ -204,6 +208,34 @@ function parseRecord(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function resolveConsentFieldValue(identity: Record<string, unknown>, permULID: string, field: string): string | undefined {
+  if (field === 'email_alias') {
+    const hash = createHash('sha256').update(permULID + 'email').digest('hex').substring(0, 12);
+    return `${hash}@bebocard.me`;
+  }
+  if (field === 'phone_alias') {
+    const hash = createHash('sha256').update(permULID + 'phone').digest('hex').substring(0, 8);
+    return `+614${hash.replace(/[^0-9]/g, '0').substring(0, 7)}`;
+  }
+
+  const candidates: Record<string, string[]> = {
+    email: ['email'],
+    phone: ['phone'],
+    firstName: ['firstName', 'first_name', 'given_name'],
+    first_name: ['first_name', 'firstName', 'given_name'],
+    lastName: ['lastName', 'last_name', 'family_name'],
+    last_name: ['last_name', 'lastName', 'family_name'],
+    dateOfBirth: ['dateOfBirth', 'date_of_birth', 'birthdate'],
+    date_of_birth: ['date_of_birth', 'dateOfBirth', 'birthdate'],
+    address: ['address'],
+  };
+
+  for (const key of candidates[field] ?? [field]) {
+    if (identity[key] != null) return String(identity[key]);
+  }
+  return undefined;
 }
 
 // ── Add loyalty card ──────────────────────────────────────────────────────────
@@ -1290,7 +1322,7 @@ async function respondToCheckout(
   if (item.status !== 'PENDING') throw new Error(`Checkout already resolved: ${item.status}`);
 
   const desc = JSON.parse(item.desc ?? '{}') as {
-    brandWebhookUrl?: string; amount: number; currency: string; merchantName: string; expiresAt: string;
+    brandWebhookUrl?: string; brandId?: string; amount: number; currency: string; merchantName: string; expiresAt: string;
   };
   const now = new Date();
   if (now.toISOString() > desc.expiresAt) throw new Error('Checkout expired');
@@ -1309,8 +1341,8 @@ async function respondToCheckout(
   }));
 
   // Notify brand webhook
-  if (desc.brandWebhookUrl) {
-    await postWebhookCardManager(desc.brandWebhookUrl, {
+  if (desc.brandId) {
+    await enqueueWebhook(desc.brandId, 'CHECKOUT_RESPONSE', {
       orderId,
       status: newStatus,
       ...(approved && paymentToken ? { paymentToken } : {}),
@@ -1320,20 +1352,15 @@ async function respondToCheckout(
   return { success: true, status: newStatus };
 }
 
-function postWebhookCardManager(url: string, payload: unknown): Promise<void> {
-  return new Promise((resolve) => {
-    const body = JSON.stringify(payload);
-    try {
-      const req = https.request(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      }, (res) => { res.resume(); res.on('end', resolve); });
-      req.on('error', (e) => { console.error('[card-manager] webhook error', e.message); resolve(); });
-      req.setTimeout(5000, () => { req.destroy(); resolve(); });
-      req.write(body);
-      req.end();
-    } catch (e) { console.error('[card-manager] webhook error', e); resolve(); }
-  });
+async function enqueueWebhook(brandId: string, type: string, data: unknown): Promise<void> {
+  if (!WEBHOOK_QUEUE_URL) {
+    console.warn('[card-manager] WEBHOOK_QUEUE_URL not set — skipping webhook');
+    return;
+  }
+  await sqsClient.send(new SendMessageCommand({
+    QueueUrl: WEBHOOK_QUEUE_URL,
+    MessageBody: JSON.stringify({ brandId, type, data }),
+  }));
 }
 
 // ── Respond to consent request (Patent Claims 25–26) ───────────────────────────
@@ -1384,7 +1411,8 @@ async function respondToConsent(
     }));
     const identityDesc = JSON.parse(identityRes.Item?.desc ?? '{}') as Record<string, string>;
     for (const field of safeApproved) {
-      if (identityDesc[field] != null) releasedData[field] = identityDesc[field];
+      const value = resolveConsentFieldValue(identityDesc, permULID, field);
+      if (value != null) releasedData[field] = value;
     }
   }
 
@@ -1443,8 +1471,8 @@ async function respondToConsent(
   }).catch(() => {});
 
   // Relay approved field values to brand webhook
-  if (desc.brandWebhookUrl) {
-    await postWebhookCardManager(desc.brandWebhookUrl, {
+  if (desc.brandId) {
+    await enqueueWebhook(desc.brandId, 'CONSENT_RESPONSE', {
       requestId,
       status: newStatus,
       ...(isDenied ? {} : { releasedData }),

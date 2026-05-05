@@ -53,7 +53,7 @@ const CORS_HEADERS = {
 };
 
 // Allowed portal origin from env — no localhost in production
-const PORTAL_ORIGIN = process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com.au';
+const PORTAL_ORIGIN = process.env.PORTAL_ORIGIN ?? 'https://business.bebocard.com';
 
 function resolveOrigin(event: APIGatewayProxyEvent): string {
   const origin = event.headers.origin || event.headers.Origin || PORTAL_ORIGIN;
@@ -581,10 +581,10 @@ async function createInvoicePaymentSession(event: APIGatewayProxyEvent, brandId:
       : '';
     const successUrl = typeof brandDesc.invoiceStripeSuccessUrl === 'string'
       ? brandDesc.invoiceStripeSuccessUrl
-      : 'https://business.bebocard.com.au/payment/success';
+      : 'https://business.bebocard.com/payment/success';
     const cancelUrl = typeof brandDesc.invoiceStripeCancelUrl === 'string'
       ? brandDesc.invoiceStripeCancelUrl
-      : 'https://business.bebocard.com.au/payment/cancel';
+      : 'https://business.bebocard.com/payment/cancel';
     const stripeSecretKey = process.env.STRIPE_SECRET_KEY ?? '';
 
     if (!stripeSecretKey) return err(event, 500, 'Stripe is not configured');

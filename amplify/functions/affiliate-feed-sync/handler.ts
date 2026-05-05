@@ -56,18 +56,6 @@ function toItem(offer: CFFeed) {
   };
 }
 
-// AU-focused mock offers used when AFFILIATE_API_KEY is not set (dev / canary env).
-// Replace these stubs with real CF data once API credentials are live.
-const MOCK_OFFERS: CFFeed[] = [
-  { Id: 1001, Name: '10% off Grocery Shop',    MerchantName: 'Woolworths',   Description: 'Save 10% on your next shop. Min spend $80.',             TrackingUrl: 'https://t.commissionfactory.com/woolworths',   MerchantLogoUrl: 'https://cdn.bebocard.com/brands/woolworths/logo.png',   Category: 'grocery' },
-  { Id: 1002, Name: '$20 off $150+ Spend',      MerchantName: 'Coles',        Description: '$20 off when you spend $150 or more online.',             TrackingUrl: 'https://t.commissionfactory.com/coles',        MerchantLogoUrl: 'https://cdn.bebocard.com/brands/coles/logo.png',        Category: 'grocery' },
-  { Id: 1003, Name: '10% off Tech',             MerchantName: 'JB Hi-Fi',     Description: 'Extra 10% off selected tech and appliances.',             TrackingUrl: 'https://t.commissionfactory.com/jbhifi',       MerchantLogoUrl: 'https://cdn.bebocard.com/brands/jbhifi/logo.png',       Category: 'tech'    },
-  { Id: 1004, Name: '30% off Clothing',         MerchantName: 'Cotton On',    Description: '30% off full-price styles site-wide.',                    TrackingUrl: 'https://t.commissionfactory.com/cottonon',     MerchantLogoUrl: 'https://cdn.bebocard.com/brands/cottonon/logo.png',     Category: 'fashion' },
-  { Id: 1005, Name: '$10 off First Order',      MerchantName: 'Menulog',      Description: '$10 off your first food delivery order over $25.',        TrackingUrl: 'https://t.commissionfactory.com/menulog',      MerchantLogoUrl: 'https://cdn.bebocard.com/brands/menulog/logo.png',      Category: 'food'    },
-  { Id: 1006, Name: '15% off Hotels',           MerchantName: 'Booking.com',  Description: '15% off selected properties when you sign in.',           TrackingUrl: 'https://t.commissionfactory.com/bookingcom',   MerchantLogoUrl: 'https://cdn.bebocard.com/brands/bookingcom/logo.png',   Category: 'travel'  },
-  { Id: 1007, Name: '20% off Pet Supplies',     MerchantName: 'Petbarn',      Description: '20% off your first online order at Petbarn.',             TrackingUrl: 'https://t.commissionfactory.com/petbarn',      MerchantLogoUrl: 'https://cdn.bebocard.com/brands/petbarn/logo.png',      Category: 'pets'    },
-];
-
 export const handler: Handler = async (_event) => {
   console.log('[affiliate-sync] Starting affiliate feed sync...');
 
@@ -76,9 +64,8 @@ export const handler: Handler = async (_event) => {
     const apiKey = process.env.AFFILIATE_API_KEY;
 
     if (!apiKey) {
-      console.log('[affiliate-sync] No AFFILIATE_API_KEY — writing mock offers.');
-      await batchWrite(table, MOCK_OFFERS.map(toItem));
-      return { statusCode: 200, body: JSON.stringify({ count: MOCK_OFFERS.length }) };
+      console.log('[affiliate-sync] No AFFILIATE_API_KEY — skipping sync.');
+      return { statusCode: 200, body: JSON.stringify({ count: 0 }) };
     }
 
     const [liveOffers, existing] = await Promise.all([

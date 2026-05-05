@@ -20,7 +20,7 @@ const ssm = new SSMClient({});
 
 const REFDATA_TABLE = process.env.REFDATA_TABLE!;
 const USER_TABLE = process.env.USER_TABLE!;
-const FROM_EMAIL = process.env.FROM_EMAIL ?? 'billing@bebocard.com.au';
+const FROM_EMAIL = process.env.FROM_EMAIL ?? 'billing@bebocard.com';
 
 // ── Stripe helpers (inline — avoid importing the portal's Stripe module) ──────
 
@@ -470,7 +470,7 @@ async function processMarketplacePayouts() {
   let failCount = 0;
 
   do {
-    const scanResponse = await dynamo.send(new ScanCommand({
+    const scanResponse: { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> } = await dynamo.send(new ScanCommand({
       TableName: USER_TABLE,
       FilterExpression: 'primaryCat = :cat AND #status = :pending',
       ExpressionAttributeNames: { '#status': 'status' },
@@ -508,7 +508,7 @@ async function processMarketplacePayouts() {
             transferGroup: `WITHDRAWAL_${item.sK}`,
             metadata: {
               permULID,
-              withdrawalSK: item.sK,
+              withdrawalSK: String(item.sK),
               source: 'bebocard_marketplace'
             }
           });

@@ -482,6 +482,71 @@ describe('GET /analytics/subscriber-count', () => {
   });
 });
 
+describe('GET /analytics/trends', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.USER_TABLE = 'user-table';
+    process.env.REFDATA_TABLE = 'ref-table';
+    process.env.REPORT_TABLE = 'report-table';
+    mockExtractApiKey.mockReturnValue(RAW_KEY);
+  });
+
+  it('returns 403 when intelligence scope is not permitted', async () => {
+    mockSend.mockResolvedValue({
+      Items: [makeTenantItem(RAW_KEY, {
+        desc: JSON.stringify({
+          keyHash: VALID_KEY_HASH,
+          brandIds: ['woolworths'],
+          allowedScopes: ['segments', 'subscriber_count'],
+          minCohortThreshold: 2,
+        }),
+      })],
+    });
+
+    const res = await handler(
+      makeEvent({ path: '/v1/analytics/trends', queryStringParameters: { brandId: 'woolworths', period: '30d' } }),
+      {} as never,
+      {} as never,
+    );
+    expect(res).toMatchObject({ statusCode: 403 });
+  });
+
+  it('returns snapshots when intelligence scope is permitted', async () => {
+    let call = 0;
+    mockSend.mockImplementation(() => {
+      const n = call++;
+      if (n === 0) {
+        return Promise.resolve({
+          Items: [makeTenantItem(RAW_KEY, {
+            desc: JSON.stringify({
+              keyHash: VALID_KEY_HASH,
+              brandIds: ['woolworths'],
+              allowedScopes: ['intelligence'],
+              minCohortThreshold: 2,
+            }),
+          })],
+        });
+      }
+      return Promise.resolve({
+        Items: [
+          { pK: 'REPORT#woolworths', sK: 'DAILY#2026-03-01', desc: JSON.stringify({ subscriberCount: 12 }) },
+        ],
+      });
+    });
+
+    const res = await handler(
+      makeEvent({ path: '/v1/analytics/trends', queryStringParameters: { brandId: 'woolworths', period: '30d' } }),
+      {} as never,
+      {} as never,
+    );
+    expect(res).toMatchObject({ statusCode: 200 });
+    const body = JSON.parse((res as { body: string }).body);
+    expect(body.snapshots).toEqual([
+      { date: '2026-03-01', metrics: { subscriberCount: 12 } },
+    ]);
+  });
+});
+
 // ── Shared helper for subscriber-count tests ──────────────────────────────────
 
 function setupMocksSubscriberCount(count: number) {

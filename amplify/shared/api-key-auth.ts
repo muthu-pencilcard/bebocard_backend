@@ -22,15 +22,18 @@ export interface ApiKeyRecord {
   createdBy: string;        // business portal userId
   revokedAt?: string;
   graceUntil?: string;      // ISO8601 — old key accepted until this time during rotation
+  brandIds?: string[];      // Used for POS aggregators
 }
 
 export interface ValidatedKey {
   brandId: string;
   tenantId: string;
+  tenantBrandIds: string[];   // brandIds the tenant is authorised to act on behalf of (aggregators)
   keyId: string;
   rateLimit: number;
   scopes: ApiKeyScope[];
   isSandbox: boolean;
+  isAggregator: boolean;      // true when key belongs to a POS aggregator tenant
 }
 
 type ApiKeyItem = Partial<ApiKeyRecord> & {
@@ -149,13 +152,38 @@ export async function validateApiKey(
     return 'rate_limited';
   }
 
+  // For POS aggregators, the true source of truth for authorized merchant brand IDs
+  // is the TENANT# PROFILE, not the API key record itself. We must dynamically fetch
+  // it so that if a super admin links a new merchant, existing aggregator keys instantly get access.
+  let tenantBrandIds: string[] = [];
+  let isAggregator = false;
+
+  if (normalized.tenantId && item.pK.startsWith('TENANT#')) {
+    try {
+      const tenantRes = await ddb.send(new GetCommand({
+        TableName: REFDATA_TABLE,
+        Key: { pK: `TENANT#${normalized.tenantId}`, sK: 'PROFILE' },
+      }));
+      const descStr = typeof tenantRes.Item?.desc === 'string' ? tenantRes.Item.desc : '{}';
+      const tenantDesc = JSON.parse(descStr);
+      if (Array.isArray(tenantDesc.brandIds)) {
+        tenantBrandIds = tenantDesc.brandIds.filter((id: unknown): id is string => typeof id === 'string');
+      }
+      isAggregator = tenantDesc.tenantType === 'pos_aggregator';
+    } catch (err) {
+      console.error('[validateApiKey] failed to fetch TENANT profile for aggregator lookup:', err);
+    }
+  }
+
   return {
     brandId: normalized.brandId,
-    tenantId: normalized.tenantId || normalized.brandId, // Fallback to brandId as its own tenant
+    tenantId: normalized.tenantId || normalized.brandId,
+    tenantBrandIds,
     keyId: normalized.keyId,
     rateLimit: normalized.rateLimit,
     scopes: normalized.scopes,
     isSandbox: normalized.isSandbox,
+    isAggregator,
   };
 }
 
@@ -417,7 +445,9 @@ function asScopeArray(value: unknown): ApiKeyScope[] | null {
 function deriveBrandId(pK: unknown): string | null {
   if (typeof pK !== 'string') return null;
   if (pK.startsWith('BRAND#')) return pK.slice('BRAND#'.length);
-  if (pK.startsWith('TENANT#')) return 'GLOBAL'; // Placeholder for tenant-wide keys
+  // For TENANT# (aggregator) keys, brandId is set to the tenantId at runtime
+  // so the scan handler can differentiate; actual per-scan brand comes from the request body.
+  if (pK.startsWith('TENANT#')) return pK.slice('TENANT#'.length);
   return null;
 }
 

@@ -519,6 +519,10 @@ const webhookQueue = new sqs.Queue(infraStack, 'WebhookReliabilityQueue', {
 });
 createDlqAlarm(webhookDLQ, 'WebhookReliabilityDLQ');
 
+// Wire cardManagerLambda to webhookQueue (declared here — must come after queue is created)
+grantSqsAccess(cardManagerLambda, webhookQueue, ['sqs:SendMessage']);
+cardManagerLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
+
 const webhookDispatcherLambda = backend.webhookDispatcherFn.resources.lambda as lambda.Function;
 webhookDispatcherLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
 new lambda.EventSourceMapping(mappingStack, 'WebhookDispatcherSQSSource', {
@@ -633,6 +637,8 @@ const consentTimeoutQueue = new sqs.Queue(infraStack, 'ConsentTimeoutQueue', {
 });
 consentLambda.addEnvironment('CONSENT_TIMEOUT_QUEUE_URL', consentTimeoutQueue.queueUrl);
 grantSqsAccess(consentLambda, consentTimeoutQueue, ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
+grantSqsAccess(consentLambda, webhookQueue, ['sqs:SendMessage']);
+consentLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 new lambda.EventSourceMapping(mappingStack, 'ConsentHandlerSQSSource', {
   target: consentLambda,
   eventSourceArn: consentTimeoutQueue.queueArn,
@@ -662,6 +668,8 @@ const paymentTimeoutQueue = new sqs.Queue(infraStack, 'PaymentTimeoutQueue', {
 });
 paymentRouterLambda.addEnvironment('TIMEOUT_QUEUE_URL', paymentTimeoutQueue.queueUrl);
 grantSqsAccess(paymentRouterLambda, paymentTimeoutQueue, ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']);
+grantSqsAccess(paymentRouterLambda, webhookQueue, ['sqs:SendMessage']);
+paymentRouterLambda.addEnvironment('WEBHOOK_QUEUE_URL', webhookQueue.queueUrl);
 new lambda.EventSourceMapping(mappingStack, 'PaymentRouterSQSSource', {
   target: paymentRouterLambda,
   eventSourceArn: paymentTimeoutQueue.queueArn,
@@ -1237,7 +1245,6 @@ Tags.of(customSegmentLambda).add('CostCenter', 'tenant-side');
 // ── Affiliate Feed Sync (Nightly at 05:00 UTC) ──
 const affiliateSyncLambda = backend.affiliateFeedSyncFn.resources.lambda as lambda.Function;
 affiliateSyncLambda.addEnvironment('REFDATA_TABLE_PARAM', refDataTableParamName);
-affiliateSyncLambda.addEnvironment('REFDATA_TABLE', refDataTable.tableName);
 grantTableAccess(affiliateSyncLambda, 'RefDataEvent', true);
 affiliateSyncLambda.addToRolePolicy(new iam.PolicyStatement({
   actions: ['secretsmanager:GetSecretValue'],
@@ -1642,10 +1649,14 @@ Tags.of(schedulerLambda).add('CostCenter', 'engagement');
 //      → Set as CLOUDFRONT_CERT_ARN in Amplify app environment variables.
 //   3. After first deploy outputs the NS records, update your domain registrar
 //      to point bebocard.com to the Route 53 hosted zone nameservers.
-if (stage === 'prod') {
-  const apexDomain = 'bebocard.com';
-  const apiCertArn = process.env.API_CERT_ARN;
-  const cfCertArn = process.env.CLOUDFRONT_CERT_ARN;
+const apiCertArn = process.env.API_CERT_ARN;
+const cfCertArn = process.env.CLOUDFRONT_CERT_ARN;
+
+// Create custom domains if either certificate ARN is provided (typically in CI/CD branches)
+if (apiCertArn || cfCertArn) {
+  const isProd = stage === 'prod';
+  // Prod uses bebocard.com. Other branches use branch.bebocard.com (e.g. dev.bebocard.com)
+  const apexDomain = isProd ? 'bebocard.com' : `${amplifyBranch}.bebocard.com`;
 
   const hostedZone = new route53.PublicHostedZone(infraStack, 'BeboCardHostedZone', {
     zoneName: apexDomain,
@@ -1653,7 +1664,7 @@ if (stage === 'prod') {
 
   new CfnOutput(infraStack, 'HostedZoneNameServers', {
     value: Fn.join(',', hostedZone.hostedZoneNameServers ?? []),
-    description: 'Copy all 4 NS values to your domain registrar for bebocard.com',
+    description: `Copy all 4 NS values to your domain registrar for ${apexDomain}`,
   });
 
   if (apiCertArn) {

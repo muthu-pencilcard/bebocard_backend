@@ -6,9 +6,9 @@ export const tenantLinker = defineFunction({
   entry: './handler.ts',
   environment: {
     // API base — update with your actual API Gateway URL after deploy
-    API_BASE_URL: 'https://api.bebocard.app',
-    APP_SUCCESS_URL: 'https://bebocard.app/link-success',
-    APP_FAILURE_URL: 'https://bebocard.app/link-failed',
+    API_BASE_URL: 'https://api.bebocard.com',
+    APP_SUCCESS_URL: 'https://bebocard.com/link-success',
+    APP_FAILURE_URL: 'https://bebocard.com/link-failed',
     OAUTH_STATE_TTL_SECONDS: '600',
     // Brand OAuth credentials — set via `amplify secret set` or SSM
     // WOOLWORTHS_CLIENT_ID, WOOLWORTHS_CLIENT_SECRET

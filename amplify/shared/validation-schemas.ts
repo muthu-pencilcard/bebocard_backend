@@ -34,6 +34,8 @@ export const OfferInputSchema = z.object({
   status:         z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'PAUSED', 'EXPIRED', 'ARCHIVED']).default('DRAFT'),
   scheduledFor:   z.string().datetime().optional().nullable(),
   campaignType:   z.enum(['untargeted', 'acquisition', 'loyalty_reward', 're_engagement', 'seasonal', 'clearance']).default('untargeted'),
+  isFeatured:     z.boolean().optional().nullable(),
+  featuredLabel:  safeText(60).optional().nullable(),
 }).refine((d: { validFrom: string; validTo: string }) => d.validTo >= d.validFrom, { message: 'validTo must be on or after validFrom' });
 
 export const NewsletterInputSchema = z.object({

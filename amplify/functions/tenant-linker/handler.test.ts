@@ -65,9 +65,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.USER_TABLE  = 'test-user-table';
   process.env.ADMIN_TABLE = 'test-admin-table';
-  process.env.API_BASE_URL = 'https://api.bebocard.app';
-  process.env.APP_SUCCESS_URL = 'https://bebocard.app/link-success';
-  process.env.APP_FAILURE_URL = 'https://bebocard.app/link-failed';
+  process.env.API_BASE_URL = 'https://api.bebocard.com';
+  process.env.APP_SUCCESS_URL = 'https://bebocard.com/link-success';
+  process.env.APP_FAILURE_URL = 'https://bebocard.com/link-failed';
   process.env.WOOLWORTHS_CLIENT_ID = 'ww-client-id';
   process.env.WOOLWORTHS_CLIENT_SECRET = 'ww-client-secret';
   process.env.FLYBUYS_CLIENT_ID = 'fb-client-id';

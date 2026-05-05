@@ -63,21 +63,13 @@ vi.mock('../../shared/audit-logger', () => ({
   withAuditLog: vi.fn((_ddb: unknown, h: unknown) => h),
 }));
 
-vi.mock('https', () => ({
-  default: {
-    request: vi.fn((_url: unknown, _opts: unknown, cb: (res: { statusCode: number; resume: () => void; on: (e: string, fn: () => void) => void }) => void) => {
-      cb({ statusCode: 200, resume: vi.fn(), on: vi.fn((e: string, fn: () => void) => { if (e === 'end') fn(); }) });
-      return { on: vi.fn(), write: vi.fn(), end: vi.fn(), setTimeout: vi.fn() };
-    }),
-  },
-}));
-
 // ── Set env vars before importing handler (top-level consts are captured at import time) ──
 
 process.env.ADMIN_TABLE = 'admin-table';
 process.env.USER_TABLE = 'user-table';
 process.env.REF_TABLE = 'ref-table';
 process.env.CONSENT_TIMEOUT_QUEUE_URL = 'https://sqs.example.com/consent-queue';
+process.env.WEBHOOK_QUEUE_URL = 'https://sqs.example.com/webhook-queue';
 process.env.FIREBASE_SERVICE_ACCOUNT_JSON = JSON.stringify({ project_id: 'test' });
 
 // ── Import handler AFTER all mocks ────────────────────────────────────────────
@@ -200,6 +192,18 @@ describe('POST /consent-request — validation', () => {
       body: JSON.stringify({ secondaryULID: 'SEC001', requestedFields: ['email', 'ssn'], purpose: 'test' }),
     })) as { statusCode: number };
     expect(res.statusCode).toBe(400);
+  });
+
+  it('accepts alias-style fields used by scan-time consent prompts', async () => {
+    setupSuccessMocks();
+    const res = await handler(makeApiEvent({
+      body: JSON.stringify({
+        secondaryULID: 'SEC001',
+        requestedFields: ['email_alias', 'first_name'],
+        purpose: 'Scan-time identity release',
+      }),
+    })) as { statusCode: number };
+    expect(res.statusCode).toBe(202);
   });
 
   it('returns 404 if secondaryULID is not found', async () => {
@@ -371,7 +375,7 @@ describe('SQS timeout handler', () => {
         return Promise.resolve({
           Item: {
             status: 'PENDING',
-            desc: JSON.stringify({ brandWebhookUrl: 'https://example.com/webhook' }),
+            desc: JSON.stringify({ brandId: 'test-brand' }),
           },
         });
       }
@@ -385,6 +389,11 @@ describe('SQS timeout handler', () => {
       ExpressionAttributeValues: Record<string, string>;
     };
     expect(updateInput.ExpressionAttributeValues[':s']).toBe('TIMEOUT');
+    // Webhook enqueued via SQS
+    expect(mockSqsSend).toHaveBeenCalled();
+    const sqsBody = JSON.parse(mockSqsSend.mock.calls[0][0].input.MessageBody) as { brandId: string; type: string };
+    expect(sqsBody.brandId).toBe('test-brand');
+    expect(sqsBody.type).toBe('CONSENT_TIMEOUT');
   });
 
   it('is a no-op if consent record is already resolved', async () => {

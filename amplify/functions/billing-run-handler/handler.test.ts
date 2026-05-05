@@ -4,8 +4,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { mockDdbSend, mockSesSend, mockFetch } = vi.hoisted(() => {
   process.env.REFDATA_TABLE = 'MOCK_REFDATA';
+  process.env.USER_TABLE = 'MOCK_USER';
   process.env.STRIPE_SECRET_KEY = 'sk_test_mock';
-  process.env.FROM_EMAIL = 'billing@bebocard.com.au';
+  process.env.FROM_EMAIL = 'billing@bebocard.com';
   return {
     mockDdbSend: vi.fn(),
     mockSesSend: vi.fn(),
@@ -40,12 +41,12 @@ import { handler } from './handler';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const PREV_MONTH = (() => {
+function getPrevMonth() {
   const d = new Date();
   d.setDate(1);
   d.setMonth(d.getMonth() - 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-})();
+}
 
 const ALL_USAGE_TYPES = ['offers', 'newsletters', 'catalogues', 'invoices', 'geolocation', 'payments', 'consent'];
 
@@ -83,8 +84,17 @@ function mockSingleTenantRun(
   alreadyInvoiced = false,
 ) {
   mockDdbSend.mockImplementation((cmd: any) => {
-    if (cmd.input?.FilterExpression?.includes('primaryCat')) {
+    if (
+      cmd.input?.TableName === 'MOCK_REFDATA' &&
+      cmd.input?.FilterExpression?.includes('primaryCat = :cat AND sK = :sk')
+    ) {
       return Promise.resolve({ Items: [tenantItem], LastEvaluatedKey: undefined });
+    }
+    if (
+      cmd.input?.TableName === process.env.USER_TABLE &&
+      cmd.input?.FilterExpression?.includes('primaryCat = :cat AND #status = :pending')
+    ) {
+      return Promise.resolve({ Items: [], LastEvaluatedKey: undefined });
     }
     if (cmd.input?.Key?.sK?.startsWith('BILLING_RUN')) {
       return Promise.resolve(
@@ -142,7 +152,7 @@ describe('billing-run-handler', () => {
     expect(mockFetch).not.toHaveBeenCalled();
 
     const putCalls = mockDdbSend.mock.calls.filter(
-      (c: any) => c[0]?.input?.Item?.sK === `BILLING_RUN#${PREV_MONTH}`,
+      (c: any) => c[0]?.input?.Item?.sK === `BILLING_RUN#${getPrevMonth()}`,
     );
     expect(putCalls).toHaveLength(1);
     const savedDesc = JSON.parse(putCalls[0][0].input.Item.desc);
@@ -172,7 +182,7 @@ describe('billing-run-handler', () => {
     expect(stripeUrl).toBe('https://api.stripe.com/v1/invoiceitems');
 
     const putCalls = mockDdbSend.mock.calls.filter(
-      (c: any) => c[0]?.input?.Item?.sK === `BILLING_RUN#${PREV_MONTH}`,
+      (c: any) => c[0]?.input?.Item?.sK === `BILLING_RUN#${getPrevMonth()}`,
     );
     const savedDesc = JSON.parse(putCalls[0][0].input.Item.desc);
     expect(savedDesc.status).toBe('INVOICED');

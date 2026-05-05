@@ -229,7 +229,7 @@ When a user is logged into the brand's website and clicks "Link to BeboCard":
 
 ```
 1. Brand redirects to:
-   https://api.bebocard.com.au/auth/link/<brandId>?scope=subscriptions&permULID=<X>&authToken=<Y>
+   https://api.bebocard.com/auth/link/<brandId>?scope=subscriptions&permULID=<X>&authToken=<Y>
 
 2. tenant-linker Lambda (scope=subscriptions):
    - verifyAuthToken(authToken, permULID) via Cognito GetUser

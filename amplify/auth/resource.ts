@@ -32,11 +32,11 @@ export const auth = defineAuth({
       },
       callbackUrls: [
         'bebocard://callback/',
-        'https://bebocard.com.au/callback/',
+        'https://bebocard.com/callback/',
       ],
       logoutUrls: [
         'bebocard://signout/',
-        'https://bebocard.com.au/signout/',
+        'https://bebocard.com/signout/',
       ],
     },
   },

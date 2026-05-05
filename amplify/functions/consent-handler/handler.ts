@@ -38,7 +38,6 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { validateApiKey, extractApiKey } from '../../shared/api-key-auth';
 import { withAuditLog } from '../../shared/audit-logger';
 import { ConsentRequestSchema } from '../../shared/validation-schemas';
-import https from 'https';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const sqs    = new SQSClient({});
@@ -47,10 +46,11 @@ const ADMIN_TABLE              = process.env.ADMIN_TABLE!;
 const USER_TABLE               = process.env.USER_TABLE!;
 const REF_TABLE                = process.env.REF_TABLE!;
 const CONSENT_TIMEOUT_QUEUE_URL = process.env.CONSENT_TIMEOUT_QUEUE_URL!;
+const WEBHOOK_QUEUE_URL         = process.env.WEBHOOK_QUEUE_URL;
 const CONSENT_TTL_SECS         = 60;
 
 // Fields a brand is permitted to request. Extend as Phase 6 expands.
-const ALLOWED_FIELDS = ['email', 'phone', 'firstName', 'lastName', 'address', 'dateOfBirth'] as const;
+const ALLOWED_FIELDS = ['email', 'phone', 'firstName', 'lastName', 'address', 'dateOfBirth', 'email_alias', 'phone_alias', 'first_name', 'last_name', 'date_of_birth'] as const;
 type ConsentField = typeof ALLOWED_FIELDS[number];
 
 const CORS = {
@@ -279,8 +279,8 @@ async function processTimeout(requestId: string, permULID: string) {
     ConditionExpression: '#s = :pending',
   }));
 
-  if (desc.brandWebhookUrl) {
-    await postWebhook(desc.brandWebhookUrl, { requestId, status: 'TIMEOUT' });
+  if (desc.brandId) {
+    await enqueueWebhook(desc.brandId, 'CONSENT_TIMEOUT', { requestId, status: 'TIMEOUT' });
   }
 
   console.info(`[consent-handler] Consent request ${requestId} timed out`);
@@ -306,27 +306,13 @@ async function getDeviceToken(permULID: string): Promise<string | null> {
   return (JSON.parse(res.Item?.desc ?? '{}') as { token?: string }).token ?? null;
 }
 
-function postWebhook(url: string, payload: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(payload);
-    try {
-      const req = https.request(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      }, (res) => {
-        res.resume();
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Webhook returned HTTP ${res.statusCode}`));
-          }
-        });
-      });
-      req.on('error', (e) => { console.error('[consent-handler] webhook error', e.message); reject(e); });
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error('Webhook timeout')); });
-      req.write(body);
-      req.end();
-    } catch (e) { console.error('[consent-handler] webhook error', e); reject(e as Error); }
-  });
+async function enqueueWebhook(brandId: string, type: string, data: unknown): Promise<void> {
+  if (!WEBHOOK_QUEUE_URL) {
+    console.warn('[consent-handler] WEBHOOK_QUEUE_URL not set — skipping webhook');
+    return;
+  }
+  await sqs.send(new SendMessageCommand({
+    QueueUrl: WEBHOOK_QUEUE_URL,
+    MessageBody: JSON.stringify({ brandId, type, data }),
+  }));
 }

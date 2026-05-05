@@ -4,7 +4,7 @@ import { createHmac } from 'crypto';
 const { mockSend } = vi.hoisted(() => {
   process.env.REFDATA_TABLE = 'RefDataEvent-test';
   process.env.INTERNAL_SIGNING_SECRET = 'test-signing-secret';
-  process.env.PORTAL_ORIGIN = 'https://business.bebocard.com.au';
+  process.env.PORTAL_ORIGIN = 'https://business.bebocard.com';
   return { mockSend: vi.fn() };
 });
 
@@ -44,7 +44,7 @@ function makeEvent(
   return {
     httpMethod: method,
     path,
-    headers: { origin: 'https://business.bebocard.com.au' },
+    headers: { origin: 'https://business.bebocard.com' },
     body: body !== null ? JSON.stringify(body) : null,
     _internalActorEmail: email,
     _internalTimestamp: timestamp,
@@ -56,7 +56,7 @@ function makeUnauthEvent(method: string, path: string, body: unknown = null): AP
   return {
     httpMethod: method,
     path,
-    headers: { origin: 'https://business.bebocard.com.au' },
+    headers: { origin: 'https://business.bebocard.com' },
     body: body !== null ? JSON.stringify(body) : null,
     _internalActorEmail: '',
     _internalTimestamp: '',
@@ -111,7 +111,7 @@ describe('HMAC auth', () => {
 
 describe('OPTIONS preflight', () => {
   it('returns 200 with CORS headers', async () => {
-    const event = { httpMethod: 'OPTIONS', path: '/templates', headers: { origin: 'https://business.bebocard.com.au' } } as unknown as APIGatewayProxyEvent;
+    const event = { httpMethod: 'OPTIONS', path: '/templates', headers: { origin: 'https://business.bebocard.com' } } as unknown as APIGatewayProxyEvent;
     const res = await handler(event, {} as any, {} as any);
     expect(res?.statusCode).toBe(200);
     expect(res?.headers?.['Access-Control-Allow-Methods']).toContain('POST');

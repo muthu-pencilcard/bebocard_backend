@@ -74,7 +74,7 @@ async function seed() {
         permULID,
         cognitoUserId,
         displayName: 'Alex Chen',
-        email: 'alex.chen@testuser.bebocard.com.au',
+        email: 'alex.chen@testuser.bebocard.com',
         createdAt: now,
       }),
       createdAt: now,
@@ -402,9 +402,9 @@ async function seed() {
         supportsReceipts: true,
         barcodeType:     'QR',
         tenantId,
-        website:         'https://democafe.bebocard.com.au',
+        website:         'https://democafe.bebocard.com',
         description:     'A demonstration brand account for BeboCard onboarding and testing.',
-        allowedWidgetDomains: ['https://democafe.bebocard.com.au', 'http://localhost:3000'],
+        allowedWidgetDomains: ['https://democafe.bebocard.com', 'http://localhost:3000'],
         widgetActions:   { invoice: true, giftCard: true },
       }),
       createdAt: now,
@@ -430,8 +430,8 @@ async function seed() {
         brandIds:                [brandId],
         status:                  'ACTIVE',
         billingStatus:           'ACTIVE',
-        contactEmail:            'admin@democafe.bebocard.com.au',
-        billingEmail:            'billing@democafe.bebocard.com.au',
+        contactEmail:            'admin@democafe.bebocard.com',
+        billingEmail:            'billing@democafe.bebocard.com',
         includedEventsPerMonth:  2500,
         monthlyFeeAud:           null,               // Stripe not connected in test
         stripeCustomerId:        null,
@@ -439,7 +439,7 @@ async function seed() {
         tierStartDate:           now,
         scheduledTier:           null,
         scheduledTierEffectiveMonth: null,
-        allowedWidgetDomains:    ['https://democafe.bebocard.com.au', 'http://localhost:3000'],
+        allowedWidgetDomains:    ['https://democafe.bebocard.com', 'http://localhost:3000'],
         widgetActions:           { invoice: true, giftCard: true },
         createdAt:               now,
       }),
@@ -450,7 +450,7 @@ async function seed() {
   console.log(`[tenant] tenant profile written  TENANT#${tenantId}`);
 
   // ── Portal membership — tenant admin (RefDataEvent) ──────────────────────
-  const adminEmail = 'demo-admin@democafe.bebocard.com.au';
+  const adminEmail = 'demo-admin@democafe.bebocard.com';
   await dynamo.send(new PutCommand({
     TableName: REFDATA_TABLE,
     Item: {
@@ -475,7 +475,7 @@ async function seed() {
   }));
 
   // ── Portal membership — brand editor (RefDataEvent) ───────────────────────
-  const editorEmail = 'demo-editor@democafe.bebocard.com.au';
+  const editorEmail = 'demo-editor@democafe.bebocard.com';
   await dynamo.send(new PutCommand({
     TableName: REFDATA_TABLE,
     Item: {
@@ -694,7 +694,7 @@ async function seed() {
   console.log('════════════════════════════════════════════════════════════');
   console.log('\n── Consumer test account ──────────────────────────────────');
   console.log(`  Name:           Alex Chen`);
-  console.log(`  Email:          alex.chen@testuser.bebocard.com.au`);
+  console.log(`  Email:          alex.chen@testuser.bebocard.com`);
   console.log(`  Cognito ID:     ${cognitoUserId}`);
   console.log(`  permULID:       ${permULID}`);
   console.log(`  secondaryULID:  ${secondaryULID}`);

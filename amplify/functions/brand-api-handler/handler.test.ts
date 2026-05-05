@@ -65,7 +65,7 @@ describe('brand-api-handler - unit tests', () => {
         };
 
         const result: any = await handler(event, {} as any, () => { });
-        expect(result.headers['Access-Control-Allow-Origin']).toBe('https://business.bebocard.com.au');
+        expect(result.headers['Access-Control-Allow-Origin']).toBe('https://business.bebocard.com');
     });
 
     it('rejects forbidden origins', async () => {
@@ -77,7 +77,7 @@ describe('brand-api-handler - unit tests', () => {
 
         const result: any = await handler(event, {} as any, () => { });
         // Should fallback to main production domain if origin not in allow-list
-        expect(result.headers['Access-Control-Allow-Origin']).toBe('https://business.bebocard.com.au');
+        expect(result.headers['Access-Control-Allow-Origin']).toBe('https://business.bebocard.com');
     });
 
     it('handles GET /offers and returns mapped items', async () => {

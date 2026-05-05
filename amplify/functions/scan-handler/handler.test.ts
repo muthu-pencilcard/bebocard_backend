@@ -491,6 +491,13 @@ describe('POST /v1/scan — consent-gated identity release', () => {
     expect(body.consentRequired).toBe(true);
     expect(body.requestId).toBeDefined();
     expect(body.attributes).toBeUndefined();
+    const consentQueryCall = mockDdbSend.mock.calls.find(
+      ([cmd]: any[]) => cmd.__type === 'QueryCommand' && cmd.input?.IndexName === 'GSI1',
+    );
+    expect(consentQueryCall?.[0].input.ExpressionAttributeValues).toEqual({
+      ':bpk': `CONSENT#${BRAND_ID}`,
+      ':bsk': PERM_ULID,
+    });
   });
 
   it('returns releasedAttributes and marks consent CONSUMED when active consent exists', async () => {

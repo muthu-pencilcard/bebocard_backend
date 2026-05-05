@@ -78,39 +78,18 @@ describe('affiliate-feed-sync handler', () => {
     });
   });
 
-  describe('mock sync fallback (no AFFILIATE_API_KEY)', () => {
-    it('writes 7 mock offers to DynamoDB when no API key is set', async () => {
-      mockDdbSend.mockResolvedValue({});
-
+  describe('no-API-key path (no AFFILIATE_API_KEY)', () => {
+    it('returns count 0 and writes nothing to DynamoDB when no API key is set', async () => {
       const result = await handler({} as never, {} as never, () => {});
       const res = result as { statusCode: number; body: string };
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.count).toBe(7);
+      expect(body.count).toBe(0);
 
-      const batchCalls = mockDdbSend.mock.calls as [{ __type: string; input: Record<string, unknown> }][];
-      const writeCalls = batchCalls.filter(([cmd]) => cmd.__type === 'BatchWriteCommand');
-      expect(writeCalls.length).toBeGreaterThan(0);
-
-      // All items should use the SSM-resolved table name
-      const firstCall = writeCalls[0][0].input as { RequestItems: Record<string, unknown[]> };
-      expect(Object.keys(firstCall.RequestItems)[0]).toBe('RefDataEvent-test');
-    });
-
-    it('mock offers have correct schema fields', async () => {
-      mockDdbSend.mockResolvedValue({});
-      await handler({} as never, {} as never, () => {});
-
-      const batchCalls = mockDdbSend.mock.calls as [{ __type: string; input: { RequestItems: Record<string, { PutRequest: { Item: Record<string, unknown> } }[]> } }][];
-      const firstBatch = batchCalls.find(([cmd]) => cmd.__type === 'BatchWriteCommand')!;
-      const item = firstBatch[0].input.RequestItems['RefDataEvent-test'][0].PutRequest.Item;
-
-      expect(item.pK).toMatch(/^BEBO_OFFER#CF_/);
-      expect(item.sK).toBe('offer');
-      expect(item.eventType).toBe('AFFILIATE_OFFER');
-      expect(item.primaryCat).toBe('curated_offer');
-      expect(item.status).toBe('ACTIVE');
+      // No DynamoDB writes
+      const batchCalls = mockDdbSend.mock.calls as [{ __type: string }][];
+      expect(batchCalls.some(([cmd]) => cmd.__type === 'BatchWriteCommand')).toBe(false);
     });
   });
 

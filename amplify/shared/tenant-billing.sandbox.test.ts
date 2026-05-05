@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   ALL_USAGE_TYPES,
   getCategoryOverageRate,
+  getTenantStateForBrand,
   parseTenantIncludedEvents,
   normalizeTenantTier,
   TIER_INCLUDED_EVENTS,
@@ -187,6 +188,36 @@ describe('Tenant Billing — Unit Tests', () => {
 
       expect(result.allowed).toBe(true);
       expect(dummyDynamo.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getTenantStateForBrand', () => {
+    it('reads the tenant profile from the lowercase profile sort key', async () => {
+      const sendMock = dummyDynamo.send as any;
+      sendMock
+        .mockResolvedValueOnce({
+          Item: {
+            desc: JSON.stringify({ tenantId: 'tenant-1' }),
+          },
+        })
+        .mockResolvedValueOnce({
+          Item: {
+            status: 'ACTIVE',
+            desc: JSON.stringify({ tier: 'engagement', billingStatus: 'ACTIVE', includedEventsPerMonth: 2500 }),
+          },
+        });
+
+      const result = await getTenantStateForBrand(dummyDynamo, 'TABLE', 'woolworths');
+
+      expect(result).toMatchObject({
+        tenantId: 'tenant-1',
+        tier: 'engagement',
+        active: true,
+        includedEventsPerMonth: 2500,
+      });
+      expect(sendMock.mock.calls[1]?.[0]?.input).toMatchObject({
+        Key: { pK: 'TENANT#tenant-1', sK: 'profile' },
+      });
     });
   });
 });
