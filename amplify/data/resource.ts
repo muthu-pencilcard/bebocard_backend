@@ -395,6 +395,16 @@ const schema = a.schema({
     .handler(a.handler.function(cardManagerFn))
     .authorization(allow => [allow.authenticated()]),
 
+  // Loyalty registration proxy — user taps "Join" in the marketplace.
+  // BeboCard reads the user's stored identity fields, sends them to the brand's
+  // registration API, receives a real loyalty card number, and writes the card
+  // to UserDataEvent automatically. User never re-enters their details.
+  proxyRegisterLoyalty: a.mutation()
+    .arguments({ brandId: a.string().required() })
+    .returns(a.json())
+    .handler(a.handler.function(cardManagerFn))
+    .authorization(allow => [allow.authenticated()]),
+
   // ── Gift Card Marketplace (Patent Claims 72–74) ───────────────────────────────
   // User purchases a gift card from a brand's catalog.
   // Creates a pending order record; brand delivers via POST /gift-card/deliver.

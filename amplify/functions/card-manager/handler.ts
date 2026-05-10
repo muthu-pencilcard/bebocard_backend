@@ -3,7 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { createHash } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 import https from 'https';
 import { monotonicFactory } from 'ulid';
 import { withAuditLog, writeAuditLog } from '../../shared/audit-logger';
@@ -183,6 +183,7 @@ const _handler: AppSyncResolverHandler<Args, unknown> = async (event) => {
     // Enrollment marketplace
     case 'respondToEnrollment': return enrollmentRespondHandler(permULID, args.enrollmentId!, args.accepted!);
     case 'initiateEnrollment': return enrollmentInitiateHandler(permULID, owner, args.brandId!);
+    case 'proxyRegisterLoyalty': return proxyRegisterLoyalty(permULID, owner, args.brandId!);
     // SMB stamp cards (Phase 11)
     case 'getStampCard': return getStampCard(permULID, args.stampBrandId!);
     case 'listStampCards': return listStampCards(permULID);
@@ -1633,6 +1634,164 @@ async function enrollmentInitiateHandler(permULID: string, owner: string, brandI
   }));
 
   return { ok: true, enrollmentId, alias };
+}
+
+// ── Proxy Registration (Marketplace → Brand API → Wallet) ────────────────────
+// Reads user's stored identity, maps it to the brand's required fields, calls
+// the brand's registration API, and writes the returned card number to the wallet.
+// The user never re-enters their details — BeboCard acts as the registration agent.
+
+async function proxyRegisterLoyalty(permULID: string, owner: string, brandId: string) {
+  // 1. Load brand profile — must have registrationApiUrl to proceed
+  const brandRef = await dynamo.send(new GetCommand({
+    TableName: REFDATA_TABLE,
+    Key: { pK: `BRAND#${brandId}`, sK: 'PROFILE' },
+  }));
+  if (!brandRef.Item) throw new Error('Brand not found');
+  const brandDesc = parseRecord(brandRef.Item.desc);
+
+  const registrationApiUrl = brandDesc.registrationApiUrl as string | undefined;
+  if (!registrationApiUrl) throw new Error('Brand does not support API registration');
+
+  const registrationFields = (brandDesc.registrationFields as string[] | undefined) ?? [];
+  const cardNumberPath = (brandDesc.registrationCardNumberPath as string | undefined) ?? 'cardNumber';
+  const registrationApiSecret = brandDesc.registrationApiSecret as string | undefined;
+
+  // 2. Load user identity — same record used by consent flow
+  const identityRes = await dynamo.send(new GetCommand({
+    TableName: USER_TABLE,
+    Key: { pK: `USER#${permULID}`, sK: 'IDENTITY' },
+  }));
+  if (!identityRes.Item) throw new Error('User identity not found');
+  const identityDesc = parseRecord(identityRes.Item.desc);
+
+  // 3. Map identity fields to brand's required field names (reuses consent resolver)
+  const registrationPayload: Record<string, string> = {};
+  for (const field of registrationFields) {
+    const value = resolveConsentFieldValue(identityDesc, permULID, field);
+    if (value != null) registrationPayload[field] = value;
+  }
+
+  // 4. POST to brand API — HMAC-signed if brand supplied a secret
+  const bodyStr = JSON.stringify(registrationPayload);
+  const timestamp = new Date().toISOString();
+  const headers: Record<string, string | number> = {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(bodyStr),
+    'X-BeboCard-Timestamp': timestamp,
+  };
+  if (registrationApiSecret) {
+    headers['X-BeboCard-Signature'] = createHmac('sha256', registrationApiSecret)
+      .update(timestamp + bodyStr)
+      .digest('hex');
+  }
+
+  let responseBody = '';
+  let statusCode = 0;
+
+  await new Promise<void>((resolve, reject) => {
+    const url = new URL(registrationApiUrl);
+    const req = https.request({
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers,
+    }, (res) => {
+      statusCode = res.statusCode ?? 0;
+      res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
+      res.on('end', resolve);
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error(`Brand registration API returned HTTP ${statusCode}`);
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(responseBody) as Record<string, unknown>;
+  } catch {
+    throw new Error('Brand registration API returned non-JSON response');
+  }
+
+  // 5. Extract card number from response using configured dot-path (e.g. "data.cardNumber")
+  const cardNumber = _dotPath(parsed, cardNumberPath);
+  if (!cardNumber) {
+    throw new Error(`Card number not found at path "${cardNumberPath}" in brand registration response`);
+  }
+
+  const brandName = String(brandDesc.name ?? brandDesc.brandName ?? brandId);
+
+  // 6. Write card to wallet — identical to addCard but skips schema validation overhead
+  const now = new Date().toISOString();
+  const cardSK = `CARD#${brandId}#${cardNumber}`;
+
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: USER_TABLE,
+      Item: {
+        pK: `USER#${permULID}`,
+        sK: cardSK,
+        eventType: 'CARD',
+        status: 'ACTIVE',
+        primaryCat: 'loyalty_card',
+        subCategory: brandId,
+        owner,
+        desc: JSON.stringify({
+          brandId,
+          brandName,
+          brandColor: brandDesc.color ?? brandDesc.brandColor ?? '#0F766E',
+          cardNumber,
+          cardLabel: brandName,
+          isCustom: false,
+          barcodeType: brandDesc.barcodeType ?? 'EAN13',
+          pointsBalance: 0,
+          addedAt: now,
+          storeId: null,
+          attributionBrandId: null,
+          pointsExpiryDate: null,
+          registeredViaProxy: true,
+        }),
+        expiryDate: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      ConditionExpression: 'attribute_not_exists(pK)',
+    }));
+  } catch (err: unknown) {
+    const e = err as { name?: string };
+    if (e.name === 'ConditionalCheckFailedException') {
+      throw new Error('A card for this brand is already linked to your account');
+    }
+    throw err;
+  }
+
+  await _appendToScanIndex(permULID, { brand: brandId, cardId: cardNumber, cardSK });
+  await updateGranularSubscription(permULID, owner, brandId, { offers: true, reminders: true });
+
+  writeAuditLog(dynamo, {
+    actor: brandId,
+    actorType: 'brand',
+    action: 'loyalty.proxy_registered',
+    resource: cardSK,
+    outcome: 'success',
+    metadata: { source: 'marketplace_proxy' },
+  }).catch(() => {});
+
+  return { cardNumber, cardSK, brandName };
+}
+
+function _dotPath(obj: Record<string, unknown>, path: string): string | undefined {
+  let current: unknown = obj;
+  for (const part of path.split('.')) {
+    if (typeof current !== 'object' || current === null) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current != null ? String(current) : undefined;
 }
 
 // ── SMB Stamp Cards (Phase 11) ────────────────────────────────────────────────
