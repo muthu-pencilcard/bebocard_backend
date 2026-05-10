@@ -713,6 +713,21 @@ async function getStripeSecretKey(): Promise<string> {
   }
 }
 
+// Per-brand registration secrets — keyed by SSM param name, 5-min TTL cache
+const _brandSecretCache = new Map<string, { value: string; fetchedAt: number }>();
+async function _getBrandRegistrationSecret(paramName: string): Promise<string | undefined> {
+  const cached = _brandSecretCache.get(paramName);
+  if (cached && Date.now() - cached.fetchedAt < 5 * 60 * 1000) return cached.value;
+  try {
+    const res = await ssm.send(new GetParameterCommand({ Name: paramName, WithDecryption: true }));
+    const value = res.Parameter?.Value ?? '';
+    _brandSecretCache.set(paramName, { value, fetchedAt: Date.now() });
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
 async function stripeRequest(
   secretKey: string,
   method: string,
@@ -1655,7 +1670,9 @@ async function proxyRegisterLoyalty(permULID: string, owner: string, brandId: st
 
   const registrationFields = (brandDesc.registrationFields as string[] | undefined) ?? [];
   const cardNumberPath = (brandDesc.registrationCardNumberPath as string | undefined) ?? 'cardNumber';
-  const registrationApiSecret = brandDesc.registrationApiSecret as string | undefined;
+  // Secret lives in SSM SecureString — never in DynamoDB
+  const secretParam = brandDesc.registrationApiSecretParam as string | undefined;
+  const registrationApiSecret = secretParam ? await _getBrandRegistrationSecret(secretParam) : undefined;
 
   // 2. Load user identity — same record used by consent flow
   const identityRes = await dynamo.send(new GetCommand({
